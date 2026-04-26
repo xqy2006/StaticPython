@@ -258,6 +258,7 @@ print(json.dumps(results, ensure_ascii=False, sort_keys=True))
 
 
 THIRD_PARTY_SMOKE = r"""
+import asyncio
 import importlib.resources
 import io
 import json
@@ -381,6 +382,62 @@ def _():
 
     must(anyio.run(probe) == "asyncio", "anyio/sniffio failed")
     must(async_to_sync(add)(2, 3) == 5, "asgiref failed")
+
+
+@check("async_web_stack")
+def _():
+    import aiohappyeyeballs
+    import aiohttp
+    import aiosignal
+    import frozenlist
+    import multidict
+    import propcache
+    import yarl
+    from aiohttp import web
+    from websockets.uri import parse_uri
+
+    must(aiohttp.ClientTimeout(total=5).total == 5, "aiohttp timeout failed")
+
+    async def handler(request):
+        return web.Response(text="ok")
+
+    app = web.Application()
+    route = app.router.add_get("/hello", handler)
+    must(route.method == "GET", "aiohttp route failed")
+
+    uri = parse_uri("wss://example.com/chat?q=1")
+    must(uri.secure and uri.host == "example.com", "websockets parse_uri failed")
+
+    frozen = frozenlist.FrozenList([1, 2])
+    frozen.freeze()
+    must(frozen.frozen and list(frozen) == [1, 2], "frozenlist failed")
+
+    values = multidict.MultiDict([("a", "1"), ("a", "2")])
+    must(values.getall("a") == ["1", "2"], "multidict failed")
+    must(str(yarl.URL("https://example.com") / "demo") == "https://example.com/demo", "yarl failed")
+    must(callable(aiohappyeyeballs.start_connection), "aiohappyeyeballs failed")
+
+    class Demo:
+        calls = 0
+
+        @propcache.cached_property
+        def value(self):
+            self.calls += 1
+            return self.calls
+
+    demo = Demo()
+    must(demo.value == 1 and demo.value == 1, "propcache cached_property failed")
+
+    signal = aiosignal.Signal(owner=None)
+    seen = []
+
+    async def receiver(*args, **kwargs):
+        seen.append((args, kwargs))
+
+    signal.append(receiver)
+    signal.freeze()
+    asyncio.run(signal.send("sender", value=1))
+    must(seen and seen[0][0] == ("sender",), "aiosignal failed")
 
 
 @check("attrs_stack")
@@ -511,6 +568,52 @@ def _():
     must(repr(Doc("demo")) == "Doc('demo')", "annotated_doc failed")
 
 
+@check("database_stack")
+def _():
+    import alembic
+    import sqlalchemy as sa
+    from alembic.config import Config
+    from mako.template import Template
+
+    engine = sa.create_engine("sqlite:///:memory:")
+    metadata = sa.MetaData()
+    demo = sa.Table(
+        "demo",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("name", sa.String),
+    )
+    metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(demo.insert().values(name="codex"))
+        value = connection.execute(sa.select(demo.c.name)).scalar_one()
+    must(value == "codex", "sqlalchemy sqlite roundtrip failed")
+
+    config = Config()
+    config.set_main_option("sqlalchemy.url", "sqlite:///:memory:")
+    must(config.get_main_option("sqlalchemy.url").startswith("sqlite"), "alembic config failed")
+    must(hasattr(alembic, "__version__"), "alembic import failed")
+    must(Template("hello ${name}").render(name="codex") == "hello codex", "mako failed")
+
+
+@check("serialization_stack")
+def _():
+    import msgpack
+    import yaml
+    from google.protobuf.struct_pb2 import Struct
+
+    must(yaml.safe_load("answer: 42\n") == {"answer": 42}, "PyYAML safe_load failed")
+    packed = msgpack.packb({"items": [1, 2, 3]}, use_bin_type=True)
+    must(msgpack.unpackb(packed, raw=False) == {"items": [1, 2, 3]}, "msgpack roundtrip failed")
+
+    payload = Struct()
+    payload["answer"] = 42
+    payload["name"] = "codex"
+    clone = Struct()
+    clone.ParseFromString(payload.SerializeToString())
+    must(clone["answer"] == 42 and clone["name"] == "codex", "protobuf roundtrip failed")
+
+
 @check("flask_stack")
 def _():
     from blinker import signal
@@ -574,10 +677,13 @@ def _():
 
 @check("io_stack")
 def _():
+    import os
     import et_xmlfile
     import openpyxl
+    import portalocker
     import pypdf
     import pyperclip
+    import tempfile
     import tzdata
     import win32_setctime
     import xlsxwriter
@@ -612,6 +718,16 @@ def _():
     must(isinstance(win32_setctime.SUPPORTED, bool), "win32_setctime failed")
     must(str(GUID("{00000000-0000-0000-C000-000000000046}")).startswith("{00000000"), "comtypes failed")
 
+    fd, lock_path = tempfile.mkstemp()
+    os.close(fd)
+    try:
+        with portalocker.Lock(lock_path, "w", timeout=1) as locked:
+            locked.write("locked")
+        with open(lock_path, encoding="utf-8") as lock_file:
+            must(lock_file.read() == "locked", "portalocker failed")
+    finally:
+        os.unlink(lock_path)
+
 
 @check("loguru_stack")
 def _():
@@ -624,6 +740,17 @@ def _():
     finally:
         logger.remove(handler_id)
     must("demo" in buffer.getvalue(), "loguru failed")
+
+
+@check("plotly_stack")
+def _():
+    import narwhals
+    import plotly.graph_objects as go
+
+    figure = go.Figure(data=[go.Bar(x=["a", "b"], y=[1, 2])])
+    payload = json.loads(figure.to_json())
+    must(payload["data"][0]["type"] == "bar", "plotly figure JSON failed")
+    must(callable(narwhals.from_native), "narwhals import failed")
 
 
 @check("libui_api")

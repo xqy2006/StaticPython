@@ -24,12 +24,15 @@ from libs import (
     collect_staged_static_libraries,
     collect_static_library_projects,
     load_integrations,
+    run_pre_build_hooks,
+    run_pre_patch_hooks,
     run_prepare_source_hooks,
     run_post_patch_hooks,
 )
 
 
 REPO_ROOT = Path(__file__).resolve().parent
+CORE_PATCH_ROOT = REPO_ROOT / "Core"
 LIB_PATCH_ROOT = REPO_ROOT / "Lib"
 ASSET_ROOT = REPO_ROOT / "assets" / "overlay"
 DOWNLOAD_ROOT = REPO_ROOT / "downloads"
@@ -37,14 +40,6 @@ WORK_CACHE_ROOT = REPO_ROOT / ".vendor-stage"
 MANIFEST_PATH = REPO_ROOT / "manifest.json"
 CONFIG_PATH = REPO_ROOT / "config.json"
 CPYTHON_ARCHIVE_URL_TEMPLATE = "https://github.com/python/cpython/archive/refs/tags/v{version}.zip"
-OPENSSL_ARCHIVE_URL_TEMPLATES = [
-    "https://github.com/openssl/openssl/archive/refs/tags/openssl-{version}.tar.gz",
-    "https://www.openssl.org/source/openssl-{version}.tar.gz",
-]
-LIBFFI_ARCHIVE_URL_TEMPLATES = [
-    "https://github.com/libffi/libffi/releases/download/v{version}/libffi-{version}.tar.gz",
-    "https://github.com/libffi/libffi/archive/refs/tags/v{version}.tar.gz",
-]
 WINDOWS_RESERVED_BASENAMES = {
     "CON",
     "PRN",
@@ -58,19 +53,6 @@ WINDOWS_RESERVED_BASENAMES = {
 PYREPL_MIN_VERSION = (3, 13, 0)
 MSBUILD_NS = "http://schemas.microsoft.com/developer/msbuild/2003"
 MSBUILD_RELEASE_X64_CONDITION = "'$(Configuration)|$(Platform)'=='Release|x64'"
-OPENSSL_STATIC_DIR_NAME = "openssl-static"
-LIBFFI_COMMON_SOURCES = [
-    "src/prep_cif.c",
-    "src/types.c",
-    "src/raw_api.c",
-    "src/java_raw_api.c",
-    "src/closures.c",
-    "src/tramp.c",
-]
-LIBFFI_X64_SOURCES = [
-    "src/x86/ffiw64.c",
-]
-LIBFFI_X64_ASM_SOURCE = "src/x86/win64_intel.S"
 
 ET.register_namespace("", MSBUILD_NS)
 
@@ -648,6 +630,8 @@ def make_library_hook_context(
     version_info: tuple[int, int, int],
     version_mm: str,
     version_full: str,
+    configuration: str = "Release",
+    platform: str = "x64",
 ) -> LibraryHookContext:
     return LibraryHookContext(
         repo_root=REPO_ROOT,
@@ -659,6 +643,8 @@ def make_library_hook_context(
         work_cache_root=WORK_CACHE_ROOT,
         asset_overlay_root=ASSET_ROOT,
         log=log,
+        configuration=configuration,
+        platform=platform,
     )
 
 
@@ -754,6 +740,49 @@ def patch_modules_getpath_py(source_root: Path) -> None:
         return
 
     path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def patch_generate_sbom_py(source_root: Path) -> None:
+    path = source_root / "Tools" / "build" / "generate_sbom.py"
+    if not path.exists():
+        log("skip generate_sbom.py patch because the file does not exist")
+        return
+
+    text = path.read_text(encoding="utf-8")
+    old = '''def is_root_directory_git_index() -> bool:
+    """Checks if the root directory is a git index"""
+    try:
+        subprocess.check_call(
+            ["git", "-C", str(CPYTHON_ROOT_DIR), "rev-parse"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError:
+        return False
+    return True
+'''
+    new = '''def is_root_directory_git_index() -> bool:
+    """Checks if the CPython root directory is itself a git checkout root."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(CPYTHON_ROOT_DIR), "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    if completed.returncode != 0:
+        return False
+    git_root = Path(completed.stdout.decode(errors="replace").strip()).resolve()
+    return git_root == CPYTHON_ROOT_DIR.resolve()
+'''
+    if new in text:
+        return
+    if old not in text:
+        log("skip generate_sbom.py git-root patch because the target function was not found")
+        return
+    path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
 
 
 def patch_pc_config_minimal_c(source_root: Path) -> None:
@@ -911,103 +940,6 @@ def patch_freeze_module_vcxproj(source_root: Path) -> None:
     save_msbuild_project(path, tree)
 
 
-def patch_openssl_props(source_root: Path) -> None:
-    path = source_root / "PCbuild" / "openssl.props"
-    if not path.exists():
-        log("skip openssl.props patch because the file does not exist")
-        return
-
-    tree, root = load_msbuild_project(path)
-    for link in iter_item_definition_link_nodes(root):
-        dependencies = find_direct_child(link, "AdditionalDependencies")
-        if dependencies is None:
-            dependencies = ensure_direct_child(link, "AdditionalDependencies")
-        dependencies.text = merge_msbuild_semicolon_list(
-            dependencies.text,
-            ["ws2_32.lib", "libcrypto.lib", "libssl.lib"],
-            "%(AdditionalDependencies)",
-        )
-
-    for target in list(root.iter(msbuild_tag("Target"))):
-        if target.get("Name") in {"_CopySSLDLL", "_CleanSSLDLL"}:
-            parent = next((candidate for candidate in root.iter() if target in list(candidate)), None)
-            if parent is not None:
-                parent.remove(target)
-
-    for item_group in find_direct_children(root, "ItemGroup"):
-        for child in list(item_group):
-            if child.tag == msbuild_tag("_SSLDLL"):
-                item_group.remove(child)
-
-    save_msbuild_project(path, tree)
-
-
-def patch_libffi_props(source_root: Path) -> None:
-    path = source_root / "PCbuild" / "libffi.props"
-    if not path.exists():
-        log("skip libffi.props patch because the file does not exist")
-        return
-
-    tree, root = load_msbuild_project(path)
-    for link in iter_item_definition_link_nodes(root):
-        library_dirs = find_direct_child(link, "AdditionalLibraryDirectories")
-        if library_dirs is None:
-            library_dirs = ensure_direct_child(link, "AdditionalLibraryDirectories")
-        library_dirs.text = merge_msbuild_semicolon_list(
-            library_dirs.text,
-            ["$(libffiOutDir)"],
-            "%(AdditionalLibraryDirectories)",
-        )
-
-        dependencies = find_direct_child(link, "AdditionalDependencies")
-        if dependencies is None:
-            dependencies = ensure_direct_child(link, "AdditionalDependencies")
-        current = dependencies.text or ""
-        current = current.replace("libffi-8.lib", "ffi.lib")
-        dependencies.text = merge_msbuild_semicolon_list(
-            current,
-            ["ffi.lib"],
-            "%(AdditionalDependencies)",
-        )
-
-    for item_group in find_direct_children(root, "ItemGroup"):
-        for child in list(item_group):
-            if child.tag == msbuild_tag("_LIBFFIDLL"):
-                item_group.remove(child)
-
-    for target in list(root.iter(msbuild_tag("Target"))):
-        if target.get("Name") in {"_CopyLIBFFIDLL", "_CleanLIBFFIDLL"}:
-            parent = next((candidate for candidate in root.iter() if target in list(candidate)), None)
-            if parent is not None:
-                parent.remove(target)
-
-    save_msbuild_project(path, tree)
-
-
-def patch_python_props_for_static_openssl(source_root: Path, platform: str) -> None:
-    path = source_root / "PCbuild" / "python.props"
-    tree, root = load_msbuild_project(path)
-    platform_dir = platform_output_dir_name(platform)
-    out_dir = f"$(ExternalsDir){OPENSSL_STATIC_DIR_NAME}\\{platform_dir}\\"
-    set_or_create_property(root, "opensslOutDir", out_dir)
-    set_or_create_property(root, "opensslIncludeDir", r"$(opensslOutDir)include")
-    save_msbuild_project(path, tree)
-
-
-def patch_python_props_for_static_libffi(source_root: Path, platform: str) -> None:
-    path = source_root / "PCbuild" / "python.props"
-    if not path.exists():
-        return
-
-    tree, root = load_msbuild_project(path)
-    libffi_version = detect_cpython_libffi_version(source_root)
-    platform_dir = platform_output_dir_name(platform)
-    out_dir = f"$(ExternalsDir)libffi-{libffi_version}\\{platform_dir}\\"
-    set_or_create_property(root, "libffiOutDir", out_dir)
-    set_or_create_property(root, "libffiIncludeDir", r"$(libffiOutDir)include")
-    save_msbuild_project(path, tree)
-
-
 def patch_python_vcxproj(source_root: Path, manifest: dict, integrations: list) -> None:
     path = source_root / "PCbuild" / "python.vcxproj"
     tree, root = load_msbuild_project(path)
@@ -1083,22 +1015,22 @@ def apply_patches(
     manifest: dict,
     integrations: list,
     platform: str,
+    configuration: str,
 ) -> None:
+    hook_context = make_library_hook_context(source_root, version_info, version_mm, version_full, configuration, platform)
+    run_pre_patch_hooks(integrations, hook_context)
     patch_site_py(source_root, version_mm)
     patch_modules_getpath_py(source_root)
+    patch_generate_sbom_py(source_root)
     patch_pc_config_minimal_c(source_root)
     patch_pc_dl_nt_c(source_root)
     patch_python_sysmodule_c(source_root, version_mm)
     patch_pythoncore_vcxproj(source_root)
     patch_freeze_module_vcxproj(source_root)
-    patch_openssl_props(source_root)
-    patch_python_props_for_static_openssl(source_root, platform)
-    patch_libffi_props(source_root)
-    patch_python_props_for_static_libffi(source_root, platform)
     patch_python_vcxproj(source_root, manifest, integrations)
     patch_static_library_projects(source_root, manifest, integrations)
     patch_pc_config(source_root, manifest, integrations)
-    run_post_patch_hooks(integrations, make_library_hook_context(source_root, version_info, version_mm, version_full))
+    run_post_patch_hooks(integrations, hook_context)
 
 
 def verify_source_root(source_root: Path) -> None:
@@ -1319,422 +1251,6 @@ def find_external_source(source_root: Path, prefix: str, *, require_file: str) -
     return candidates[-1]
 
 
-def detect_cpython_openssl_version(source_root: Path) -> str:
-    files = [
-        source_root / "PCbuild" / "python.props",
-        source_root / "PCbuild" / "get_externals.bat",
-        source_root / "PCbuild" / "openssl.props",
-    ]
-    pattern = re.compile(r"openssl-(?!bin-)([0-9][0-9A-Za-z._-]*)", flags=re.IGNORECASE)
-    matches: list[str] = []
-    for path in files:
-        if not path.exists():
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        for match in pattern.finditer(text):
-            version = match.group(1).rstrip("\\/\"'<>")
-            if version not in matches:
-                matches.append(version)
-
-    if not matches:
-        raise RuntimeError(
-            "could not detect the OpenSSL version required by this CPython tree. "
-            "Expected to find a token like openssl-3.0.19 in PCbuild/python.props or get_externals.bat."
-        )
-    if len(matches) > 1:
-        log(f"multiple OpenSSL source versions were mentioned; using {matches[0]} from CPython metadata")
-    return matches[0]
-
-
-def detect_cpython_libffi_version(source_root: Path) -> str:
-    files = [
-        source_root / "PCbuild" / "python.props",
-        source_root / "PCbuild" / "get_externals.bat",
-        source_root / "PCbuild" / "libffi.props",
-    ]
-    pattern = re.compile(r"libffi-([0-9]+(?:\.[0-9]+)+)", flags=re.IGNORECASE)
-    matches: list[str] = []
-    for path in files:
-        if not path.exists():
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        for match in pattern.finditer(text):
-            version = match.group(1).rstrip("\\/\"'<>")
-            if version not in matches:
-                matches.append(version)
-
-    if not matches:
-        raise RuntimeError(
-            "could not detect the libffi version required by this CPython tree. "
-            "Expected to find a token like libffi-3.4.4 in PCbuild/python.props or get_externals.bat."
-        )
-    if len(matches) > 1:
-        log(f"multiple libffi versions were mentioned; using {matches[0]} from CPython metadata")
-    return matches[0]
-
-
-def openssl_source_dir(source_root: Path, version: str) -> Path:
-    return source_root / "externals" / f"openssl-{version}"
-
-
-def openssl_archive_path(version: str) -> Path:
-    return DOWNLOAD_ROOT / "openssl" / f"openssl-{version}.tar.gz"
-
-
-def openssl_archive_urls(version: str) -> list[str]:
-    return [template.format(version=version) for template in OPENSSL_ARCHIVE_URL_TEMPLATES]
-
-
-def ensure_openssl_source(source_root: Path, version: str) -> Path:
-    source_dir = openssl_source_dir(source_root, version)
-    if (source_dir / "Configure").exists():
-        log(f"using existing OpenSSL source at {source_dir.relative_to(source_root)}")
-        return source_dir
-
-    archive_path = openssl_archive_path(version)
-    used_source = download_first_available(openssl_archive_urls(version), archive_path)
-    source_dir.parent.mkdir(parents=True, exist_ok=True)
-    extract_source_archive(archive_path, source_dir.parent, final_name=source_dir.name)
-    if not (source_dir / "Configure").exists():
-        raise RuntimeError(f"downloaded OpenSSL source is missing Configure: {source_dir}")
-    log(f"materialized OpenSSL {version} from {used_source} to {source_dir.relative_to(source_root)}")
-    return source_dir
-
-
-def openssl_platform(platform: str) -> str:
-    mapping = {
-        "x64": "VC-WIN64A",
-        "Win32": "VC-WIN32",
-        "ARM64": "VC-WIN64-ARM",
-    }
-    if platform not in mapping:
-        raise RuntimeError(f"unsupported OpenSSL static build platform: {platform}")
-    return mapping[platform]
-
-
-def openssl_static_output_dir(source_root: Path, platform: str) -> Path:
-    return source_root / "externals" / OPENSSL_STATIC_DIR_NAME / platform_output_dir_name(platform)
-
-
-def openssl_static_library_path(output_dir: Path, library_name: str) -> Path | None:
-    candidates = [
-        output_dir / library_name,
-        output_dir / "lib" / library_name,
-    ]
-    return next((candidate for candidate in candidates if candidate.exists()), None)
-
-
-def normalize_static_openssl_layout(output_dir: Path) -> None:
-    for library_name in ("libcrypto.lib", "libssl.lib"):
-        source = openssl_static_library_path(output_dir, library_name)
-        target = output_dir / library_name
-        if source is not None and source != target:
-            shutil.copy2(source, target)
-
-
-def validate_windows_perl(perl: str) -> None:
-    probe = (
-        "use Config; "
-        "die qq(non-windows path perl\\n) unless $Config::Config{path_sep} eq q(;); "
-        "use Win32; use IPC::Cmd; print qq(ok\\n);"
-    )
-    completed = subprocess.run(
-        [perl, "-e", probe],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            "OpenSSL static build requires a Windows-native Perl on PATH "
-            "(for example Strawberry Perl or ActivePerl). "
-            f"The detected perl failed validation:\n{completed.stderr or completed.stdout}"
-        )
-
-
-def ensure_static_openssl(source_root: Path, platform: str) -> None:
-    if not (source_root / "PCbuild" / "_ssl.vcxproj").exists() and not (source_root / "PCbuild" / "_hashlib.vcxproj").exists():
-        return
-
-    openssl_version = detect_cpython_openssl_version(source_root)
-    source_dir = ensure_openssl_source(source_root, openssl_version)
-    output_dir = openssl_static_output_dir(source_root, platform)
-    required = [
-        output_dir / "libcrypto.lib",
-        output_dir / "libssl.lib",
-        output_dir / "include" / "openssl" / "ssl.h",
-        output_dir / "include" / "applink.c",
-    ]
-    normalize_static_openssl_layout(output_dir)
-    if all(path.exists() for path in required):
-        log(f"using existing static OpenSSL {openssl_version} at {output_dir.relative_to(source_root)}")
-        return
-
-    perl = shutil.which("perl")
-    if perl is None:
-        raise RuntimeError(
-            "OpenSSL static build requires perl on PATH. Install Strawberry Perl or ActivePerl "
-            "and rerun from VS Developer PowerShell."
-        )
-    validate_windows_perl(perl)
-    ensure_tool("nmake")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if (source_dir / "makefile").exists():
-        run(["nmake", "clean"], cwd=source_dir)
-
-    configure_cmd = [
-        perl,
-        "Configure",
-        openssl_platform(platform),
-        "no-shared",
-        "no-tests",
-        "no-makedepend",
-        "no-asm",
-        "no-uplink",
-        f"--prefix={output_dir}",
-        f"--openssldir={output_dir / 'ssl'}",
-    ]
-    log(f"building static OpenSSL {openssl_version} for {platform}")
-    run(configure_cmd, cwd=source_dir, timeout=60 * 10)
-    run(["nmake", "build_libs"], cwd=source_dir, timeout=60 * 45)
-    run(["nmake", "install_sw"], cwd=source_dir, timeout=60 * 20)
-    normalize_static_openssl_layout(output_dir)
-
-    applink_source = source_dir / "ms" / "applink.c"
-    applink_target = output_dir / "include" / "applink.c"
-    if applink_source.exists() and not applink_target.exists():
-        applink_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(applink_source, applink_target)
-
-    missing = [str(path) for path in required if not path.exists()]
-    if missing:
-        raise RuntimeError("OpenSSL static build did not produce expected files:\n" + "\n".join(missing))
-
-
-def stage_static_openssl_libraries(source_root: Path, platform: str) -> None:
-    output_dir = get_pcbuild_output_dir(source_root, platform)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    openssl_dir = openssl_static_output_dir(source_root, platform)
-    normalize_static_openssl_layout(openssl_dir)
-    for name in ("libcrypto.lib", "libssl.lib"):
-        source = openssl_static_library_path(openssl_dir, name)
-        if source is None:
-            raise RuntimeError(f"static OpenSSL library is missing: {source}")
-        destination = output_dir / name
-        shutil.copy2(source, destination)
-        log(f"staged {destination.relative_to(source_root)} from {source.relative_to(source_root)}")
-
-
-def libffi_source_dir(source_root: Path, version: str) -> Path:
-    return source_root / "externals" / f"libffi-{version}"
-
-
-def libffi_archive_path(version: str) -> Path:
-    return DOWNLOAD_ROOT / "libffi" / f"libffi-{version}.tar.gz"
-
-
-def libffi_archive_urls(version: str) -> list[str]:
-    return [template.format(version=version) for template in LIBFFI_ARCHIVE_URL_TEMPLATES]
-
-
-def ensure_libffi_source(source_root: Path, version: str) -> Path:
-    source_dir = libffi_source_dir(source_root, version)
-    if (source_dir / "include" / "ffi.h.in").exists() and (source_dir / "src" / "x86" / "ffiw64.c").exists():
-        log(f"using existing libffi source at {source_dir.relative_to(source_root)}")
-        return source_dir
-
-    archive_path = libffi_archive_path(version)
-    used_source = download_first_available(libffi_archive_urls(version), archive_path)
-    source_dir.parent.mkdir(parents=True, exist_ok=True)
-    extract_source_archive(archive_path, source_dir.parent, final_name=source_dir.name)
-    if not (source_dir / "include" / "ffi.h.in").exists():
-        raise RuntimeError(f"downloaded libffi source is missing include/ffi.h.in: {source_dir}")
-    log(f"materialized libffi {version} from {used_source} to {source_dir.relative_to(source_root)}")
-    return source_dir
-
-
-def libffi_output_dir(source_root: Path, version: str, platform: str) -> Path:
-    return libffi_source_dir(source_root, version) / platform_output_dir_name(platform)
-
-
-def generate_libffi_ffi_h(source_dir: Path, include_dir: Path, version: str) -> None:
-    text = (source_dir / "include" / "ffi.h.in").read_text(encoding="utf-8")
-    replacements = {
-        "@VERSION@": version,
-        "@TARGET@": "X86_WIN64",
-        "@HAVE_LONG_DOUBLE@": "0",
-        "@FFI_EXEC_TRAMPOLINE_TABLE@": "0",
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    include_dir.mkdir(parents=True, exist_ok=True)
-    (include_dir / "ffi.h").write_text(text, encoding="utf-8", newline="\n")
-
-
-def generate_libffi_fficonfig_h(source_dir: Path, include_dir: Path, version: str) -> None:
-    text = (source_dir / "fficonfig.h.in").read_text(encoding="utf-8")
-    replacements = {
-        "HAVE_ALLOCA": "1",
-        "HAVE_AS_X86_PCREL": "1",
-        "HAVE_INTTYPES_H": "1",
-        "HAVE_STDINT_H": "1",
-        "HAVE_STDIO_H": "1",
-        "HAVE_STDLIB_H": "1",
-        "HAVE_STRING_H": "1",
-        "HAVE_SYS_STAT_H": "1",
-        "HAVE_SYS_TYPES_H": "1",
-        "LT_OBJDIR": "\".libs/\"",
-        "PACKAGE": "\"libffi\"",
-        "PACKAGE_BUGREPORT": "\"http://github.com/libffi/libffi/issues\"",
-        "PACKAGE_NAME": "\"libffi\"",
-        "PACKAGE_STRING": f"\"libffi {version}\"",
-        "PACKAGE_TARNAME": "\"libffi\"",
-        "PACKAGE_URL": "\"\"",
-        "PACKAGE_VERSION": f"\"{version}\"",
-        "SIZEOF_DOUBLE": "8",
-        "SIZEOF_LONG_DOUBLE": "8",
-        "SIZEOF_SIZE_T": "8",
-        "STDC_HEADERS": "1",
-        "VERSION": f"\"{version}\"",
-    }
-    for name, value in replacements.items():
-        text = re.sub(rf"^#undef {re.escape(name)}$", f"#define {name} {value}", text, flags=re.MULTILINE)
-    text = re.sub(r"^#undef ([A-Za-z_][A-Za-z0-9_]*)$", r"/* #undef \1 */", text, flags=re.MULTILINE)
-    include_dir.mkdir(parents=True, exist_ok=True)
-    (include_dir / "fficonfig.h").write_text(text, encoding="utf-8", newline="\n")
-
-
-def prepare_libffi_headers(source_dir: Path, output_dir: Path, version: str) -> None:
-    include_dir = output_dir / "include"
-    include_dir.mkdir(parents=True, exist_ok=True)
-    generate_libffi_ffi_h(source_dir, include_dir, version)
-    generate_libffi_fficonfig_h(source_dir, include_dir, version)
-    shutil.copy2(source_dir / "src" / "x86" / "ffitarget.h", include_dir / "ffitarget.h")
-
-
-def libffi_compile_definitions(platform: str) -> list[str]:
-    if platform != "x64":
-        raise RuntimeError(f"unsupported libffi static build platform: {platform}")
-    return [
-        "FFI_BUILDING",
-        "X86_WIN64",
-        "_CRT_SECURE_NO_WARNINGS",
-        "_CRT_NONSTDC_NO_DEPRECATE",
-        "_WIN64",
-    ]
-
-
-def libffi_include_args(source_dir: Path, output_dir: Path) -> list[str]:
-    return [
-        f"/I{output_dir / 'include'}",
-        f"/I{source_dir / 'include'}",
-        f"/I{source_dir / 'src'}",
-        f"/I{source_dir / 'src' / 'x86'}",
-    ]
-
-
-def compile_libffi_c_source(source_dir: Path, output_dir: Path, source_rel: str, definitions: list[str]) -> Path:
-    obj_dir = output_dir / "obj"
-    obj_dir.mkdir(parents=True, exist_ok=True)
-    source = source_dir / source_rel
-    object_name = source_rel.replace("/", "_").replace("\\", "_")
-    obj = obj_dir / f"{Path(object_name).stem}.obj"
-    cmd = [
-        "cl",
-        "/nologo",
-        "/c",
-        "/O2",
-        "/MT",
-        "/GS-",
-        "/wd4244",
-        "/wd4267",
-        "/wd4996",
-        *[f"/D{name}" for name in definitions],
-        *libffi_include_args(source_dir, output_dir),
-        f"/Fo{obj}",
-        str(source),
-    ]
-    run(cmd, cwd=source_dir)
-    return obj
-
-
-def preprocess_libffi_asm(source_dir: Path, output_dir: Path, definitions: list[str]) -> Path:
-    asm_source = source_dir / LIBFFI_X64_ASM_SOURCE
-    preprocessed = output_dir / "obj" / "win64_intel.asm"
-    preprocessed.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "cl",
-        "/nologo",
-        "/EP",
-        "/TC",
-        *[f"/D{name}" for name in definitions],
-        *libffi_include_args(source_dir, output_dir),
-        str(asm_source),
-    ]
-    display = subprocess.list2cmdline(cmd)
-    log(f"RUN {display} > {preprocessed}")
-    with preprocessed.open("w", encoding="utf-8", newline="\n") as out_file:
-        subprocess.run(cmd, cwd=str(source_dir), stdout=out_file, check=True)
-    return preprocessed
-
-
-def assemble_libffi_x64(output_dir: Path, preprocessed: Path) -> Path:
-    obj = output_dir / "obj" / "win64_intel.obj"
-    run(["ml64", "/nologo", "/c", f"/Fo{obj}", str(preprocessed)], cwd=preprocessed.parent)
-    return obj
-
-
-def ensure_static_libffi(source_root: Path, platform: str) -> None:
-    if not (source_root / "PCbuild" / "_ctypes.vcxproj").exists():
-        return
-
-    libffi_version = detect_cpython_libffi_version(source_root)
-    source_dir = ensure_libffi_source(source_root, libffi_version)
-    output_dir = libffi_output_dir(source_root, libffi_version, platform)
-    required = [
-        output_dir / "ffi.lib",
-        output_dir / "include" / "ffi.h",
-        output_dir / "include" / "fficonfig.h",
-        output_dir / "include" / "ffitarget.h",
-    ]
-    if all(path.exists() for path in required):
-        log(f"using existing static libffi {libffi_version} at {output_dir.relative_to(source_root)}")
-        return
-
-    ensure_tool("cl")
-    ensure_tool("ml64")
-    ensure_tool("lib")
-    prepare_libffi_headers(source_dir, output_dir, libffi_version)
-    definitions = libffi_compile_definitions(platform)
-    objects = [
-        compile_libffi_c_source(source_dir, output_dir, source, definitions)
-        for source in [*LIBFFI_COMMON_SOURCES, *LIBFFI_X64_SOURCES]
-    ]
-    preprocessed = preprocess_libffi_asm(source_dir, output_dir, definitions)
-    objects.append(assemble_libffi_x64(output_dir, preprocessed))
-
-    library_path = output_dir / "ffi.lib"
-    run(["lib", "/nologo", f"/OUT:{library_path}", *[str(obj) for obj in objects]], cwd=source_dir)
-
-    missing = [str(path) for path in required if not path.exists()]
-    if missing:
-        raise RuntimeError("libffi static build did not produce expected files:\n" + "\n".join(missing))
-
-
-def stage_static_libffi_library(source_root: Path, platform: str) -> None:
-    libffi_version = detect_cpython_libffi_version(source_root)
-    source = libffi_output_dir(source_root, libffi_version, platform) / "ffi.lib"
-    if not source.exists():
-        raise RuntimeError(f"static libffi library is missing: {source}")
-    output_dir = get_pcbuild_output_dir(source_root, platform)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    destination = output_dir / "ffi.lib"
-    shutil.copy2(source, destination)
-    log(f"staged {destination.relative_to(source_root)} from {source.relative_to(source_root)}")
-
-
 def ensure_freeze_module_exe(source_root: Path, configuration: str, platform: str) -> Path:
     pcbuild = source_root / "PCbuild"
     output_exe = get_pcbuild_output_dir(source_root, platform) / "_freeze_module.exe"
@@ -1903,12 +1419,21 @@ def maybe_restore_getpath_header(source_root: Path, version_info: tuple[int, int
     )
 
 
-def build_python(source_root: Path, configuration: str, platform: str, manifest: dict, integrations: list) -> None:
+def build_python(
+    source_root: Path,
+    configuration: str,
+    platform: str,
+    manifest: dict,
+    integrations: list,
+    version_info: tuple[int, int, int],
+    version_mm: str,
+    version_full: str,
+) -> None:
     pcbuild = source_root / "PCbuild"
-    ensure_static_openssl(source_root, platform)
-    stage_static_openssl_libraries(source_root, platform)
-    ensure_static_libffi(source_root, platform)
-    stage_static_libffi_library(source_root, platform)
+    run_pre_build_hooks(
+        integrations,
+        make_library_hook_context(source_root, version_info, version_mm, version_full, configuration, platform),
+    )
     stage_static_libraries(source_root, platform, manifest, integrations)
 
     for target in iter_static_library_projects(source_root, manifest, integrations):
@@ -2032,25 +1557,42 @@ def main() -> int:
     manifest = load_manifest()
     config = load_config()
     profile_name, profile = resolve_profile(config, args.profile)
-    integrations = load_integrations(LIB_PATCH_ROOT, profile.get("third_party_libraries", "all"))
+    core_integrations = load_integrations(CORE_PATCH_ROOT, profile.get("core_libraries", "all"))
+    third_party_integrations = load_integrations(LIB_PATCH_ROOT, profile.get("third_party_libraries", "all"))
+    integrations = [*core_integrations, *third_party_integrations]
     version_info, version_mm, version_full = parse_cpython_version(source_root)
     if requested_version_info is not None and requested_version_info != version_info:
         raise RuntimeError(
             f"downloaded source version {version_full} does not match requested version {args.cpython_version}"
         )
     log(f"target CPython version: {version_full}")
-    log(f"build profile: {profile_name} ({len(integrations)} third-party integration(s))")
+    log(
+        f"build profile: {profile_name} "
+        f"({len(core_integrations)} core integration(s), {len(third_party_integrations)} third-party integration(s))"
+    )
     DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     WORK_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     if integrations:
-        log(f"materializing third-party sources into {source_root}")
-        run_prepare_source_hooks(integrations, make_library_hook_context(source_root, version_info, version_mm, version_full))
+        log(f"materializing configured integration sources into {source_root}")
+        run_prepare_source_hooks(
+            integrations,
+            make_library_hook_context(source_root, version_info, version_mm, version_full, args.configuration, args.platform),
+        )
     else:
-        log("skipping third-party source materialization for this profile")
+        log("skipping integration source materialization for this profile")
     log(f"copying overlay assets into {source_root}")
     copy_overlay_entries(source_root, ASSET_ROOT, manifest, integrations, version_info)
     log("applying in-place patches")
-    apply_patches(source_root, version_info, version_mm, version_full, manifest, integrations, args.platform)
+    apply_patches(
+        source_root,
+        version_info,
+        version_mm,
+        version_full,
+        manifest,
+        integrations,
+        args.platform,
+        args.configuration,
+    )
 
     if not args.skip_get_externals:
         log("running get_externals.bat")
@@ -2063,7 +1605,16 @@ def main() -> int:
         freeze_modules(source_root, args.host_python, args.configuration, args.platform, version_info)
         maybe_restore_getpath_header(source_root, version_info)
         log("building custom static libraries and python.exe")
-        build_python(source_root, args.configuration, args.platform, manifest, integrations)
+        build_python(
+            source_root,
+            args.configuration,
+            args.platform,
+            manifest,
+            integrations,
+            version_info,
+            version_mm,
+            version_full,
+        )
         built_exe = get_pcbuild_output_dir(source_root, args.platform) / "python.exe"
 
     if not args.skip_build and not args.skip_verify:

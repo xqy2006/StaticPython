@@ -27,3 +27,4 @@ verify-report-*.json
 # OS / editor junk
 Thumbs.db
 Desktop.ini
+/docs/

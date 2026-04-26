@@ -43,6 +43,8 @@ class LibraryHookContext:
     work_cache_root: Path
     asset_overlay_root: Path
     log: Callable[[str], None]
+    configuration: str = "Release"
+    platform: str = "x64"
 
 
 @dataclass
@@ -59,7 +61,9 @@ class LibraryIntegration:
     python_link_wholearchive_release_x64: list[str] = field(default_factory=list)
     verification_steps: list[dict] = field(default_factory=list)
     prepare_source_hooks: list[Hook] = field(default_factory=list)
+    pre_patch_hooks: list[Hook] = field(default_factory=list)
     post_patch_hooks: list[Hook] = field(default_factory=list)
+    pre_build_hooks: list[Hook] = field(default_factory=list)
 
 
 def _unique(items: list[str]) -> list[str]:
@@ -510,7 +514,9 @@ def pypi_library(
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
+    pre_patch_hooks: list[Hook] | None = None,
     post_patch_hooks: list[Hook] | None = None,
+    pre_build_hooks: list[Hook] | None = None,
 ) -> LibraryIntegration:
     resolved_mapping = dict(source_mapping or {})
     if source_entries:
@@ -536,7 +542,9 @@ def pypi_library(
             _build_pypi_source_hook(project_name or name, resolved_mapping, release_version),
             *(prepare_source_hooks or []),
         ],
+        pre_patch_hooks=list(pre_patch_hooks or []),
         post_patch_hooks=list(post_patch_hooks or []),
+        pre_build_hooks=list(pre_build_hooks or []),
     )
 
 
@@ -560,7 +568,9 @@ def github_library(
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
+    pre_patch_hooks: list[Hook] | None = None,
     post_patch_hooks: list[Hook] | None = None,
+    pre_build_hooks: list[Hook] | None = None,
 ) -> LibraryIntegration:
     resolved_mapping = dict(source_mapping or {})
     if source_entries:
@@ -586,7 +596,9 @@ def github_library(
             _build_github_source_hook(repo, ref, ref_kind, resolved_mapping, archive_url_template),
             *(prepare_source_hooks or []),
         ],
+        pre_patch_hooks=list(pre_patch_hooks or []),
         post_patch_hooks=list(post_patch_hooks or []),
+        pre_build_hooks=list(pre_build_hooks or []),
     )
 
 
@@ -613,7 +625,9 @@ def simple_library(
     verification_imports: list[str] | None = None,
     verification_steps: list[dict] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
+    pre_patch_hooks: list[Hook] | None = None,
     post_patch_hooks: list[Hook] | None = None,
+    pre_build_hooks: list[Hook] | None = None,
     source_provider: str = "pypi",
     github_repo: str | None = None,
     github_ref: str = "main",
@@ -635,7 +649,9 @@ def simple_library(
         "verification_imports": verification_imports,
         "verification_steps": verification_steps,
         "prepare_source_hooks": prepare_source_hooks,
+        "pre_patch_hooks": pre_patch_hooks,
         "post_patch_hooks": post_patch_hooks,
+        "pre_build_hooks": pre_build_hooks,
     }
     if source_provider == "pypi":
         return pypi_library(project_name=resolved_project_name, **common_kwargs)
@@ -675,13 +691,13 @@ def select_integrations(
     if selected_libraries == "all":
         return integrations
     if not isinstance(selected_libraries, (list, tuple, set)):
-        raise RuntimeError('third_party_libraries must be "all" or a list of library names')
+        raise RuntimeError('library selection must be "all" or a list of integration names')
 
     selected = {str(name).casefold() for name in selected_libraries}
     by_name = {integration.name.casefold(): integration for integration in integrations}
     missing = sorted(selected - set(by_name))
     if missing:
-        raise RuntimeError("unknown third-party libraries in config: " + ", ".join(missing))
+        raise RuntimeError("unknown libraries in config: " + ", ".join(missing))
     return [integration for integration in integrations if integration.name.casefold() in selected]
 
 
@@ -785,15 +801,24 @@ def collect_verification_steps(integrations: list[LibraryIntegration]) -> list[d
     return steps
 
 
-def run_prepare_source_hooks(integrations: list[LibraryIntegration], context: LibraryHookContext) -> None:
+def _run_hooks(integrations: list[LibraryIntegration], context: LibraryHookContext, attr: str, label: str) -> None:
     for integration in integrations:
-        for hook in integration.prepare_source_hooks:
-            context.log(f"running {integration.name} source hook {hook.__name__}")
+        for hook in getattr(integration, attr):
+            context.log(f"running {integration.name} {label} hook {hook.__name__}")
             hook(context)
+
+
+def run_prepare_source_hooks(integrations: list[LibraryIntegration], context: LibraryHookContext) -> None:
+    _run_hooks(integrations, context, "prepare_source_hooks", "source")
+
+
+def run_pre_patch_hooks(integrations: list[LibraryIntegration], context: LibraryHookContext) -> None:
+    _run_hooks(integrations, context, "pre_patch_hooks", "pre-patch")
 
 
 def run_post_patch_hooks(integrations: list[LibraryIntegration], context: LibraryHookContext) -> None:
-    for integration in integrations:
-        for hook in integration.post_patch_hooks:
-            context.log(f"running {integration.name} post-patch hook {hook.__name__}")
-            hook(context)
+    _run_hooks(integrations, context, "post_patch_hooks", "post-patch")
+
+
+def run_pre_build_hooks(integrations: list[LibraryIntegration], context: LibraryHookContext) -> None:
+    _run_hooks(integrations, context, "pre_build_hooks", "pre-build")

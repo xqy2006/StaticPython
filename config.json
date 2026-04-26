@@ -3,10 +3,12 @@
   "profiles": {
     "stdlib": {
       "description": "Build only CPython and statically linked standard-library extension modules.",
+      "core_libraries": "all",
       "third_party_libraries": []
     },
     "full": {
       "description": "Build CPython plus every third-party library integration under Lib/.",
+      "core_libraries": "all",
       "third_party_libraries": "all"
     }
   }

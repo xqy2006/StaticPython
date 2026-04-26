@@ -216,6 +216,6 @@
     "target_cpython_series": "arbitrary version input; >=3.13 uses the pyrepl branch, <3.13 uses the legacy branch",
     "host_environment": "Run inside VS2022 Developer PowerShell / DevShell",
     "python_entrypoint": "Normal python.exe only; this project does not build sandbox or sandboxw",
-    "third_party_integration_layout": "Per-library integration metadata lives in Lib/<library>/setup.py, with source archives cached under downloads/"
+    "integration_layout": "Core integrations live in Core/<name>/setup.py; selectable third-party integrations live in Lib/<library>/setup.py; source archives are cached under downloads/"
   }
 }
