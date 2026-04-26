@@ -155,6 +155,7 @@ STDLIB_SMOKE = r"""
 import importlib.resources
 import io
 import json
+import struct
 import traceback
 
 results = []
@@ -213,7 +214,19 @@ def _():
     must(row == ("sandbox",), "sqlite3 roundtrip failed")
     must(bz2.decompress(bz2.compress(b"demo")) == b"demo", "bz2 roundtrip failed")
     must(lzma.decompress(lzma.compress(b"demo")) == b"demo", "lzma roundtrip failed")
-    must(zoneinfo.ZoneInfo("UTC").key == "UTC", "zoneinfo failed")
+    # The stdlib-only profile intentionally does not include the third-party
+    # tzdata package, and Windows runners do not provide an IANA tzdb. Use a
+    # tiny embedded UTC TZif file so this verifies zoneinfo itself.
+    utc_tzif = (
+        b"TZif\0"
+        + (b"\0" * 15)
+        + struct.pack(">6l", 0, 0, 0, 0, 1, 4)
+        + struct.pack(">lbb", 0, 0, 0)
+        + b"UTC\0"
+    )
+    utc_zone = zoneinfo.ZoneInfo.from_file(io.BytesIO(utc_tzif), key="UTC")
+    must(utc_zone.key == "UTC", "zoneinfo key failed")
+    must(datetime(2024, 1, 1, tzinfo=utc_zone).utcoffset() == timedelta(0), "zoneinfo failed")
     must(unicodedata.lookup("LATIN CAPITAL LETTER A") == "A", "unicodedata failed")
     sock_a, sock_b = socket.socketpair()
     try:
