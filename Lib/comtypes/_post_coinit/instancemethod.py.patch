@@ -1,0 +1,47 @@
+--- a/Lib/comtypes/_post_coinit/instancemethod.py
++++ b/Lib/comtypes/_post_coinit/instancemethod.py
+@@ -1,12 +1,39 @@
+ from ctypes import py_object, pythonapi
+ 
+-pythonapi.PyInstanceMethod_New.argtypes = [py_object]
+-pythonapi.PyInstanceMethod_New.restype = py_object
+-PyInstanceMethod_Type = type(pythonapi.PyInstanceMethod_New(id))
++try:
++    pythonapi.PyInstanceMethod_New.argtypes = [py_object]
++    pythonapi.PyInstanceMethod_New.restype = py_object
++except AttributeError:
++    PyInstanceMethod_Type = None
++else:
++    PyInstanceMethod_Type = type(pythonapi.PyInstanceMethod_New(id))
++
++
++class _FallbackInstanceMethod:
++    def __init__(self, func, inst=None):
++        self._func = func
++        self._inst = inst
++        self.__name__ = getattr(func, "__name__", type(func).__name__)
++        self.__doc__ = getattr(func, "__doc__", None)
++
++    def __call__(self, *args, **kwargs):
++        if self._inst is None:
++            return self._func(*args, **kwargs)
++        return self._func(self._inst, *args, **kwargs)
++
++    def __get__(self, inst, cls=None):
++        if inst is None:
++            return self
++        return type(self)(self._func, inst)
+ 
+ 
+ def instancemethod(func, inst, cls):
+-    mth = PyInstanceMethod_Type(func)
++    if PyInstanceMethod_Type is not None:
++        mth = PyInstanceMethod_Type(func)
++        if inst is None:
++            return mth
++        return mth.__get__(inst)
++    mth = _FallbackInstanceMethod(func)
+     if inst is None:
+         return mth
+-    return mth.__get__(inst)
++    return mth.__get__(inst, cls)

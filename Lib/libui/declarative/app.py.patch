@@ -1,0 +1,14 @@
+--- a/Lib/libui/declarative/app.py
++++ b/Lib/libui/declarative/app.py
+@@ -213,7 +213,9 @@
+ 
+                     item.on_clicked(make_handler(state, item, user_cb))
+                     unsub = state.subscribe(
+-                        lambda it=item, st=state: setattr(it, "checked", st.value)
++                        lambda it=item, st=state: core.queue_main(
++                            lambda it=it, st=st: setattr(it, "checked", st.value)
++                        )
+                     )
+                     self._ctx.refs.append(unsub)
+                 elif entry.on_click:
+

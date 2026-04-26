@@ -1,0 +1,107 @@
+--- a/Lib/Crypto/Util/_raw_api.py
++++ b/Lib/Crypto/Util/_raw_api.py
+@@ -206,8 +206,12 @@
+     _c_ssize_t = ctypes.c_ssize_t
+ 
+     _PyBUF_SIMPLE = 0
+-    _PyObject_GetBuffer = ctypes.pythonapi.PyObject_GetBuffer
+-    _PyBuffer_Release = ctypes.pythonapi.PyBuffer_Release
++    try:
++        _PyObject_GetBuffer = ctypes.pythonapi.PyObject_GetBuffer
++        _PyBuffer_Release = ctypes.pythonapi.PyBuffer_Release
++    except AttributeError:
++        _PyObject_GetBuffer = None
++        _PyBuffer_Release = None
+     _py_object = ctypes.py_object
+     _c_ssize_p = ctypes.POINTER(_c_ssize_t)
+ 
+@@ -232,10 +236,25 @@
+         if sys.version_info[0] == 2:
+             _fields_.insert(-1, ('smalltable', _c_ssize_t * 2))
+ 
++    def _buffer_as_ubyte_array(data):
++        view = memoryview(data)
++        if view.format not in ("B", "b", "c") or view.itemsize != 1:
++            view = view.cast("B")
++
++        if view.readonly:
++            return (ctypes.c_ubyte * view.nbytes).from_buffer_copy(view.tobytes())
++
++        try:
++            return (ctypes.c_ubyte * view.nbytes).from_buffer(data)
++        except TypeError:
++            return (ctypes.c_ubyte * view.nbytes).from_buffer(view)
++
+     def c_uint8_ptr(data):
+         if byte_string(data) or isinstance(data, _Array):
+             return data
+         elif isinstance(data, _buffer_type):
++            if _PyObject_GetBuffer is None:
++                return _buffer_as_ubyte_array(data)
+             obj = _py_object(data)
+             buf = _Py_buffer()
+             _PyObject_GetBuffer(obj, byref(buf), _PyBUF_SIMPLE)
+@@ -290,6 +309,37 @@
+             pass
+ 
+ 
++_EMBEDDED_PROCESS_LIB = None
++
++
++def _load_embedded_process_lib():
++    global _EMBEDDED_PROCESS_LIB
++
++    if _EMBEDDED_PROCESS_LIB is False:
++        return None
++    if _EMBEDDED_PROCESS_LIB is not None:
++        return _EMBEDDED_PROCESS_LIB
++
++    if backend != "ctypes" or os.name != "nt":
++        _EMBEDDED_PROCESS_LIB = False
++        return None
++
++    executable = getattr(sys, "executable", None)
++    if not executable:
++        _EMBEDDED_PROCESS_LIB = False
++        return None
++
++    try:
++        lib = load_lib(executable, "")
++        getattr(lib, "pycryptodome_embedded")
++    except (AttributeError, OSError):
++        _EMBEDDED_PROCESS_LIB = False
++        return None
++
++    _EMBEDDED_PROCESS_LIB = lib
++    return lib
++
++
+ def load_pycryptodome_raw_lib(name, cdecl):
+     """Load a shared library and return a handle to it.
+ 
+@@ -298,19 +348,23 @@
+ 
+     @cdecl, the C function declarations.
+     """
++
++    embedded_process_lib = _load_embedded_process_lib()
++    if embedded_process_lib is not None:
++        return embedded_process_lib
+ 
+     split = name.split(".")
+     dir_comps, basename = split[:-1], split[-1]
+     attempts = []
+     for ext in extension_suffixes:
++        filename = basename + ext
+         try:
+-            filename = basename + ext
+             full_name = pycryptodome_filename(dir_comps, filename)
+             if not os.path.isfile(full_name):
+                 attempts.append("Not found '%s'" % filename)
+                 continue
+             return load_lib(full_name, cdecl)
+-        except OSError as exp:
++        except (NameError, OSError, TypeError, ValueError) as exp:
+             attempts.append("Cannot load '%s': %s" % (filename, str(exp)))
+     raise OSError("Cannot load native module '%s': %s" % (name, ", ".join(attempts)))
+

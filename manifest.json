@@ -1,0 +1,221 @@
+{
+  "overlay_entries": [
+    "Lib/_pyrepl/__main__.py",
+    "Tools/build/freeze_modules.py"
+  ],
+  "third_party_python_packages": [],
+  "python_builtin_modules": [
+    "_ctypes",
+    "_socket",
+    "select",
+    "pyexpat",
+    "unicodedata",
+    "_sqlite3",
+    "_decimal",
+    "winsound",
+    "_asyncio",
+    "_hashlib",
+    "_overlapped",
+    "_multiprocessing",
+    "_ssl",
+    "_elementtree",
+    "_bz2",
+    "_lzma",
+    "_wmi",
+    "_zoneinfo",
+    "_uuid",
+    "_queue"
+  ],
+  "builtin_module_registrations": [
+    {
+      "name": "_ctypes",
+      "pyinit": "PyInit__ctypes"
+    },
+    {
+      "name": "_socket",
+      "pyinit": "PyInit__socket"
+    },
+    {
+      "name": "select",
+      "pyinit": "PyInit_select"
+    },
+    {
+      "name": "pyexpat",
+      "pyinit": "PyInit_pyexpat"
+    },
+    {
+      "name": "unicodedata",
+      "pyinit": "PyInit_unicodedata"
+    },
+    {
+      "name": "_sqlite3",
+      "pyinit": "PyInit__sqlite3"
+    },
+    {
+      "name": "_decimal",
+      "pyinit": "PyInit__decimal"
+    },
+    {
+      "name": "winsound",
+      "pyinit": "PyInit_winsound"
+    },
+    {
+      "name": "_asyncio",
+      "pyinit": "PyInit__asyncio"
+    },
+    {
+      "name": "_hashlib",
+      "pyinit": "PyInit__hashlib"
+    },
+    {
+      "name": "_overlapped",
+      "pyinit": "PyInit__overlapped"
+    },
+    {
+      "name": "_multiprocessing",
+      "pyinit": "PyInit__multiprocessing"
+    },
+    {
+      "name": "_ssl",
+      "pyinit": "PyInit__ssl"
+    },
+    {
+      "name": "_elementtree",
+      "pyinit": "PyInit__elementtree"
+    },
+    {
+      "name": "_bz2",
+      "pyinit": "PyInit__bz2"
+    },
+    {
+      "name": "_lzma",
+      "pyinit": "PyInit__lzma"
+    },
+    {
+      "name": "_wmi",
+      "pyinit": "PyInit__wmi"
+    },
+    {
+      "name": "_zoneinfo",
+      "pyinit": "PyInit__zoneinfo"
+    },
+    {
+      "name": "_uuid",
+      "pyinit": "PyInit__uuid"
+    },
+    {
+      "name": "_queue",
+      "pyinit": "PyInit__queue"
+    }
+  ],
+  "native_static_projects": [],
+  "static_library_projects_release_x64": [
+    "select.vcxproj",
+    "pyexpat.vcxproj",
+    "unicodedata.vcxproj",
+    "_socket.vcxproj",
+    "_ctypes.vcxproj",
+    "_decimal.vcxproj",
+    "winsound.vcxproj",
+    "_asyncio.vcxproj",
+    "_hashlib.vcxproj",
+    "_multiprocessing.vcxproj",
+    "_bz2.vcxproj",
+    "liblzma.vcxproj",
+    "_lzma.vcxproj",
+    "sqlite3.vcxproj",
+    "_sqlite3.vcxproj",
+    "_ssl.vcxproj",
+    "_elementtree.vcxproj",
+    "_wmi.vcxproj",
+    "_zoneinfo.vcxproj",
+    "_uuid.vcxproj",
+    "_queue.vcxproj",
+    "_overlapped.vcxproj"
+  ],
+  "static_library_project_patches": {
+    "_ctypes.vcxproj": {
+      "add_py_no_enable_shared": true,
+      "disable_vcpkg": true,
+      "extra_preprocessor_definitions": [
+        "FFI_BUILDING"
+      ]
+    },
+    "_ssl.vcxproj": {
+      "disable_vcpkg": true,
+      "ensure_openssl_applink": true
+    }
+  },
+  "staged_static_libraries_release_x64": [],
+  "python_link_dependencies_release_x64": [
+    "Propsys.lib",
+    "libssl.lib",
+    "libcrypto.lib",
+    "winmm.lib",
+    "oleaut32.lib",
+    "wbemuuid.lib",
+    "ole32.lib",
+    "Crypt32.lib",
+    "legacy_stdio_definitions.lib",
+    "bcrypt.lib",
+    "version.lib",
+    "ws2_32.lib",
+    "pathcch.lib",
+    "uuid.lib",
+    "_socket.lib",
+    "_ctypes.lib",
+    "select.lib",
+    "pyexpat.lib",
+    "unicodedata.lib",
+    "Iphlpapi.lib",
+    "Rpcrt4.lib",
+    "_decimal.lib",
+    "winsound.lib",
+    "_asyncio.lib",
+    "_hashlib.lib",
+    "_multiprocessing.lib",
+    "ffi.lib",
+    "_sqlite3.lib",
+    "_ssl.lib",
+    "_elementtree.lib",
+    "_bz2.lib",
+    "_lzma.lib",
+    "_wmi.lib",
+    "_zoneinfo.lib",
+    "_uuid.lib",
+    "_queue.lib",
+    "sqlite3.lib",
+    "_overlapped.lib",
+    "liblzma.lib"
+  ],
+  "python_link_wholearchive_release_x64": [],
+  "verification_imports": [],
+  "system_dlls_verified_in_final_exe": [
+    "bcrypt.dll",
+    "VERSION.dll",
+    "WS2_32.dll",
+    "api-ms-win-core-path-l1-1-0.dll",
+    "IPHLPAPI.DLL",
+    "RPCRT4.dll",
+    "ADVAPI32.dll",
+    "KERNEL32.dll",
+    "USER32.dll",
+    "GDI32.dll",
+    "PROPSYS.dll",
+    "WINMM.dll",
+    "OLEAUT32.dll",
+    "ole32.dll",
+    "CRYPT32.dll",
+    "COMCTL32.dll",
+    "UxTheme.dll",
+    "d2d1.dll",
+    "DWrite.dll"
+  ],
+  "notes": {
+    "target_platform": "Windows x64",
+    "target_cpython_series": "arbitrary version input; >=3.13 uses the pyrepl branch, <3.13 uses the legacy branch",
+    "host_environment": "Run inside VS2022 Developer PowerShell / DevShell",
+    "python_entrypoint": "Normal python.exe only; this project does not build sandbox or sandboxw",
+    "third_party_integration_layout": "Per-library integration metadata lives in Lib/<library>/setup.py, with source archives cached under downloads/"
+  }
+}

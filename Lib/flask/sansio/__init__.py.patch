@@ -1,0 +1,8 @@
+--- a/Lib/flask/sansio/__init__.py
++++ b/Lib/flask/sansio/__init__.py
+@@ -0,0 +1,5 @@
++from .app import App as App
++from .blueprints import Blueprint as Blueprint
++from .blueprints import BlueprintSetupState as BlueprintSetupState
++from .scaffold import Scaffold as Scaffold
++from .scaffold import _sentinel as _sentinel

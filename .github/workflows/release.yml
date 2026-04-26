@@ -1,0 +1,142 @@
+name: Build StaticPython Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      cpython_version:
+        description: CPython version, for example 3.13.2 or 3.11.9
+        required: true
+        default: 3.13.2
+      release_tag:
+        description: Optional release tag; defaults to staticpython-v<version>
+        required: false
+        default: ""
+      release_name:
+        description: Optional release title; defaults to StaticPython <version>
+        required: false
+        default: ""
+      prerelease:
+        description: Mark the created release as a prerelease
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - stdlib
+          - full
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Windows Perl
+        shell: pwsh
+        run: choco install strawberryperl -y --no-progress
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Build StaticPython
+        shell: pwsh
+        run: |
+          $dist = "$env:GITHUB_WORKSPACE\dist\${{ matrix.profile }}"
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          python .\build.py `
+            --cpython-version "${{ inputs.cpython_version }}" `
+            --download-root "$env:RUNNER_TEMP\cpython-${{ matrix.profile }}" `
+            --profile "${{ matrix.profile }}" `
+            --output-dir $dist
+
+      - name: Find artifact
+        id: artifact
+        shell: pwsh
+        run: |
+          $asset = Get-ChildItem "$env:GITHUB_WORKSPACE\dist\${{ matrix.profile }}\*.exe" | Select-Object -First 1
+          if ($null -eq $asset) {
+            throw "No built .exe found in dist"
+          }
+          "path=$($asset.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: staticpython-${{ inputs.cpython_version }}-${{ matrix.profile }}
+          path: ${{ steps.artifact.outputs.path }}
+
+  release:
+    runs-on: windows-2022
+    needs: build
+
+    steps:
+      - name: Download built executables
+        uses: actions/download-artifact@v4
+        with:
+          pattern: staticpython-${{ inputs.cpython_version }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $version = "${{ inputs.cpython_version }}".Trim()
+          $tag = "${{ inputs.release_tag }}".Trim()
+          $name = "${{ inputs.release_name }}".Trim()
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = "staticpython-v$version"
+          }
+          if ([string]::IsNullOrWhiteSpace($name)) {
+            $name = "StaticPython $version"
+          }
+          $assets = @(Get-ChildItem "$env:GITHUB_WORKSPACE\dist\*.exe")
+          if ($assets.Count -eq 0) {
+            throw "No built .exe artifacts found"
+          }
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.txt"
+          @"
+          Automated StaticPython build for CPython ${{ inputs.cpython_version }}.
+
+          Assets:
+          $($assets.Name | ForEach-Object { "- $_" } | Out-String)
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          "@ | Set-Content -Path $notesPath -Encoding UTF8
+
+          gh release view $tag *> $null
+          $exists = ($LASTEXITCODE -eq 0)
+
+          if (-not $exists) {
+            $createArgs = @("release", "create", $tag)
+            $createArgs += $assets.FullName
+            $createArgs += @("--title", $name, "--notes-file", $notesPath)
+            if ("${{ inputs.prerelease }}" -eq "true") {
+              $createArgs += "--prerelease"
+            }
+            gh @createArgs
+          }
+          else {
+            $uploadArgs = @("release", "upload", $tag)
+            $uploadArgs += $assets.FullName
+            $uploadArgs += "--clobber"
+            gh @uploadArgs
+            gh release edit $tag --title $name --notes-file $notesPath
+          }

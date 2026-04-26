@@ -1,0 +1,14 @@
+--- a/Lib/prompt_toolkit/__init__.py
++++ b/Lib/prompt_toolkit/__init__.py
+@@ -29,7 +29,10 @@
+ from .shortcuts import PromptSession, choice, print_formatted_text, prompt
+ 
+ # Don't forget to update in `docs/conf.py`!
+-__version__ = metadata.version("prompt_toolkit")
++try:
++    __version__ = metadata.version("prompt_toolkit")
++except metadata.PackageNotFoundError:
++    __version__ = "3.0.52"
+ 
+ assert pep440.match(__version__)
+ 

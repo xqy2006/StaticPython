@@ -1,0 +1,17 @@
+--- a/Lib/click/_compat.py
++++ b/Lib/click/_compat.py
+@@ -510,7 +510,13 @@
+ # color codes.
+ # NOTE: double check is needed so mypy does not analyze this on Linux
+ if sys.platform.startswith("win") and WIN:
+-    from ._winconsole import _get_windows_console_stream
++    try:
++        from ._winconsole import _get_windows_console_stream
++    except Exception:
++        def _get_windows_console_stream(
++            f: t.TextIO, encoding: str | None, errors: str | None
++        ) -> t.TextIO | None:
++            return None
+ 
+     def _get_argv_encoding() -> str:
+         import locale

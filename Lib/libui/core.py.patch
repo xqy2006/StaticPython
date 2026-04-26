@@ -1,0 +1,20 @@
+--- a/Lib/libui/core.py
++++ b/Lib/libui/core.py
+@@ -0,0 +1,16 @@
++"""Expose the builtin ``_libui_core`` module as ``libui.core``."""
++
++import _libui_core as _core
++
++from _libui_core import *  # noqa: F401,F403
++
++__doc__ = _core.__doc__
++__all__ = getattr(_core, "__all__", [name for name in dir(_core) if not name.startswith("_")])
++
++
++def __getattr__(name):
++    return getattr(_core, name)
++
++
++def __dir__():
++    return sorted(set(globals()) | set(dir(_core)))
+

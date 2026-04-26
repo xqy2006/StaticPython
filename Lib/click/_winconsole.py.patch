@@ -1,0 +1,41 @@
+--- a/Lib/click/_winconsole.py
++++ b/Lib/click/_winconsole.py
+@@ -99,20 +99,24 @@
+             ("internal", c_void_p),
+         ]
+ 
+-    PyObject_GetBuffer = pythonapi.PyObject_GetBuffer
+-    PyBuffer_Release = pythonapi.PyBuffer_Release
+-
+-    def get_buffer(obj: Buffer, writable: bool = False) -> Array[c_char]:
+-        buf = Py_buffer()
+-        flags: int = PyBUF_WRITABLE if writable else PyBUF_SIMPLE
+-        PyObject_GetBuffer(py_object(obj), byref(buf), flags)
+-
+-        try:
+-            buffer_type = c_char * buf.len
+-            out: Array[c_char] = buffer_type.from_address(buf.buf)
+-            return out
+-        finally:
+-            PyBuffer_Release(byref(buf))
++    try:
++        PyObject_GetBuffer = pythonapi.PyObject_GetBuffer
++        PyBuffer_Release = pythonapi.PyBuffer_Release
++    except AttributeError:
++        get_buffer = None
++    else:
++
++        def get_buffer(obj: Buffer, writable: bool = False) -> Array[c_char]:
++            buf = Py_buffer()
++            flags: int = PyBUF_WRITABLE if writable else PyBUF_SIMPLE
++            PyObject_GetBuffer(py_object(obj), byref(buf), flags)
++
++            try:
++                buffer_type = c_char * buf.len
++                out: Array[c_char] = buffer_type.from_address(buf.buf)
++                return out
++            finally:
++                PyBuffer_Release(byref(buf))
+ 
+ 
+ class _WindowsConsoleRawIOBase(io.RawIOBase):

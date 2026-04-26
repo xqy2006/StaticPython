@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Build outputs
+dist/
+downloads/
+.vendor-stage/
+.tmp/
+.tmp-*/
+*.tmp
+
+# Logs and reports
+build-*.log
+verify-report-*.json
+*.pid
+
+# Visual Studio / MSBuild
+.vs/
+*.suo
+*.user
+*.vcxproj.user
+*.VC.db
+*.opendb
+
+# OS / editor junk
+Thumbs.db
+Desktop.ini

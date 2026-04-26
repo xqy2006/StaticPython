@@ -1,0 +1,13 @@
+{
+  "default_profile": "full",
+  "profiles": {
+    "stdlib": {
+      "description": "Build only CPython and statically linked standard-library extension modules.",
+      "third_party_libraries": []
+    },
+    "full": {
+      "description": "Build CPython plus every third-party library integration under Lib/.",
+      "third_party_libraries": "all"
+    }
+  }
+}

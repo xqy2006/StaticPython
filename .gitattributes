@@ -1,0 +1,11 @@
+* text=auto
+
+*.c text eol=lf
+*.h text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.patch text eol=lf
+*.props text eol=lf
+*.py text eol=lf
+*.vcxproj text eol=lf
+*.yml text eol=lf

@@ -1,0 +1,16 @@
+--- a/Lib/werkzeug/serving.py
++++ b/Lib/werkzeug/serving.py
+@@ -810,7 +810,12 @@
+ 
+         import importlib.metadata
+ 
+-        self._server_version = f"Werkzeug/{importlib.metadata.version('werkzeug')}"
++        try:
++            werkzeug_version = importlib.metadata.version("werkzeug")
++        except importlib.metadata.PackageNotFoundError:
++            werkzeug_version = "3.1.8"
++
++        self._server_version = f"Werkzeug/{werkzeug_version}"
+ 
+     def log(self, type: str, message: str, *args: t.Any) -> None:
+         _log(type, message, *args)

@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+from libs import (
+    ensure_package_markers,
+    pypi_library,
+    replace_text_once,
+    transform_source_text,
+    write_source_text,
+    script_verification_step,
+)
+
+
+LIBUI_CORE_SHIM = """\"\"\"Expose the builtin ``_libui_core`` module as ``libui.core``.\"\"\"
+
+import _libui_core as _core
+
+from _libui_core import *  # noqa: F401,F403
+
+__doc__ = _core.__doc__
+__all__ = getattr(_core, "__all__", [name for name in dir(_core) if not name.startswith("_")])
+
+
+def __getattr__(name):
+    return getattr(_core, name)
+
+
+def __dir__():
+    return sorted(set(globals()) | set(dir(_core)))
+"""
+
+
+def _patch_libui_init(text: str) -> str:
+    text = ensure_package_markers(text, "libui")
+    return replace_text_once(
+        text,
+        "    def insert_at(self, *args, **kwargs):\n"
+        "        core.queue_main(lambda: self._core.insert_at(*args, **kwargs))\n",
+        "    def insert_at(self, *args, **kwargs):\n"
+        "        args = list(args)\n"
+        "        if args and hasattr(args[0], \"_core\"):\n"
+        "            args[0] = args[0]._core\n"
+        "        if len(args) > 1 and hasattr(args[1], \"_core\"):\n"
+        "            args[1] = args[1]._core\n"
+        "        core.queue_main(lambda: self._core.insert_at(*args, **kwargs))\n",
+        label="libui.__init__",
+    )
+
+
+def _patch_libui_declarative_init(text: str) -> str:
+    return ensure_package_markers(text, "libui.declarative")
+
+
+def _patch_libui_declarative_app(text: str) -> str:
+    return replace_text_once(
+        text,
+        "                    unsub = state.subscribe(\n"
+        "                        lambda it=item, st=state: setattr(it, \"checked\", st.value)\n"
+        "                    )\n",
+        "                    unsub = state.subscribe(\n"
+        "                        lambda it=item, st=state: core.queue_main(\n"
+        "                            lambda it=it, st=st: setattr(it, \"checked\", st.value)\n"
+        "                        )\n"
+        "                    )\n",
+        label="libui.declarative.app",
+    )
+
+
+def patch_libui_sources(context) -> None:
+    transform_source_text(context, "Lib/libui/__init__.py", _patch_libui_init)
+    write_source_text(context, "Lib/libui/core.py", LIBUI_CORE_SHIM)
+    transform_source_text(
+        context,
+        "Lib/libui/declarative/__init__.py",
+        _patch_libui_declarative_init,
+    )
+    transform_source_text(
+        context,
+        "Lib/libui/declarative/app.py",
+        _patch_libui_declarative_app,
+    )
+
+
+LIBRARY_INTEGRATION = pypi_library(
+    name="libui",
+    source_mapping={
+        "libui": "Lib/libui",
+        "src/libui-ng": "libui_builtin/libui-ng",
+        "src/py_module": "libui_builtin/py_module",
+    },
+    overlay_entries=[
+        "Lib/test/test_libui.py",
+        "Lib/test/test_libui_gui.py",
+        "PCbuild/_libui_core.vcxproj",
+        "libui_builtin/py_module/builtin_alias.c",
+        "libui_smoke_test.py",
+    ],
+    python_packages=["libui"],
+    static_library_projects_release_x64=[
+        "_libui_core.vcxproj",
+    ],
+    native_static_projects=[
+        {
+            "project": "_libui_core.vcxproj",
+            "guid": "{2C4C0574-FDB9-48D3-B725-EB4F6A412C18}",
+        }
+    ],
+    builtin_module_registrations=[
+        {
+            "name": "_libui_core",
+            "pyinit": "PyInit__libui_core",
+        }
+    ],
+    python_link_dependencies_release_x64=[
+        "oleaut32.lib",
+        "ole32.lib",
+        "comctl32.lib",
+        "uxtheme.lib",
+        "msimg32.lib",
+        "comdlg32.lib",
+        "d2d1.lib",
+        "dwrite.lib",
+        "oleacc.lib",
+        "uuid.lib",
+        "windowscodecs.lib",
+        "_libui_core.lib",
+    ],
+    post_patch_hooks=[patch_libui_sources],
+    verification_steps=[
+        script_verification_step(
+            "libui-smoke",
+            "assets/overlay/libui_smoke_test.py",
+            timeout=180,
+            skip_group="gui",
+        ),
+        script_verification_step(
+            "libui-unittest",
+            "assets/overlay/Lib/test/test_libui.py",
+            timeout=600,
+            skip_group="gui",
+        ),
+        script_verification_step(
+            "libui-gui-unittest",
+            "assets/overlay/Lib/test/test_libui_gui.py",
+            timeout=600,
+            skip_group="gui",
+        ),
+    ],
+)

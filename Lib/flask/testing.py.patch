@@ -1,0 +1,14 @@
+--- a/Lib/flask/testing.py
++++ b/Lib/flask/testing.py
+@@ -101,7 +101,10 @@
+     global _werkzeug_version
+ 
+     if not _werkzeug_version:
+-        _werkzeug_version = importlib.metadata.version("werkzeug")
++        try:
++            _werkzeug_version = importlib.metadata.version("werkzeug")
++        except importlib.metadata.PackageNotFoundError:
++            _werkzeug_version = "3.1.8"
+ 
+     return _werkzeug_version
+ 
