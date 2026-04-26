@@ -15,14 +15,23 @@ on:
         description: Optional release title; defaults to StaticPython <version>
         required: false
         default: ""
+      publish_release:
+        description: Create or update a GitHub Release in addition to uploading artifacts
+        required: true
+        type: boolean
+        default: false
       prerelease:
-        description: Mark the created release as a prerelease
+        description: Mark the created release as a prerelease when publish_release is enabled
         required: true
         type: boolean
         default: false
 
 permissions:
   contents: write
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
 
 jobs:
   build:
@@ -83,6 +92,7 @@ jobs:
           path: ${{ steps.artifact.outputs.path }}
 
   release:
+    if: ${{ inputs.publish_release }}
     runs-on: windows-2022
     needs: build
 

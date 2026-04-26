@@ -17,13 +17,13 @@ import tempfile
 import time
 import tokenize
 import traceback
-# 定义冻结模块数据结构
+# Frozen module metadata.
 FrozenModule1 = namedtuple('FrozenModule', [
-    'fullname',      # 完整模块名（如"encodings.utf_8"）
-    'py_path',       # 源文件路径（如"Lib/encodings/utf_8.py"）
-    'h_path',        # 生成的头文件路径（如"Python/frozen_modules/encodings/utf_8.h"）
-    'c_path',        # 生成的C文件路径（如"Python/frozen_modules/encodings/utf_8.c"）
-    'is_package'     # 是否为包目录
+    'fullname',
+    'py_path',
+    'h_path',
+    'c_path',
+    'is_package',
 ])
 
 
@@ -82,14 +82,13 @@ def _should_freeze_module(fullname):
 
 def find_python_modules(root_dir):
     """
-    递归查找所有Python模块
-    返回生成器：FrozenModule对象
+    Recursively discover Python modules.
     """
     lib_dir = os.path.join(root_dir, 'Lib')
     frozen_dir = os.path.join(root_dir, 'Python', 'frozen_modules')
 
     for root, dirs, files in os.walk(lib_dir):
-        # 计算模块相对路径（相对于Lib目录）
+        # Module path relative to Lib.
         rel_path = os.path.relpath(root, lib_dir)
         if rel_path == ".":
             namespace_parts = []
@@ -99,18 +98,18 @@ def find_python_modules(root_dir):
                 dirs[:] = []
                 continue
 
-        # 只递归进入可能成为合法包名的目录；跳过真实测试/示例目录，
-        # 但保留 click.testing、jinja2.tests、werkzeug.test 这类运行时模块文件。
+        # Only descend into valid package-like directories. Skip real test and
+        # sample trees while preserving runtime modules like click.testing.
         dirs[:] = sorted(
             d for d in dirs
             if _is_valid_module_segment(d) and _should_descend_directory(namespace_parts, d)
         )
 
-        # 处理包目录（包含__init__.py）
+        # Package directory with __init__.py.
         if '__init__.py' in files:
             pkg_name = ".".join(namespace_parts) if namespace_parts else ""
             
-            # 生成包自身的模块信息（不要__init__.h）
+            # The package itself is not emitted as __init__.h.
             yield FrozenModule1(
                 fullname=pkg_name,
                 py_path=os.path.join(root, '__init__.py'),
@@ -119,7 +118,7 @@ def find_python_modules(root_dir):
                 is_package=True
             )
 
-            # 处理包内所有子模块
+            # Submodules inside the package directory.
             for f in sorted(files):
                 if f.endswith('.py') and f != '__init__.py':
                     mod_name = f[:-3]
@@ -134,7 +133,7 @@ def find_python_modules(root_dir):
                         is_package=False
                     )
 
-        # 处理非包普通模块（仅限Lib根目录）
+        # Plain modules at Lib root.
         elif root == lib_dir:
             for f in sorted(files):
                 if f.endswith('.py'):
@@ -500,18 +499,18 @@ def _repair_invalid_frozen_headers(root_dir, freeze_tool, modules):
     if not invalid:
         return []
 
-    print(f'检测到 {len(invalid)} 个冻结头文件不完整，正在顺序重试')
+    print(f'Detected {len(invalid)} incomplete frozen headers; retrying sequentially')
     remaining = []
     for module in invalid:
         result = _freeze_module_worker(root_dir, freeze_tool, module)
         if result['ok'] and _frozen_header_is_valid(module):
-            print(f"重试成功: {module.fullname}")
+            print(f"Retry succeeded: {module.fullname}")
             continue
         remaining.append(result)
-        print(f"重试失败: {module.fullname}")
-        print(f"命令: {' '.join(result['cmd'])}")
+        print(f"Retry failed: {module.fullname}")
+        print(f"Command: {' '.join(result['cmd'])}")
         if result['stdout']:
-            print('错误输出:')
+            print('Output:')
             print(result['stdout'])
     return remaining
 
@@ -543,7 +542,7 @@ def resolve_freeze_module_exe(root_dir):
 
 def generate_frozen_files(root_dir):
     """
-    核心生成函数
+    Generate frozen module files.
     """
     frozen_dir = os.path.join(root_dir, 'Python', 'frozen_modules')
     if os.path.exists(frozen_dir):
@@ -559,12 +558,12 @@ def generate_frozen_files(root_dir):
     ]
     total = len(modules_to_freeze)
     if not total:
-        print('没有需要冻结的模块')
+        print('No modules need freezing')
         return
 
     workers = min(_get_freeze_worker_count(), total)
     start_time = time.perf_counter()
-    print(f'开始冻结 {total} 个模块，并发 worker={workers}')
+    print(f'Freezing {total} modules with workers={workers}')
 
     failures = []
     completed = 0
@@ -577,17 +576,17 @@ def generate_frozen_files(root_dir):
             completed += 1
             result = future.result()
             if result['ok']:
-                print(f"[{completed}/{total}] 成功冻结: {result['module']}")
+                print(f"[{completed}/{total}] Frozen: {result['module']}")
             else:
                 failures.append(result)
-                print(f"[{completed}/{total}] 冻结失败: {result['module']}")
-                print(f"命令: {' '.join(result['cmd'])}")
+                print(f"[{completed}/{total}] Freeze failed: {result['module']}")
+                print(f"Command: {' '.join(result['cmd'])}")
                 if result['stdout']:
-                    print('错误输出:')
+                    print('Output:')
                     print(result['stdout'])
 
     elapsed = time.perf_counter() - start_time
-    print(f'冻结阶段结束，用时 {elapsed:.2f} 秒')
+    print(f'Freeze phase finished in {elapsed:.2f} seconds')
 
     failures.extend(_repair_invalid_frozen_headers(root_dir, freeze_tool, modules_to_freeze))
 
@@ -595,7 +594,7 @@ def generate_frozen_files(root_dir):
         failed_names = ', '.join(item['module'] for item in failures[:10])
         if len(failures) > 10:
             failed_names += f' ... (+{len(failures) - 10} more)'
-        raise RuntimeError(f'冻结失败，共 {len(failures)} 个模块: {failed_names}')
+        raise RuntimeError(f'Freeze failed for {len(failures)} modules: {failed_names}')
 
 
 #######################################
@@ -864,22 +863,22 @@ def write_text_lines(filename, lines):
 
 
 def resolve_modules(modname, pyfile=None):
-    """自动识别包目录和普通模块"""
-    # 自动检测包结构
+    """Resolve package directories and plain modules."""
+    # Detect package structure automatically.
     if not pyfile:
         pyfile = _resolve_module(modname, ispkg=False)
         if os.path.isdir(pyfile):
             pyfile = os.path.join(pyfile, '__init__.py')
     
     ispkg = False
-    # 检查是否为包
+    # Check whether this is a package.
     if os.path.basename(pyfile) == '__init__.py':
         ispkg = True
         actual_path = os.path.dirname(pyfile)
     else:
         actual_path = pyfile
     
-    # 处理包目录的递归发现
+    # Recursively discover modules in package directories.
     if os.path.isdir(actual_path):
         ispkg = True
         yield from _find_package_modules(modname, actual_path)
@@ -887,7 +886,7 @@ def resolve_modules(modname, pyfile=None):
         yield modname, pyfile, ispkg
 
 def _find_package_modules(pkgname, pkgdir):
-    """递归发现包内所有子模块"""
+    """Recursively discover submodules inside a package."""
     yield pkgname, os.path.join(pkgdir, '__init__.py'), True
     
     for root, dirs, files in os.walk(pkgdir):
