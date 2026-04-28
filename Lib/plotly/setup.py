@@ -1,4 +1,4 @@
-from libs import simple_library, transform_source_text, write_source_text
+from libs import inline_verification_step, simple_library, transform_source_text, write_source_text
 
 
 def patch_plotly_sources(context):
@@ -71,4 +71,21 @@ LIBRARY_INTEGRATION = simple_library(
         "_plotly_utils": "Lib/_plotly_utils",
     },
     post_patch_hooks=[patch_plotly_sources],
+    verification_steps=[
+        inline_verification_step(
+            "plotly-smoke",
+            """
+import json
+import plotly.graph_objects as go
+import plotly.io as pio
+
+figure = go.Figure(data=[go.Scatter(x=[1, 2], y=[3, 4], mode="lines+markers")])
+payload = json.loads(figure.to_json())
+assert payload["data"][0]["type"] == "scatter"
+assert "plotly" in pio.templates
+figure.update_layout(template="plotly")
+assert figure.layout.template is not None
+""",
+        )
+    ],
 )

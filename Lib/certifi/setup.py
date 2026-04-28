@@ -1,4 +1,4 @@
-from libs import LibraryHookContext, simple_library
+from libs import inline_verification_step, LibraryHookContext, simple_library
 
 
 def embed_cacert_pem(context: LibraryHookContext) -> None:
@@ -58,4 +58,19 @@ LIBRARY_INTEGRATION = simple_library(
     name='certifi',
     overlay_entries=['Lib/certifi'],
     post_patch_hooks=[embed_cacert_pem],
+    verification_steps=[
+        inline_verification_step(
+            "certifi-smoke",
+            """
+from pathlib import Path
+import certifi
+
+path = Path(certifi.where())
+contents = certifi.contents()
+assert path.exists()
+assert "BEGIN CERTIFICATE" in contents
+assert path.read_text(encoding="ascii") == contents
+""",
+        )
+    ],
 )

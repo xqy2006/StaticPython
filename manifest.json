@@ -209,7 +209,11 @@
     "COMCTL32.dll",
     "UxTheme.dll",
     "d2d1.dll",
-    "DWrite.dll"
+    "DWrite.dll",
+    "pdh.dll",
+    "POWRPROF.dll",
+    "PSAPI.DLL",
+    "SHELL32.dll"
   ],
   "notes": {
     "target_platform": "Windows x64",

@@ -1,18 +1,202 @@
-from libs import simple_library, write_source_text
+from __future__ import annotations
+
+from libs import inline_verification_step, pypi_library, source_path, transform_source_text, write_source_text
 
 
-def patch_protobuf_namespace(context):
+PROTOBUF_UPB_PROJECT_GUID = "{49F92857-8E8C-42B7-B81A-1DB737C9570A}"
+PROTOBUF_UPB_PROJECT = "google._upb._message"
+
+
+def _project_configurations() -> str:
+    return """  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+"""
+
+
+def _msbuild_path(path: str) -> str:
+    return "..\\" + path.replace("/", "\\")
+
+
+def _object_name(source: str) -> str:
+    return "$(IntDir)" + source.replace("/", "_").replace("\\", "_") + ".obj"
+
+
+def _render_compile_items(sources: list[str]) -> str:
+    blocks = []
+    for source in sources:
+        blocks.append(
+            "\n".join(
+                [
+                    f'    <ClCompile Include="{_msbuild_path(source)}">',
+                    f"      <ObjectFileName>{_object_name(source)}</ObjectFileName>",
+                    "    </ClCompile>",
+                ]
+            )
+        )
+    return "\n".join(blocks)
+
+
+def _render_protobuf_upb_project(sources: list[str]) -> str:
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+{_project_configurations()}  <PropertyGroup Label="Globals">
+    <ProjectGuid>{PROTOBUF_UPB_PROJECT_GUID}</ProjectGuid>
+    <RootNamespace>google_upb_message</RootNamespace>
+    <Keyword>Win32Proj</Keyword>
+    <SupportPGO>false</SupportPGO>
+    <WindowsTargetPlatformVersion>$(DefaultWindowsSDKVersion)</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="python.props" />
+  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="pyproject.props" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <TargetName>{PROTOBUF_UPB_PROJECT}</TargetName>
+    <TargetExt>.lib</TargetExt>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>..\\protobuf_builtin;..\\protobuf_builtin\\utf8_range;..\\Lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>Py_NO_ENABLE_SHARED;_CRT_SECURE_NO_WARNINGS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4244;4267;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
+      <CompileAs>CompileAsC</CompileAs>
+      <RuntimeLibrary Condition="'$(Configuration)|$(Platform)'=='Release|x64'">MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+{_render_compile_items(sources)}
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />
+</Project>
+"""
+
+
+def _discover_sources(context) -> list[str]:
+    groups = [
+        ("Lib/google/protobuf", "*.c", False),
+        ("protobuf_builtin/python", "*.c", False),
+        ("protobuf_builtin/upb", "*.c", True),
+        ("protobuf_builtin/utf8_range", "*.c", False),
+    ]
+    sources: list[str] = []
+    for relative, pattern, recursive in groups:
+        root = source_path(context, relative)
+        if not root.exists():
+            raise RuntimeError(f"protobuf source directory is missing: {root}")
+        paths = root.rglob(pattern) if recursive else root.glob(pattern)
+        for path in sorted(paths):
+            source = path.relative_to(context.source_root).as_posix()
+            if "decode_fast" not in source:
+                sources.append(source)
+
+    required = {
+        "protobuf_builtin/python/protobuf.c",
+        "protobuf_builtin/upb/mem/arena.c",
+        "protobuf_builtin/utf8_range/utf8_range.c",
+        "Lib/google/protobuf/descriptor.upb.c",
+        "Lib/google/protobuf/descriptor.upbdefs.c",
+        "Lib/google/protobuf/descriptor.upb_minitable.c",
+    }
+    missing = sorted(source for source in required if source not in sources)
+    if missing:
+        raise RuntimeError("protobuf source files are missing: " + ", ".join(missing))
+    return sources
+
+
+def patch_protobuf_namespace(context) -> None:
     write_source_text(
         context,
         "Lib/google/__init__.py",
         "# Namespace package marker generated by StaticPython.\n",
     )
+    write_source_text(
+        context,
+        "Lib/google/_upb/__init__.py",
+        "# Package marker generated by StaticPython for the builtin google._upb._message module.\n",
+    )
 
 
-LIBRARY_INTEGRATION = simple_library(
+def patch_protobuf_sources(context) -> None:
+    transform_source_text(
+        context,
+        "protobuf_builtin/python/message.c",
+        lambda text: text.replace(
+            "__attribute__((flatten)) static PyObject* PyUpb_Message_GetAttr(",
+            "static PyObject* PyUpb_Message_GetAttr(",
+        ),
+    )
+
+
+def prepare_protobuf_project(context) -> None:
+    patch_protobuf_sources(context)
+    write_source_text(
+        context,
+        f"PCbuild/{PROTOBUF_UPB_PROJECT}.vcxproj",
+        _render_protobuf_upb_project(_discover_sources(context)),
+    )
+
+
+LIBRARY_INTEGRATION = pypi_library(
     name="protobuf",
-    project_name="protobuf",
-    source_mapping={"google/protobuf": "Lib/google/protobuf"},
-    python_packages=["google.protobuf"],
+    source_mapping={
+        "google/protobuf": "Lib/google/protobuf",
+        "python": "protobuf_builtin/python",
+        "upb": "protobuf_builtin/upb",
+        "utf8_range": "protobuf_builtin/utf8_range",
+    },
+    python_packages=["google.protobuf", "google._upb"],
+    verification_imports=["google._upb._message"],
+    static_library_projects_release_x64=[f"{PROTOBUF_UPB_PROJECT}.vcxproj"],
+    native_static_projects=[
+        {
+            "project": f"{PROTOBUF_UPB_PROJECT}.vcxproj",
+            "guid": PROTOBUF_UPB_PROJECT_GUID,
+        }
+    ],
+    builtin_module_registrations=[
+        {
+            "name": "google._upb._message",
+            "pyinit": "PyInit__message",
+        }
+    ],
+    python_link_dependencies_release_x64=[f"{PROTOBUF_UPB_PROJECT}.lib"],
+    prepare_source_hooks=[prepare_protobuf_project],
     post_patch_hooks=[patch_protobuf_namespace],
+    verification_steps=[
+        inline_verification_step(
+            "protobuf-smoke",
+            """
+import importlib.util
+
+from google._upb import _message
+from google.protobuf.internal import api_implementation
+from google.protobuf.struct_pb2 import Struct
+
+assert importlib.util.find_spec("google._upb._message").origin == "built-in"
+assert _message.__name__ == "google._upb._message"
+assert api_implementation.Type() == "upb", api_implementation.Type()
+
+payload = Struct()
+payload["answer"] = 42
+payload["name"] = "codex"
+clone = Struct()
+clone.ParseFromString(payload.SerializeToString())
+assert clone["answer"] == 42 and clone["name"] == "codex", clone
+""",
+        )
+    ],
 )

@@ -53,6 +53,8 @@ WINDOWS_RESERVED_BASENAMES = {
 PYREPL_MIN_VERSION = (3, 13, 0)
 MSBUILD_NS = "http://schemas.microsoft.com/developer/msbuild/2003"
 MSBUILD_RELEASE_X64_CONDITION = "'$(Configuration)|$(Platform)'=='Release|x64'"
+FROZEN_DATA_SOURCE_PREFIX = "staticpython_frozen_data_"
+FROZEN_DATA_SHARD_BYTES = 4 * 1024 * 1024
 
 ET.register_namespace("", MSBUILD_NS)
 
@@ -215,6 +217,19 @@ def ensure_direct_child(parent: ET.Element, tag: str, *, condition: str | None =
         child.set("Condition", condition)
     parent.append(child)
     return child
+
+
+def set_frozen_data_compile_options(clcompile: ET.Element) -> None:
+    include_dirs = ensure_direct_child(clcompile, "AdditionalIncludeDirectories")
+    include_dirs.text = "$(GeneratedFrozenModulesDir)Python;%(AdditionalIncludeDirectories)"
+    for tag in (
+        "Optimization",
+        "InlineFunctionExpansion",
+        "WholeProgramOptimization",
+        "MultiProcessorCompilation",
+    ):
+        for child in find_direct_children(clcompile, tag, condition=MSBUILD_RELEASE_X64_CONDITION):
+            clcompile.remove(child)
 
 
 def _insert_before_predicate(root: ET.Element, element: ET.Element, predicate: callable) -> None:
@@ -476,12 +491,39 @@ def run_with_env(cmd: list[str], cwd: Path, env: dict[str, str], *, timeout: flo
     subprocess.run(cmd, cwd=str(cwd), check=True, timeout=timeout, env=env)
 
 
-def msbuild_args(configuration: str, platform: str, *extra_properties: str) -> list[str]:
+def resolve_build_workers(raw_value: str | int | None = None) -> int:
+    if raw_value is None:
+        raw_value = os.environ.get("STATICPYTHON_BUILD_WORKERS")
+
+    if raw_value not in (None, ""):
+        try:
+            workers = int(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"invalid build worker count: {raw_value!r}") from exc
+        if workers < 1:
+            raise RuntimeError(f"build worker count must be at least 1, got {workers}")
+        return workers
+
+    cpu_count = os.cpu_count() or 4
+    return max(1, cpu_count - 2)
+
+
+def msbuild_args(
+    configuration: str,
+    platform: str,
+    *extra_properties: str,
+    workers: int | None = None,
+) -> list[str]:
+    build_workers = resolve_build_workers(workers)
     args = [
-        "/m",
+        f"/m:{build_workers}",
         "/nologo",
         f"/p:Configuration={configuration}",
         f"/p:Platform={platform}",
+        "/p:PreferredToolArchitecture=x64",
+        f"/p:CL_MPCount={build_workers}",
+        f"/p:MultiProcMaxCount={build_workers}",
+        "/p:EnforceProcessCountAcrossBuilds=true",
         "/p:VcpkgEnabled=false",
     ]
     args.extend(f"/p:{prop}" for prop in extra_properties)
@@ -881,6 +923,36 @@ def patch_python_sysmodule_c(source_root: Path, version_mm: str) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
+def patch_pyproject_props(source_root: Path) -> None:
+    path = source_root / "PCbuild" / "pyproject.props"
+    tree, root = load_msbuild_project(path)
+
+    changed = False
+    for item_definition_group in find_direct_children(root, "ItemDefinitionGroup"):
+        for clcompile in find_direct_children(item_definition_group, "ClCompile"):
+            if clcompile.get("Condition") is not None:
+                continue
+            whole_program_optimization = find_direct_child(clcompile, "WholeProgramOptimization")
+            if whole_program_optimization is not None and (whole_program_optimization.text or "").strip().lower() == "false":
+                whole_program_optimization.text = "true"
+                changed = True
+
+        for link in find_direct_children(item_definition_group, "Link"):
+            for item in find_direct_children(link, "LinkTimeCodeGeneration"):
+                if item.get("Condition") == "$(Configuration) == 'Release'" and (item.text or "").strip() == "Default":
+                    item.text = "UseLinkTimeCodeGeneration"
+                    changed = True
+
+        for lib in find_direct_children(item_definition_group, "Lib"):
+            for item in find_direct_children(lib, "LinkTimeCodeGeneration"):
+                if item.get("Condition") == "$(Configuration) == 'Release'" and (item.text or "").strip().lower() == "false":
+                    item.text = "true"
+                    changed = True
+
+    if changed:
+        save_msbuild_project(path, tree)
+
+
 def patch_pythoncore_vcxproj(source_root: Path) -> None:
     path = source_root / "PCbuild" / "pythoncore.vcxproj"
     tree, root = load_msbuild_project(path)
@@ -894,6 +966,19 @@ def patch_pythoncore_vcxproj(source_root: Path) -> None:
     ensure_release_x64_runtime_library(root)
     ensure_vcpkg_property_group(root)
     ensure_clcompile_preprocessor_token(root, "Py_NO_ENABLE_SHARED")
+
+    frozen_c = None
+    for item_group in find_direct_children(root, "ItemGroup"):
+        for child in item_group:
+            if child.tag == msbuild_tag("ClCompile") and child.get("Include") == "..\\Python\\frozen.c":
+                frozen_c = child
+                break
+        if frozen_c is not None:
+            break
+    if frozen_c is None:
+        raise RuntimeError(f"expected ..\\Python\\frozen.c entry not found in {path}")
+
+    set_frozen_data_compile_options(frozen_c)
 
     # Leave file-specific getpath.c definitions alone. Earlier builds may have
     # appended Py_NO_ENABLE_SHARED here by mistake, which breaks the multiline block.
@@ -1025,6 +1110,7 @@ def apply_patches(
     patch_pc_config_minimal_c(source_root)
     patch_pc_dl_nt_c(source_root)
     patch_python_sysmodule_c(source_root, version_mm)
+    patch_pyproject_props(source_root)
     patch_pythoncore_vcxproj(source_root)
     patch_freeze_module_vcxproj(source_root)
     patch_python_vcxproj(source_root, manifest, integrations)
@@ -1251,14 +1337,24 @@ def find_external_source(source_root: Path, prefix: str, *, require_file: str) -
     return candidates[-1]
 
 
-def ensure_freeze_module_exe(source_root: Path, configuration: str, platform: str) -> Path:
+def ensure_freeze_module_exe(
+    source_root: Path,
+    configuration: str,
+    platform: str,
+    build_workers: int | None = None,
+) -> Path:
     pcbuild = source_root / "PCbuild"
     output_exe = get_pcbuild_output_dir(source_root, platform) / "_freeze_module.exe"
     run(
         [
             "msbuild",
             str(pcbuild / "_freeze_module.vcxproj"),
-            *msbuild_args(configuration, platform, "StaticPythonSkipRebuildFrozen=true"),
+            *msbuild_args(
+                configuration,
+                platform,
+                "StaticPythonSkipRebuildFrozen=true",
+                workers=build_workers,
+            ),
         ],
         cwd=source_root,
     )
@@ -1329,8 +1425,9 @@ def freeze_modules(
     configuration: str,
     platform: str,
     version_info: tuple[int, int, int],
+    build_workers: int | None = None,
 ) -> None:
-    freeze_exe = ensure_freeze_module_exe(source_root, configuration, platform)
+    freeze_exe = ensure_freeze_module_exe(source_root, configuration, platform, build_workers)
     run([host_python, str(source_root / "Tools" / "build" / "freeze_modules.py"), "--step=0"], cwd=source_root)
     run([host_python, str(source_root / "Tools" / "build" / "freeze_modules.py"), "--step=1"], cwd=source_root)
     maybe_freeze_getpath_header(source_root, freeze_exe)
@@ -1346,6 +1443,228 @@ def freeze_modules(
         )
     else:
         log("skip standalone _pyrepl freezing for CPython < 3.13")
+
+
+FROZEN_INCLUDE_RE = re.compile(r'^#include "frozen_modules/([^"\r\n]+\.h)"\r?$', re.MULTILINE)
+FROZEN_HEADER_SYMBOL_RE = re.compile(rb"const\s+unsigned\s+char\s+([A-Za-z0-9_]+)\[\]\s*=")
+FROZEN_SIZEOF_RE = re.compile(r"\(int\)sizeof\((_Py_M_[A-Za-z0-9_]+)\)")
+
+
+def parse_frozen_header_info(path: Path) -> tuple[str, int]:
+    data = path.read_bytes()
+    match = FROZEN_HEADER_SYMBOL_RE.search(data)
+    if match is None:
+        raise RuntimeError(f"could not find frozen data symbol in {path}")
+
+    initializer_start = data.find(b"{", match.end())
+    initializer_end = data.find(b"};", initializer_start)
+    if initializer_start < 0 or initializer_end < 0:
+        raise RuntimeError(f"could not find frozen data initializer in {path}")
+
+    symbol = match.group(1).decode("ascii")
+    size = data[initializer_start + 1 : initializer_end].count(b",")
+    return symbol, size
+
+
+def frozen_module_name_from_include(include_name: str) -> str:
+    if not include_name.endswith(".h"):
+        raise RuntimeError(f"unexpected frozen header include name: {include_name!r}")
+    return include_name[:-2]
+
+
+def unique_frozen_symbol(symbol: str, include_name: str, used_symbols: set[str]) -> str:
+    if symbol not in used_symbols:
+        used_symbols.add(symbol)
+        return symbol
+
+    module_name = frozen_module_name_from_include(include_name)
+    stem = re.sub(r"[^0-9A-Za-z_]", "_", module_name)
+    candidate = f"_Py_M__staticpython_{stem}"
+    suffix = 2
+    while candidate in used_symbols:
+        candidate = f"_Py_M__staticpython_{stem}_{suffix}"
+        suffix += 1
+    used_symbols.add(candidate)
+    return candidate
+
+
+def rewrite_frozen_header_symbol(path: Path, old_symbol: str, new_symbol: str) -> None:
+    if old_symbol == new_symbol:
+        return
+    old_bytes = old_symbol.encode("ascii")
+    new_bytes = new_symbol.encode("ascii")
+    data = path.read_bytes()
+    if old_bytes not in data:
+        raise RuntimeError(f"could not find frozen data symbol {old_symbol} in {path}")
+    path.write_bytes(data.replace(old_bytes, new_bytes))
+
+
+def patch_frozen_registry_symbol(text: str, module_name: str, old_symbol: str, new_symbol: str) -> str:
+    if old_symbol == new_symbol:
+        return text
+    old_entry = f'{{"{module_name}", {old_symbol}, (int)sizeof({old_symbol}),'
+    new_entry = f'{{"{module_name}", {new_symbol}, (int)sizeof({new_symbol}),'
+    if old_entry not in text:
+        raise RuntimeError(f"could not find frozen registry entry for {module_name}")
+    return text.replace(old_entry, new_entry, 1)
+
+
+def chunk_frozen_headers(records: list[dict]) -> list[list[dict]]:
+    chunks: list[list[dict]] = []
+    current: list[dict] = []
+    current_bytes = 0
+
+    for record in records:
+        file_bytes = record["file_bytes"]
+        if current and current_bytes + file_bytes > FROZEN_DATA_SHARD_BYTES:
+            chunks.append(current)
+            current = []
+            current_bytes = 0
+        current.append(record)
+        current_bytes += file_bytes
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def existing_frozen_data_sources(source_root: Path) -> list[Path]:
+    python_dir = source_root / "Python"
+    return sorted(python_dir.glob(f"{FROZEN_DATA_SOURCE_PREFIX}*.c"))
+
+
+def patch_pythoncore_frozen_data_sources(source_root: Path, shard_names: list[str]) -> None:
+    path = source_root / "PCbuild" / "pythoncore.vcxproj"
+    tree, root = load_msbuild_project(path)
+
+    frozen_item_group = None
+    frozen_index = None
+    for item_group in find_direct_children(root, "ItemGroup"):
+        for child in list(item_group):
+            if child.tag != msbuild_tag("ClCompile"):
+                continue
+            include = child.get("Include") or ""
+            normalized = include.replace("/", "\\")
+            if normalized.startswith(f"..\\Python\\{FROZEN_DATA_SOURCE_PREFIX}") and normalized.endswith(".c"):
+                item_group.remove(child)
+                continue
+            if normalized == "..\\Python\\frozen.c":
+                frozen_item_group = item_group
+                frozen_index = list(item_group).index(child) + 1
+
+    if not shard_names:
+        save_msbuild_project(path, tree)
+        return
+
+    if frozen_item_group is None:
+        raise RuntimeError(f"expected ..\\Python\\frozen.c entry not found in {path}")
+
+    insert_at = frozen_index if frozen_index is not None else len(frozen_item_group)
+    for offset, shard_name in enumerate(shard_names):
+        clcompile = ET.Element(msbuild_tag("ClCompile"))
+        clcompile.set("Include", f"..\\Python\\{shard_name}")
+        set_frozen_data_compile_options(clcompile)
+        frozen_item_group.insert(insert_at + offset, clcompile)
+
+    save_msbuild_project(path, tree)
+
+
+def split_frozen_modules(source_root: Path) -> None:
+    frozen_c = source_root / "Python" / "frozen.c"
+    if not frozen_c.exists():
+        raise RuntimeError(f"expected frozen module registry not found: {frozen_c}")
+
+    text = frozen_c.read_text(encoding="utf-8")
+    include_matches = list(FROZEN_INCLUDE_RE.finditer(text))
+    if not include_matches:
+        shards = existing_frozen_data_sources(source_root)
+        if shards:
+            patch_pythoncore_frozen_data_sources(source_root, [path.name for path in shards])
+            log(f"frozen module data already split across {len(shards)} shard(s)")
+        else:
+            log("skip frozen module data split because no frozen module includes were found")
+        return
+
+    records = []
+    symbol_sizes: dict[str, int] = {}
+    used_symbols: set[str] = set()
+    renamed_symbols: list[tuple[str, str, str]] = []
+    frozen_modules_dir = source_root / "Python" / "frozen_modules"
+    for match in include_matches:
+        include_name = match.group(1)
+        header_path = frozen_modules_dir / include_name
+        if not header_path.exists():
+            raise RuntimeError(f"frozen module include has no generated header: {header_path}")
+        symbol, size = parse_frozen_header_info(header_path)
+        unique_symbol = unique_frozen_symbol(symbol, include_name, used_symbols)
+        if unique_symbol != symbol:
+            rewrite_frozen_header_symbol(header_path, symbol, unique_symbol)
+            renamed_symbols.append((frozen_module_name_from_include(include_name), symbol, unique_symbol))
+        symbol_sizes[unique_symbol] = size
+        records.append(
+            {
+                "include_name": include_name,
+                "module_name": frozen_module_name_from_include(include_name),
+                "symbol": unique_symbol,
+                "size": size,
+                "file_bytes": header_path.stat().st_size,
+            }
+        )
+
+    python_dir = source_root / "Python"
+    for stale in existing_frozen_data_sources(source_root):
+        stale.unlink()
+
+    shard_names = []
+    for index, chunk in enumerate(chunk_frozen_headers(records)):
+        shard_name = f"{FROZEN_DATA_SOURCE_PREFIX}{index:03d}.c"
+        shard_names.append(shard_name)
+        lines = [
+            "/* Auto-generated by StaticPython. Do not edit. */",
+            "",
+        ]
+        lines.extend(f'#include "frozen_modules/{record["include_name"]}"' for record in chunk)
+        lines.append("")
+        (python_dir / shard_name).write_text("\n".join(lines), encoding="utf-8", newline="\n")
+
+    extern_lines = [
+        "/* Frozen module bytecode data is compiled in StaticPython shards. */",
+    ]
+    extern_lines.extend(f"extern const unsigned char {record['symbol']}[];" for record in records)
+    extern_block = "\n".join(extern_lines) + "\n"
+
+    include_start = include_matches[0].start()
+    include_end = include_matches[-1].end()
+    if text[include_end : include_end + 2] == "\r\n":
+        include_end += 2
+    elif text[include_end : include_end + 1] == "\n":
+        include_end += 1
+    text = text[:include_start] + extern_block + text[include_end:]
+
+    for module_name, old_symbol, new_symbol in renamed_symbols:
+        text = patch_frozen_registry_symbol(text, module_name, old_symbol, new_symbol)
+
+    for symbol, size in symbol_sizes.items():
+        text = text.replace(f"(int)sizeof({symbol})", str(size))
+
+    unresolved_sizeof = sorted(set(FROZEN_SIZEOF_RE.findall(text)))
+    if unresolved_sizeof:
+        raise RuntimeError(
+            "could not resolve frozen module sizes for: "
+            + ", ".join(unresolved_sizeof[:20])
+            + (" ..." if len(unresolved_sizeof) > 20 else "")
+        )
+
+    frozen_c.write_text(text, encoding="utf-8", newline="\n")
+    patch_pythoncore_frozen_data_sources(source_root, shard_names)
+    total_bytes = sum(record["file_bytes"] for record in records)
+    log(
+        "split frozen module data into "
+        f"{len(shard_names)} shard(s) from {len(records)} module header(s), "
+        f"{total_bytes // (1024 * 1024)} MiB total"
+    )
+    if renamed_symbols:
+        log(f"renamed {len(renamed_symbols)} duplicate frozen symbol(s)")
 
 
 def getpath_header_required(source_root: Path) -> bool:
@@ -1428,6 +1747,9 @@ def build_python(
     version_info: tuple[int, int, int],
     version_mm: str,
     version_full: str,
+    static_project_filter: set[str] | None = None,
+    static_project_start: str | None = None,
+    build_workers: int | None = None,
 ) -> None:
     pcbuild = source_root / "PCbuild"
     run_pre_build_hooks(
@@ -1436,27 +1758,102 @@ def build_python(
     )
     stage_static_libraries(source_root, platform, manifest, integrations)
 
-    for target in iter_static_library_projects(source_root, manifest, integrations):
+    available_projects = iter_static_library_projects(source_root, manifest, integrations)
+    if static_project_filter is None:
+        selected_projects = available_projects
+    else:
+        requested_projects = set()
+        for requested in static_project_filter:
+            requested_projects.add(requested.lower())
+            if not requested.lower().endswith(".vcxproj"):
+                requested_projects.add(f"{requested.lower()}.vcxproj")
+
+        selected_projects = []
+        matched_requests = set()
+        for project in available_projects:
+            keys = {project.lower(), Path(project).stem.lower()}
+            if keys & requested_projects:
+                selected_projects.append(project)
+                matched_requests.update(keys & requested_projects)
+
+        missing_projects = []
+        for requested in static_project_filter:
+            keys = {requested.lower()}
+            if not requested.lower().endswith(".vcxproj"):
+                keys.add(f"{requested.lower()}.vcxproj")
+            if not keys & matched_requests:
+                missing_projects.append(requested)
+
+        if missing_projects:
+            available = ", ".join(sorted(available_projects)) or "<none>"
+            raise RuntimeError(
+                "unknown static project(s) for incremental build: "
+                + ", ".join(missing_projects)
+                + f"; available projects: {available}"
+            )
+
+    if static_project_start:
+        start_keys = {static_project_start.lower()}
+        if not static_project_start.lower().endswith(".vcxproj"):
+            start_keys.add(f"{static_project_start.lower()}.vcxproj")
+        start_index = None
+        for index, project in enumerate(selected_projects):
+            if {project.lower(), Path(project).stem.lower()} & start_keys:
+                start_index = index
+                break
+        if start_index is None:
+            available = ", ".join(selected_projects) or "<none>"
+            raise RuntimeError(
+                f"static project start {static_project_start!r} was not found; selected projects: {available}"
+            )
+        selected_projects = selected_projects[start_index:]
+
+    log(f"building {len(selected_projects)} static library project(s)")
+    for target in selected_projects:
         run(
             [
                 "msbuild",
                 str(pcbuild / target),
-                *msbuild_args(configuration, platform),
+                *msbuild_args(configuration, platform, workers=build_workers),
             ],
             cwd=source_root,
         )
+
+    final_build_properties = []
+    if static_project_filter is not None or static_project_start is not None:
+        run(
+            [
+                "msbuild",
+                str(pcbuild / "pythoncore.vcxproj"),
+                *msbuild_args(
+                    configuration,
+                    platform,
+                    "BuildProjectReferences=false",
+                    workers=build_workers,
+                ),
+            ],
+            cwd=source_root,
+        )
+        final_build_properties.append("BuildProjectReferences=false")
 
     run(
         [
             "msbuild",
             str(pcbuild / "python.vcxproj"),
-            *msbuild_args(configuration, platform),
+            *msbuild_args(configuration, platform, *final_build_properties, workers=build_workers),
         ],
         cwd=source_root,
     )
 
 
-def verify_built_python(source_root: Path, platform: str, manifest: dict, host_python: str, profile: str) -> Path:
+def verify_built_python(
+    source_root: Path,
+    platform: str,
+    manifest: dict,
+    host_python: str,
+    profile: str,
+    config_path: Path,
+) -> Path:
     exe = get_pcbuild_output_dir(source_root, platform) / "python.exe"
     if not exe.exists():
         raise RuntimeError(f"build did not produce {exe}")
@@ -1474,6 +1871,8 @@ def verify_built_python(source_root: Path, platform: str, manifest: dict, host_p
             str(source_root),
             "--profile",
             profile,
+            "--config",
+            str(config_path),
         ],
         cwd=REPO_ROOT,
         timeout=60 * 20,
@@ -1532,12 +1931,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--configuration", default="Release")
     parser.add_argument("--platform", default="x64")
     parser.add_argument(
+        "--build-workers",
+        type=int,
+        help=(
+            "MSBuild and cl.exe worker count. Defaults to STATICPYTHON_BUILD_WORKERS, "
+            "or CPU count minus two."
+        ),
+    )
+    parser.add_argument(
         "--profile",
         help="Build profile from config.json. Defaults to config.default_profile.",
     )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="Use an alternate config JSON file. This is useful for incremental library-only test profiles.",
+    )
     parser.add_argument("--skip-get-externals", action="store_true")
+    parser.add_argument(
+        "--skip-freeze",
+        action="store_true",
+        help="Skip freeze_modules.py and rebuild only native projects plus python.exe. Intended for incremental tests.",
+    )
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-verify", action="store_true")
+    parser.add_argument(
+        "--build-static-project",
+        action="append",
+        default=[],
+        metavar="PROJECT",
+        help=(
+            "Only build the named static library project before relinking python.exe. "
+            "May be repeated and accepts either a project stem or a .vcxproj file name."
+        ),
+    )
+    parser.add_argument(
+        "--build-static-project-from",
+        metavar="PROJECT",
+        help=(
+            "Build static library projects starting from this project in manifest order. "
+            "Useful for resuming an interrupted incremental build."
+        ),
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -1548,6 +1983,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    build_workers = resolve_build_workers(args.build_workers)
     source_root, requested_version_info = resolve_source_root(args)
 
     if not args.skip_build:
@@ -1555,7 +1991,8 @@ def main() -> int:
     verify_source_root(source_root)
 
     manifest = load_manifest()
-    config = load_config()
+    config_path = (args.config or CONFIG_PATH).resolve()
+    config = load_config(config_path)
     profile_name, profile = resolve_profile(config, args.profile)
     core_integrations = load_integrations(CORE_PATCH_ROOT, profile.get("core_libraries", "all"))
     third_party_integrations = load_integrations(LIB_PATCH_ROOT, profile.get("third_party_libraries", "all"))
@@ -1570,6 +2007,7 @@ def main() -> int:
         f"build profile: {profile_name} "
         f"({len(core_integrations)} core integration(s), {len(third_party_integrations)} third-party integration(s))"
     )
+    log(f"build workers: {build_workers}")
     DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     WORK_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     if integrations:
@@ -1601,9 +2039,21 @@ def main() -> int:
     built_exe: Path | None = None
     if not args.skip_build:
         maybe_restore_getpath_header(source_root, version_info)
-        log("building freeze tool and regenerating frozen modules")
-        freeze_modules(source_root, args.host_python, args.configuration, args.platform, version_info)
-        maybe_restore_getpath_header(source_root, version_info)
+        if args.skip_freeze:
+            log("skipping frozen module regeneration for incremental build")
+        else:
+            log("building freeze tool and regenerating frozen modules")
+            freeze_modules(
+                source_root,
+                args.host_python,
+                args.configuration,
+                args.platform,
+                version_info,
+                build_workers,
+            )
+            maybe_restore_getpath_header(source_root, version_info)
+        log("splitting frozen module bytecode data for MSVC")
+        split_frozen_modules(source_root)
         log("building custom static libraries and python.exe")
         build_python(
             source_root,
@@ -1614,12 +2064,15 @@ def main() -> int:
             version_info,
             version_mm,
             version_full,
+            set(args.build_static_project) if args.build_static_project else None,
+            args.build_static_project_from,
+            build_workers,
         )
         built_exe = get_pcbuild_output_dir(source_root, args.platform) / "python.exe"
 
     if not args.skip_build and not args.skip_verify:
         log("running post-build import verification")
-        built_exe = verify_built_python(source_root, args.platform, manifest, args.host_python, profile_name)
+        built_exe = verify_built_python(source_root, args.platform, manifest, args.host_python, profile_name, config_path)
 
     if not args.skip_build and args.output_dir:
         if built_exe is None:

@@ -1,7 +1,116 @@
-from libs import simple_library
+from __future__ import annotations
+
+from libs import inline_verification_step, pypi_library, source_path, write_source_text
 
 
-LIBRARY_INTEGRATION = simple_library(
+MULTIDICT_PROJECT_GUID = "{F7B37BB1-E629-49F2-B26E-C4DD6359D647}"
+
+
+def _project_configurations() -> str:
+    return """  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+"""
+
+
+def _render_multidict_project() -> str:
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+{_project_configurations()}  <PropertyGroup Label="Globals">
+    <ProjectGuid>{MULTIDICT_PROJECT_GUID}</ProjectGuid>
+    <RootNamespace>multidict_multidict</RootNamespace>
+    <Keyword>Win32Proj</Keyword>
+    <SupportPGO>false</SupportPGO>
+    <WindowsTargetPlatformVersion>$(DefaultWindowsSDKVersion)</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="python.props" />
+  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="pyproject.props" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <TargetName>multidict._multidict</TargetName>
+    <TargetExt>.lib</TargetExt>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>..\\Lib\\multidict;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>Py_NO_ENABLE_SHARED;_CRT_SECURE_NO_WARNINGS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4244;4267;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
+      <RuntimeLibrary Condition="'$(Configuration)|$(Platform)'=='Release|x64'">MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\\Lib\\multidict\\_multidict.c" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />
+</Project>
+"""
+
+
+def prepare_multidict_project(context) -> None:
+    source = source_path(context, "Lib/multidict/_multidict.c")
+    headers = source_path(context, "Lib/multidict/_multilib")
+    if not source.exists():
+        raise RuntimeError(f"multidict C source file is missing: {source}")
+    if not headers.exists():
+        raise RuntimeError(f"multidict _multilib headers are missing: {headers}")
+    write_source_text(context, "PCbuild/multidict._multidict.vcxproj", _render_multidict_project())
+
+
+LIBRARY_INTEGRATION = pypi_library(
     name="multidict",
-    overlay_entries=["Lib/multidict"],
+    source_mapping={
+        "multidict": "Lib/multidict",
+    },
+    python_packages=["multidict"],
+    verification_imports=["multidict", "multidict._multidict"],
+    static_library_projects_release_x64=["multidict._multidict.vcxproj"],
+    native_static_projects=[
+        {
+            "project": "multidict._multidict.vcxproj",
+            "guid": MULTIDICT_PROJECT_GUID,
+        }
+    ],
+    builtin_module_registrations=[
+        {
+            "name": "multidict._multidict",
+            "pyinit": "PyInit__multidict",
+        }
+    ],
+    python_link_dependencies_release_x64=["multidict._multidict.lib"],
+    prepare_source_hooks=[prepare_multidict_project],
+    verification_steps=[
+        inline_verification_step(
+            "multidict-smoke",
+            """
+import importlib.util
+import multidict
+import multidict._compat
+import multidict._multidict
+
+assert importlib.util.find_spec("multidict._multidict").origin == "built-in"
+assert multidict._compat.USE_EXTENSIONS is True
+md = multidict.MultiDict([("x", "1"), ("x", "2")])
+assert md.getall("x") == ["1", "2"]
+md.add("y", "3")
+assert list(md.items()) == [("x", "1"), ("x", "2"), ("y", "3")]
+ci = multidict.CIMultiDict({"Content-Type": "text/plain"})
+assert ci["content-type"] == "text/plain"
+assert multidict.getversion(md) >= 0
+""",
+        )
+    ],
 )

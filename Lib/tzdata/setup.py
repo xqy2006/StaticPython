@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from libs import LibraryHookContext, pypi_library
+from libs import inline_verification_step, LibraryHookContext, pypi_library
 
 
 TZDATA_EMBED_MARKER_BEGIN = "# -- SINGLEFILE-TZDATA-BEGIN --"
@@ -236,5 +236,20 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     post_patch_hooks=[
         apply_tzdata_singlefile_support,
+    ],
+    verification_steps=[
+        inline_verification_step(
+            "tzdata-smoke",
+            """
+import zoneinfo
+import tzdata
+
+zones = tzdata.available_timezones()
+assert "UTC" in zones
+utc = zoneinfo.ZoneInfo("UTC")
+assert utc.key == "UTC"
+assert tzdata.open_zoneinfo("UTC").read(4) == b"TZif"
+""",
+        )
     ],
 )

@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import importlib.util
 import json
+import os
 import re
 import shutil
 import tarfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Callable
 from urllib.request import Request, urlopen
@@ -194,6 +195,24 @@ def script_verification_step(
     return step
 
 
+def inline_verification_step(
+    name: str,
+    code: str,
+    *,
+    timeout: float = 240,
+    skip_group: str | None = None,
+) -> dict:
+    step = {
+        "name": name,
+        "kind": "inline",
+        "code": code,
+        "timeout": timeout,
+    }
+    if skip_group:
+        step["skip_group"] = skip_group
+    return step
+
+
 def _normalized_project_name(project_name: str) -> str:
     return re.sub(r"[-_.]+", "-", project_name).lower()
 
@@ -209,7 +228,7 @@ def _safe_cache_component(value: str) -> str:
 def _copy_entry(src: Path, dst: Path) -> None:
     if dst.exists():
         if dst.is_dir() and not dst.is_symlink():
-            shutil.rmtree(dst)
+            _remove_tree(dst)
         else:
             dst.unlink()
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -336,20 +355,76 @@ def _resolve_extracted_root(destination_root: Path) -> Path:
     return destination_root
 
 
+def _long_path(path: Path) -> str:
+    absolute = str(path.resolve())
+    if os.name != "nt" or absolute.startswith("\\\\?\\"):
+        return absolute
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute.lstrip("\\")
+    return "\\\\?\\" + absolute
+
+
+def _remove_tree(path: Path) -> None:
+    def onerror(func, name, exc_info) -> None:
+        if isinstance(exc_info[1], FileNotFoundError):
+            return
+        raise exc_info[1]
+
+    shutil.rmtree(_long_path(path), onerror=onerror)
+
+
+def _archive_target_path(destination_root: Path, member_name: str) -> Path | None:
+    normalized = PurePosixPath(member_name.replace("\\", "/"))
+    if normalized.is_absolute() or any(part in {"", ".", ".."} for part in normalized.parts):
+        return None
+    return destination_root.joinpath(*normalized.parts)
+
+
+def _extract_zip_archive(archive_path: Path, destination_root: Path) -> None:
+    with ZipFile(archive_path) as archive:
+        for member in archive.infolist():
+            target = _archive_target_path(destination_root, member.filename)
+            if target is None:
+                continue
+            if member.is_dir():
+                os.makedirs(_long_path(target), exist_ok=True)
+                continue
+            os.makedirs(_long_path(target.parent), exist_ok=True)
+            with archive.open(member) as src, open(_long_path(target), "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+
+def _extract_tar_archive(archive_path: Path, destination_root: Path) -> None:
+    with tarfile.open(archive_path) as archive:
+        for member in archive:
+            target = _archive_target_path(destination_root, member.name)
+            if target is None:
+                continue
+            if member.isdir():
+                os.makedirs(_long_path(target), exist_ok=True)
+                continue
+            if not member.isfile():
+                continue
+            os.makedirs(_long_path(target.parent), exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                continue
+            with source, open(_long_path(target), "wb") as dst:
+                shutil.copyfileobj(source, dst)
+
+
 def _extract_archive(archive_path: Path, destination_root: Path) -> Path:
     if destination_root.exists():
-        shutil.rmtree(destination_root)
+        _remove_tree(destination_root)
     destination_root.mkdir(parents=True, exist_ok=True)
 
     suffixes = [suffix.lower() for suffix in archive_path.suffixes]
     if ".zip" in suffixes:
-        with ZipFile(archive_path) as archive:
-            archive.extractall(destination_root)
+        _extract_zip_archive(archive_path, destination_root)
         return _resolve_extracted_root(destination_root)
 
     if any(suffix in {".tar", ".gz", ".bz2", ".xz", ".tgz"} for suffix in suffixes):
-        with tarfile.open(archive_path) as archive:
-            archive.extractall(destination_root)
+        _extract_tar_archive(archive_path, destination_root)
         return _resolve_extracted_root(destination_root)
 
     raise RuntimeError(f"unsupported archive format: {archive_path}")

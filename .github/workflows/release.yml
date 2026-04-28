@@ -32,6 +32,7 @@ permissions:
 env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: "utf-8"
+  STATICPYTHON_BUILD_WORKERS: "2"
 
 jobs:
   build:
@@ -58,6 +59,8 @@ jobs:
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
 
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -73,6 +76,7 @@ jobs:
             --cpython-version "${{ inputs.cpython_version }}" `
             --download-root "$env:RUNNER_TEMP\cpython-${{ matrix.profile }}" `
             --profile "${{ matrix.profile }}" `
+            --build-workers "$env:STATICPYTHON_BUILD_WORKERS" `
             --output-dir $dist
 
       - name: Find artifact

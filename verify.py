@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from libs import (
@@ -15,7 +16,10 @@ from libs import (
 
 
 def log(message: str) -> None:
-    print(f"[staticpython-verify] {message}", flush=True)
+    text = f"[staticpython-verify] {message}"
+    encoding = sys.stdout.encoding or "utf-8"
+    safe_text = text.encode(encoding, errors="backslashreplace").decode(encoding, errors="replace")
+    print(safe_text, flush=True)
 
 
 def load_manifest(path: Path) -> dict:
@@ -839,6 +843,7 @@ def verify_imports_and_smoke(
     manifest: dict,
     integrations: list,
     cwd: Path,
+    run_third_party_smoke: bool,
 ) -> list[dict]:
     failures = []
     failures.extend(
@@ -851,8 +856,10 @@ def verify_imports_and_smoke(
         )
     )
     failures.extend(run_json_step("stdlib-smoke", python_exe, STDLIB_SMOKE, cwd, 300))
-    if integrations:
+    if integrations and run_third_party_smoke:
         failures.extend(run_json_step("third-party-smoke", python_exe, THIRD_PARTY_SMOKE, cwd, 300))
+    elif integrations:
+        log("skip third-party-smoke because this profile selects an incremental library subset")
     else:
         log("skip third-party-smoke because no third-party integrations are enabled")
     return failures
@@ -892,8 +899,34 @@ def verify_integration_steps(
                 )
             )
             continue
+        if step["kind"] == "inline":
+            failures.extend(
+                run_command_step(
+                    step["name"],
+                    [str(python_exe), "-c", step["code"]],
+                    repo_root,
+                    timeout,
+                )
+            )
+            continue
         raise RuntimeError(f"unsupported verification step kind: {step['kind']}")
     return failures
+
+
+def verification_coverage(integrations: list) -> dict:
+    explicit_steps = collect_verification_steps(integrations)
+    libraries_without_steps = sorted(
+        integration.name for integration in integrations if not integration.verification_steps
+    )
+    libraries_with_steps = sorted(
+        integration.name for integration in integrations if integration.verification_steps
+    )
+    return {
+        "library_count": len(integrations),
+        "explicit_step_count": len(explicit_steps),
+        "libraries_with_steps": libraries_with_steps,
+        "libraries_without_steps": libraries_without_steps,
+    }
 
 
 def emit_failure(failure: dict, index: int, total: int) -> None:
@@ -920,11 +953,12 @@ def emit_failure(failure: dict, index: int, total: int) -> None:
             log(f"    {line}")
 
 
-def write_report(path: Path, python_exe: Path, failures: list[dict]) -> None:
+def write_report(path: Path, python_exe: Path, failures: list[dict], coverage: dict) -> None:
     report = {
         "python_exe": str(python_exe),
         "failure_count": len(failures),
         "failures": failures,
+        "verification_coverage": coverage,
     }
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"wrote verification report to {path}")
@@ -953,6 +987,17 @@ def main() -> None:
     profile_name, profile = resolve_profile(config, args.profile)
     integrations = load_integrations(repo_root / "Lib", profile.get("third_party_libraries", "all"))
     log(f"verification profile: {profile_name} ({len(integrations)} third-party integration(s))")
+    coverage = verification_coverage(integrations)
+    missing_steps = coverage["libraries_without_steps"]
+    log(
+        "explicit per-library verification: "
+        f"{len(coverage['libraries_with_steps'])}/{coverage['library_count']} libraries, "
+        f"{coverage['explicit_step_count']} step(s)"
+    )
+    if missing_steps:
+        preview = ", ".join(missing_steps[:20])
+        suffix = f" ... (+{len(missing_steps) - 20} more)" if len(missing_steps) > 20 else ""
+        log(f"verification gaps still import-only: {preview}{suffix}")
     source_root = args.source_root.resolve()
     if not python_exe.exists():
         raise RuntimeError(f"python executable not found: {python_exe}")
@@ -964,11 +1009,21 @@ def main() -> None:
         skipped_groups.add("gui")
 
     failures = []
-    failures.extend(verify_imports_and_smoke(python_exe, source_root, manifest, integrations, repo_root))
+    run_third_party_smoke = profile.get("third_party_libraries") == "all"
+    failures.extend(
+        verify_imports_and_smoke(
+            python_exe,
+            source_root,
+            manifest,
+            integrations,
+            repo_root,
+            run_third_party_smoke,
+        )
+    )
     failures.extend(verify_integration_steps(python_exe, repo_root, integrations, skipped_groups))
 
     if args.report_json:
-        write_report(args.report_json.resolve(), python_exe, failures)
+        write_report(args.report_json.resolve(), python_exe, failures, coverage)
 
     if failures:
         log(f"verification failed with {len(failures)} issue(s)")

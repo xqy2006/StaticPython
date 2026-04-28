@@ -1,4 +1,4 @@
-from libs import replace_text_once, simple_library, transform_source_text
+from libs import inline_verification_step, replace_text_once, simple_library, transform_source_text
 
 
 def _patch_instancemethod(text: str) -> str:
@@ -68,4 +68,19 @@ LIBRARY_INTEGRATION = simple_library(
     name='comtypes',
     overlay_entries=['Lib/comtypes'],
     post_patch_hooks=[patch_comtypes_sources],
+    verification_steps=[
+        inline_verification_step(
+            "comtypes-smoke",
+            """
+from comtypes import GUID, HRESULT, COMMETHOD
+
+guid = GUID("{00000000-0000-0000-C000-000000000046}")
+assert str(guid).startswith("{00000000")
+assert HRESULT(0).value == 0
+method = COMMETHOD([], HRESULT, "Demo")
+assert method.name == "Demo"
+assert method.restype is HRESULT
+""",
+        )
+    ],
 )

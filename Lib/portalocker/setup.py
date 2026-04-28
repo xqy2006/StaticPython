@@ -1,4 +1,4 @@
-from libs import replace_text_once, simple_library, transform_source_text
+from libs import inline_verification_step, replace_text_once, simple_library, transform_source_text
 
 
 def patch_portalocker_sources(context):
@@ -60,4 +60,24 @@ LIBRARY_INTEGRATION = simple_library(
     name="portalocker",
     overlay_entries=["Lib/portalocker"],
     post_patch_hooks=[patch_portalocker_sources],
+    verification_steps=[
+        inline_verification_step(
+            "portalocker-smoke",
+            """
+import os
+import tempfile
+import portalocker
+
+fd, path = tempfile.mkstemp()
+os.close(fd)
+try:
+    with portalocker.Lock(path, "w", timeout=1) as locked:
+        locked.write("locked")
+    with open(path, encoding="utf-8") as handle:
+        assert handle.read() == "locked"
+finally:
+    os.unlink(path)
+""",
+        )
+    ],
 )
