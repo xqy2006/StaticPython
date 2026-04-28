@@ -14,6 +14,10 @@ document = html5lib.parse("<!doctype html><title>StaticPython</title><p>ok</p>")
 html = document.find("{http://www.w3.org/1999/xhtml}head")
 title = html.find("{http://www.w3.org/1999/xhtml}title")
 assert title.text == "StaticPython"
+fragment = html5lib.parseFragment("<p>one<b>two</p>")
+paragraph = fragment.find("{http://www.w3.org/1999/xhtml}p")
+assert paragraph is not None
+assert paragraph.find("{http://www.w3.org/1999/xhtml}b").text == "two"
 """,
         )
     ],

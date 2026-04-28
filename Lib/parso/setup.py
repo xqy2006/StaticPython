@@ -10,8 +10,11 @@ LIBRARY_INTEGRATION = simple_library(
             """
 import parso
 
-module = parso.parse("value = 42\\n")
-assert module.children[0].get_code().strip() == "value = 42"
+module = parso.parse("def func(value):\\n    return value + 1\\n")
+function = module.children[0]
+assert function.name.value == "func"
+assert function.get_code().startswith("def func")
+assert "return value + 1" in function.get_code()
 """,
         )
     ],

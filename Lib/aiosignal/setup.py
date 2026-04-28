@@ -21,6 +21,12 @@ signal.append(receiver)
 signal.freeze()
 asyncio.run(signal.send("sender", value=3))
 assert seen == [(('sender',), {'value': 3})]
+try:
+    signal.append(receiver)
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("aiosignal allowed mutation after freeze")
 """,
         )
     ],

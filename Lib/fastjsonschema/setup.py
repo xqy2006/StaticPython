@@ -16,6 +16,12 @@ validate = fastjsonschema.compile({
     "required": ["answer"],
 })
 assert validate({"answer": 42}) == {"answer": 42}
+try:
+    validate({"answer": "nope"})
+except fastjsonschema.JsonSchemaException:
+    pass
+else:
+    raise AssertionError("fastjsonschema accepted an invalid payload")
 """,
         )
     ],

@@ -103,7 +103,9 @@ LIBRARY_INTEGRATION = pypi_library(
             "regex-smoke",
             r"""
 import regex
+import importlib.util
 
+assert importlib.util.find_spec("regex._regex").origin == "built-in"
 match = regex.search(r"(?P<word>\p{Letter}+)", "abc 123")
 assert match and match.group("word") == "abc", match
 assert regex.findall(r"\X", "a\u0301b") == ["a\u0301", "b"]

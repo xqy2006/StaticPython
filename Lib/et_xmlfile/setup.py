@@ -13,10 +13,12 @@ from et_xmlfile import xmlfile
 
 buffer = io.BytesIO()
 with xmlfile(buffer) as xf:
-    with xf.element("root"):
-        xf.write("demo")
+    with xf.element("root", {"kind": "demo"}):
+        with xf.element("child"):
+            xf.write("demo")
 xml = buffer.getvalue()
-assert b"<root>demo</root>" in xml
+assert b'<root kind="demo">' in xml
+assert b"<child>demo</child>" in xml
 """,
         )
     ],

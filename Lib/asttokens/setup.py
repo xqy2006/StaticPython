@@ -13,6 +13,8 @@ import asttokens
 tokens = asttokens.ASTTokens("x = 1 + 2", parse=True)
 assign = tokens.tree.body[0]
 assert tokens.get_text(assign.value) == "1 + 2"
+start, end = tokens.get_text_range(assign.targets[0])
+assert tokens.text[start:end] == "x"
 """,
         )
     ],

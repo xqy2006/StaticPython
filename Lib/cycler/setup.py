@@ -15,6 +15,9 @@ assert list(combined) == [
     {"color": "red", "linewidth": 1},
     {"color": "blue", "linewidth": 2},
 ]
+product = cycler(color=["red", "blue"]) * cycler(marker=["o", "x"])
+assert len(product) == 4
+assert {"color": "red", "marker": "o"} in list(product)
 """,
         )
     ],

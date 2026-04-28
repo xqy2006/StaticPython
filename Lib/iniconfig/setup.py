@@ -18,6 +18,8 @@ with tempfile.TemporaryDirectory() as temp_dir:
     path.write_text("[tool]\\nname = staticpython\\n", encoding="utf-8")
     config = IniConfig(str(path))
     assert config["tool"]["name"] == "staticpython"
+    assert "tool" in config.sections
+    assert list(config["tool"]) == ["name"]
 """,
         )
     ],

@@ -143,8 +143,10 @@ LIBRARY_INTEGRATION = pypi_library(
             "psutil-smoke",
             """
 import os
+import importlib.util
 import psutil
 
+assert importlib.util.find_spec("psutil._psutil_windows").origin == "built-in"
 assert psutil.cpu_count() is None or psutil.cpu_count() >= 1
 assert psutil.virtual_memory().total > 0
 proc = psutil.Process(os.getpid())

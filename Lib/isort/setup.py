@@ -28,10 +28,12 @@ LIBRARY_INTEGRATION = simple_library(
             "isort-smoke",
             """
 import isort
+from isort.settings import Config
 
 source = "import sys\\nimport os\\n"
-sorted_source = isort.code(source)
+sorted_source = isort.code(source, config=Config(profile="black"))
 assert sorted_source.startswith("import os\\nimport sys\\n")
+assert isort.check_code(sorted_source, config=Config(profile="black"))
 """,
         )
     ],

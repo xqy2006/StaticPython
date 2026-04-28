@@ -18,7 +18,10 @@ metadata.create_all(engine)
 with engine.begin() as conn:
     conn.execute(table.insert(), [{"name": "a"}, {"name": "b"}])
     rows = conn.execute(sa.select(table.c.name).order_by(table.c.id)).scalars().all()
+    count = conn.scalar(sa.select(sa.func.count()).select_from(table))
 assert rows == ["a", "b"]
+assert count == 2
+assert "demo" in sa.inspect(engine).get_table_names()
 """,
         )
     ],

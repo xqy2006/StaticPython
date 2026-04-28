@@ -55,11 +55,18 @@ LIBRARY_INTEGRATION = simple_library(
         inline_verification_step(
             "pyparsing-smoke",
             """
-from pyparsing import Word, nums
+from pyparsing import ParseException, Suppress, Word, alphas, delimited_list, nums
 
 integer = Word(nums).set_parse_action(lambda tokens: int(tokens[0]))
-result = integer.parse_string("123")
-assert result[0] == 123
+record = Word(alphas)("name") + Suppress(":") + delimited_list(integer)("values")
+result = record.parse_string("codex:1,2,3", parse_all=True)
+assert result.as_dict() == {"name": "codex", "values": [1, 2, 3]}
+try:
+    record.parse_string("codex:not-a-number", parse_all=True)
+except ParseException:
+    pass
+else:
+    raise AssertionError("pyparsing accepted an invalid record")
 """,
         )
     ],

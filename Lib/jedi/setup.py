@@ -12,7 +12,10 @@ import jedi
 
 script = jedi.Script("import math\\nmath.sq")
 completions = script.complete(2, 7)
-assert any(item.name == "sqrt" for item in completions)
+names = {item.name for item in completions}
+assert "sqrt" in names
+inferred = jedi.Script("value = 42\\nvalue").infer(2, 5)
+assert inferred and inferred[0].name == "int"
 """,
         )
     ],

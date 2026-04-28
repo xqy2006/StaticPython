@@ -11,12 +11,18 @@ LIBRARY_INTEGRATION = simple_library(
 import tempfile
 from pathlib import Path
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 with tempfile.TemporaryDirectory() as temp_dir:
     lock_path = Path(temp_dir) / "demo.lock"
     with FileLock(str(lock_path), timeout=1):
         assert lock_path.exists()
+        try:
+            FileLock(str(lock_path), timeout=0).acquire()
+        except Timeout:
+            pass
+        else:
+            raise AssertionError("filelock allowed a second exclusive lock")
 """,
         )
     ],

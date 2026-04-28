@@ -12,6 +12,8 @@ LIBRARY_INTEGRATION = simple_library(
 from pyasn1_modules import rfc5280
 
 assert rfc5280.Certificate.componentType
+assert rfc5280.id_ce_basicConstraints.prettyPrint() == "2.5.29.19"
+assert rfc5280.Version("v3") == 2
 """,
         )
     ],

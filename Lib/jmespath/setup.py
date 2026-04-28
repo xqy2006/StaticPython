@@ -11,7 +11,9 @@ LIBRARY_INTEGRATION = simple_library(
 import jmespath
 
 data = {"items": [{"name": "alpha", "value": 1}, {"name": "beta", "value": 2}]}
-assert jmespath.search("items[?value>`1`].name | [0]", data) == "beta"
+expression = jmespath.compile("items[?value>`1`].name | [0]")
+assert expression.search(data) == "beta"
+assert jmespath.search("length(items)", data) == 2
 """,
         )
     ],

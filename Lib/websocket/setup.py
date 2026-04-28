@@ -14,6 +14,8 @@ from websocket._url import parse_url
 
 frame = ABNF.create_frame("hello", ABNF.OPCODE_TEXT)
 frame.validate(skip_utf8_validation=False)
+assert frame.opcode == ABNF.OPCODE_TEXT
+assert frame.data == b"hello"
 host, port, resource, secure = parse_url("wss://example.com/chat")
 assert (host, port, resource, secure) == ("example.com", 443, "/chat", True)
 """,

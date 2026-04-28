@@ -8,7 +8,7 @@ LIBRARY_INTEGRATION = simple_library(
         inline_verification_step(
             "traitlets-smoke",
             """
-from traitlets import HasTraits, Int
+from traitlets import HasTraits, Int, TraitError
 
 class Counter(HasTraits):
     value = Int(0)
@@ -18,6 +18,12 @@ counter = Counter()
 counter.observe(lambda change: seen.append(change["new"]), names="value")
 counter.value = 5
 assert seen == [5]
+try:
+    counter.value = "bad"
+except TraitError:
+    pass
+else:
+    raise AssertionError("traitlets accepted a non-integer value")
 """,
         )
     ],

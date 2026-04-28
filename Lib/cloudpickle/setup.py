@@ -10,8 +10,22 @@ LIBRARY_INTEGRATION = simple_library(
             """
 import cloudpickle
 
-func = cloudpickle.loads(cloudpickle.dumps(lambda value: value + 41))
+factor = 40
+
+def make_adder(delta):
+    return lambda value: value + delta + factor
+
+class LocalGreeter:
+    def __init__(self, prefix):
+        self.prefix = prefix
+
+    def greet(self, name):
+        return f"{self.prefix} {name}"
+
+func = cloudpickle.loads(cloudpickle.dumps(make_adder(1)))
+greeter = cloudpickle.loads(cloudpickle.dumps(LocalGreeter("hi")))
 assert func(1) == 42
+assert greeter.greet("codex") == "hi codex"
 """,
         )
     ],

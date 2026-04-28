@@ -12,10 +12,21 @@ import anyio
 
 async def worker():
     send, receive = anyio.create_memory_object_stream(1)
-    await send.send("ok")
-    return await receive.receive()
+    async with send, receive:
+        await send.send("ok")
+        value = await receive.receive()
 
-assert anyio.run(worker) == "ok"
+    seen = []
+
+    async def child():
+        seen.append(anyio.get_current_task().name is not None)
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(child)
+
+    return value, seen
+
+assert anyio.run(worker) == ("ok", [True])
 """,
         )
     ],

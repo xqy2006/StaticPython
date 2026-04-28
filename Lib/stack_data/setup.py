@@ -9,10 +9,33 @@ LIBRARY_INTEGRATION = simple_library(
         inline_verification_step(
             "stack-data-smoke",
             """
-import stack_data
+import linecache
+import sys
+import textwrap
+from stack_data import FrameInfo, Line, Options
 
-assert hasattr(stack_data, "FrameInfo")
-assert hasattr(stack_data, "Source")
+filename = "<stack_data_smoke>"
+source_text = textwrap.dedent(
+    '''
+    import sys
+    def probe():
+        alpha = 20
+        beta = [1, 2, 3]
+        frame = sys._getframe()
+        return frame
+    '''
+)
+linecache.cache[filename] = (len(source_text), None, source_text.splitlines(True), filename)
+namespace = {"sys": sys}
+exec(compile(source_text, filename, "exec"), namespace)
+frame = namespace["probe"]()
+info = FrameInfo(frame, Options(before=1, after=1))
+lines = list(info.lines)
+variables = {variable.name: variable.value for variable in info.variables}
+assert info.source.filename == filename
+assert any(isinstance(line, Line) and line.is_current for line in lines)
+assert variables["alpha"] == 20
+assert variables["beta"] == [1, 2, 3]
 """,
         )
     ],

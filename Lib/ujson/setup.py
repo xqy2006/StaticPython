@@ -127,8 +127,10 @@ LIBRARY_INTEGRATION = pypi_library(
             "ujson-smoke",
             """
 import math
+import importlib.util
 import ujson
 
+assert importlib.util.find_spec("ujson").origin == "built-in"
 payload = {"name": "codex", "items": [1, 2, 3], "value": 1.25}
 encoded = ujson.dumps(payload)
 decoded = ujson.loads(encoded)

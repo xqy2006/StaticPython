@@ -15,9 +15,12 @@ buffer = io.StringIO()
 handler_id = logger.add(buffer, format="{level}:{message}")
 try:
     logger.warning("demo")
+    logger.bind(component="verify").info("bound")
 finally:
     logger.remove(handler_id)
-assert "WARNING:demo" in buffer.getvalue()
+output = buffer.getvalue()
+assert "WARNING:demo" in output
+assert "INFO:bound" in output
 """,
         )
     ],
