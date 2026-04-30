@@ -3,7 +3,8 @@ from libs import inline_verification_step, simple_library
 
 LIBRARY_INTEGRATION = simple_library(
     name='attrs',
-    overlay_entries=['Lib/attrs'],
+    overlay_entries=['Lib/attrs', 'Lib/attr'],
+    python_packages=['attrs', 'attr'],
     verification_steps=[
         inline_verification_step(
             "attrs-smoke",

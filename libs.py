@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tarfile
 import time
 from pathlib import Path, PurePosixPath
@@ -13,6 +14,18 @@ from types import ModuleType
 from typing import Callable
 from urllib.request import Request, urlopen
 from zipfile import ZipFile
+
+
+def _ensure_repo_packaging_on_path() -> None:
+    repo_packaging = Path(__file__).resolve().parent / "Lib" / "packaging"
+    if not repo_packaging.exists():
+        return
+    repo_packaging_text = str(repo_packaging)
+    if repo_packaging_text not in sys.path:
+        sys.path.insert(0, repo_packaging_text)
+
+
+_ensure_repo_packaging_on_path()
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
@@ -52,6 +65,8 @@ class LibraryHookContext:
 class LibraryIntegration:
     name: str
     overlay_entries: list[str] = field(default_factory=list)
+    materialized_paths: list[str] = field(default_factory=list)
+    cleanup_paths: list[str] = field(default_factory=list)
     python_packages: list[str] = field(default_factory=list)
     verification_imports: list[str] = field(default_factory=list)
     static_library_projects_release_x64: list[str] = field(default_factory=list)
@@ -69,6 +84,21 @@ class LibraryIntegration:
 
 def _unique(items: list[str]) -> list[str]:
     return list(dict.fromkeys(items))
+
+
+def _build_materialized_paths(
+    source_mapping: dict[str, str],
+    overlay_entries: list[str],
+    extra_paths: list[str] | None = None,
+) -> list[str]:
+    paths = [_normalized_relpath(path) for path in source_mapping.values()]
+    paths.extend(_normalized_relpath(path) for path in overlay_entries)
+    paths.extend(_normalized_relpath(path) for path in (extra_paths or []))
+    return _unique(paths)
+
+
+def _build_cleanup_paths(paths: list[str] | None = None) -> list[str]:
+    return _unique([_normalized_relpath(path) for path in (paths or [])])
 
 
 def source_path(context: LibraryHookContext, relative: str) -> Path:
@@ -163,6 +193,7 @@ def module_verification_step(
     name: str,
     module: str,
     *,
+    args: list[str] | None = None,
     timeout: float = 240,
     skip_group: str | None = None,
 ) -> dict:
@@ -172,6 +203,8 @@ def module_verification_step(
         "module": module,
         "timeout": timeout,
     }
+    if args:
+        step["args"] = list(args)
     if skip_group:
         step["skip_group"] = skip_group
     return step
@@ -181,6 +214,7 @@ def script_verification_step(
     name: str,
     script: str,
     *,
+    args: list[str] | None = None,
     timeout: float = 240,
     skip_group: str | None = None,
 ) -> dict:
@@ -190,6 +224,8 @@ def script_verification_step(
         "script": script,
         "timeout": timeout,
     }
+    if args:
+        step["args"] = list(args)
     if skip_group:
         step["skip_group"] = skip_group
     return step
@@ -348,6 +384,36 @@ def _select_pypi_file(
     )
 
 
+def _find_cached_pypi_archive(
+    download_cache_root: Path,
+    normalized_project_name: str,
+    release_version: str,
+) -> Path | None:
+    release_root = download_cache_root / "pypi" / normalized_project_name / release_version
+    if not release_root.exists():
+        return None
+
+    candidates = [
+        path
+        for path in sorted(release_root.iterdir())
+        if path.is_file() and any(suffix in {".zip", ".whl", ".tar", ".gz", ".bz2", ".xz", ".tgz"} for suffix in path.suffixes)
+    ]
+    if not candidates:
+        return None
+
+    def sort_key(path: Path) -> tuple[int, str]:
+        lower_name = path.name.lower()
+        if lower_name.endswith((".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".zip", ".tar")):
+            priority = 0
+        elif lower_name.endswith(".whl"):
+            priority = 1
+        else:
+            priority = 2
+        return (priority, lower_name)
+
+    return sorted(candidates, key=sort_key)[0]
+
+
 def _resolve_extracted_root(destination_root: Path) -> Path:
     children = [path for path in destination_root.iterdir()]
     if len(children) == 1 and children[0].is_dir():
@@ -491,21 +557,38 @@ def _build_pypi_source_hook(
 
     def prepare_source(context: LibraryHookContext) -> None:
         target_version = Version(".".join(str(part) for part in context.version_info))
-        resolved_release_version, file_info = _select_pypi_file(
-            project_name,
-            target_version,
-            release_version,
-        )
-        filename = file_info["filename"]
-        url = file_info["url"]
+        cached_archive_path: Path | None = None
+        if release_version is not None:
+            cached_archive_path = _find_cached_pypi_archive(context.download_cache_root, normalized, release_version)
+            if cached_archive_path is not None:
+                context.log(f"reusing cached {project_name} {release_version} archive without refreshing PyPI metadata")
+                resolved_release_version = release_version
+                archive_path = cached_archive_path
+            else:
+                resolved_release_version, file_info = _select_pypi_file(
+                    project_name,
+                    target_version,
+                    release_version,
+                )
+                filename = file_info["filename"]
+                url = file_info["url"]
+                archive_path = context.download_cache_root / "pypi" / normalized / resolved_release_version / filename
+        else:
+            resolved_release_version, file_info = _select_pypi_file(
+                project_name,
+                target_version,
+                release_version,
+            )
+            filename = file_info["filename"]
+            url = file_info["url"]
+            archive_path = context.download_cache_root / "pypi" / normalized / resolved_release_version / filename
 
-        archive_path = context.download_cache_root / "pypi" / normalized / resolved_release_version / filename
         extract_root = context.work_cache_root / "pypi" / normalized / resolved_release_version / "extracted"
 
         if not archive_path.exists():
             context.log(f"downloading {project_name} {resolved_release_version} from PyPI")
             _download_file(url, archive_path)
-        else:
+        elif cached_archive_path is None:
             context.log(f"reusing cached {project_name} {resolved_release_version} archive")
 
         extracted_root = _extract_archive(archive_path, extract_root)
@@ -588,6 +671,8 @@ def pypi_library(
     staged_static_libraries_release_x64: list[dict] | None = None,
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
+    materialized_paths: list[str] | None = None,
+    cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
     pre_patch_hooks: list[Hook] | None = None,
     post_patch_hooks: list[Hook] | None = None,
@@ -600,10 +685,17 @@ def pypi_library(
             resolved_mapping.setdefault(normalized_entry, f"Lib/{normalized_entry}")
     if not resolved_mapping:
         raise RuntimeError(f"{name} must declare at least one source entry or source mapping")
+    normalized_overlay_entries = [_normalized_relpath(entry) for entry in overlay_entries or []]
 
     return LibraryIntegration(
         name=name,
-        overlay_entries=[_normalized_relpath(entry) for entry in overlay_entries or []],
+        overlay_entries=normalized_overlay_entries,
+        materialized_paths=_build_materialized_paths(
+            resolved_mapping,
+            normalized_overlay_entries,
+            materialized_paths,
+        ),
+        cleanup_paths=_build_cleanup_paths(cleanup_paths),
         python_packages=list(python_packages or [name]),
         verification_imports=list(verification_imports or []),
         static_library_projects_release_x64=list(static_library_projects_release_x64 or []),
@@ -642,6 +734,8 @@ def github_library(
     staged_static_libraries_release_x64: list[dict] | None = None,
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
+    materialized_paths: list[str] | None = None,
+    cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
     pre_patch_hooks: list[Hook] | None = None,
     post_patch_hooks: list[Hook] | None = None,
@@ -654,10 +748,17 @@ def github_library(
             resolved_mapping.setdefault(normalized_entry, f"Lib/{normalized_entry}")
     if not resolved_mapping:
         raise RuntimeError(f"{name} must declare at least one source entry or source mapping")
+    normalized_overlay_entries = [_normalized_relpath(entry) for entry in overlay_entries or []]
 
     return LibraryIntegration(
         name=name,
-        overlay_entries=[_normalized_relpath(entry) for entry in overlay_entries or []],
+        overlay_entries=normalized_overlay_entries,
+        materialized_paths=_build_materialized_paths(
+            resolved_mapping,
+            normalized_overlay_entries,
+            materialized_paths,
+        ),
+        cleanup_paths=_build_cleanup_paths(cleanup_paths),
         python_packages=list(python_packages or [name]),
         verification_imports=list(verification_imports or []),
         static_library_projects_release_x64=list(static_library_projects_release_x64 or []),
@@ -699,6 +800,8 @@ def simple_library(
     python_packages: list[str] | None = None,
     verification_imports: list[str] | None = None,
     verification_steps: list[dict] | None = None,
+    materialized_paths: list[str] | None = None,
+    cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
     pre_patch_hooks: list[Hook] | None = None,
     post_patch_hooks: list[Hook] | None = None,
@@ -723,6 +826,8 @@ def simple_library(
         "python_packages": python_packages,
         "verification_imports": verification_imports,
         "verification_steps": verification_steps,
+        "materialized_paths": materialized_paths,
+        "cleanup_paths": cleanup_paths,
         "prepare_source_hooks": prepare_source_hooks,
         "pre_patch_hooks": pre_patch_hooks,
         "post_patch_hooks": post_patch_hooks,

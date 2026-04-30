@@ -104,6 +104,10 @@ def find_python_modules(root_dir):
             d for d in dirs
             if _is_valid_module_segment(d) and _should_descend_directory(namespace_parts, d)
         )
+        package_dir_names = {
+            d for d in dirs
+            if os.path.exists(os.path.join(root, d, '__init__.py'))
+        }
 
         # Package directory with __init__.py.
         if '__init__.py' in files:
@@ -124,6 +128,8 @@ def find_python_modules(root_dir):
                     mod_name = f[:-3]
                     if not _is_valid_module_segment(mod_name):
                         continue
+                    if mod_name in package_dir_names:
+                        continue
                     full_name = f"{pkg_name}.{mod_name}" if pkg_name else mod_name
                     yield FrozenModule1(
                         fullname=full_name,
@@ -139,6 +145,8 @@ def find_python_modules(root_dir):
                 if f.endswith('.py'):
                     mod_name = f[:-3]
                     if not _is_valid_module_segment(mod_name):
+                        continue
+                    if mod_name in package_dir_names:
                         continue
                     yield FrozenModule1(
                         fullname=mod_name,

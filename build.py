@@ -54,7 +54,9 @@ PYREPL_MIN_VERSION = (3, 13, 0)
 MSBUILD_NS = "http://schemas.microsoft.com/developer/msbuild/2003"
 MSBUILD_RELEASE_X64_CONDITION = "'$(Configuration)|$(Platform)'=='Release|x64'"
 FROZEN_DATA_SOURCE_PREFIX = "staticpython_frozen_data_"
-FROZEN_DATA_SHARD_BYTES = 4 * 1024 * 1024
+FROZEN_DATA_SHARD_BYTES = 2 * 1024 * 1024
+BASELINE_PYTHON_PROJECT_REFERENCES = {"pythoncore.vcxproj"}
+PROFILE_METADATA_RELATIVE_PATH = Path("PCbuild") / "staticpython-profile.json"
 
 ET.register_namespace("", MSBUILD_NS)
 
@@ -69,6 +71,36 @@ def load_manifest() -> dict:
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def profile_metadata_path(source_root: Path) -> Path:
+    return source_root / PROFILE_METADATA_RELATIVE_PATH
+
+
+def integration_names(integrations: list) -> list[str]:
+    return [integration.name for integration in integrations]
+
+
+def write_profile_metadata(
+    source_root: Path,
+    profile_name: str,
+    config_path: Path,
+    version_full: str,
+    core_integrations: list,
+    third_party_integrations: list,
+) -> None:
+    payload = {
+        "schema_version": 1,
+        "profile_name": profile_name,
+        "config_path": str(config_path),
+        "version_full": version_full,
+        "core_libraries": integration_names(core_integrations),
+        "third_party_libraries": integration_names(third_party_integrations),
+    }
+    path = profile_metadata_path(source_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+    log(f"wrote build profile metadata to {path.relative_to(source_root)}")
 
 
 def resolve_profile(config: dict, profile_name: str | None) -> tuple[str, dict]:
@@ -134,20 +166,28 @@ def iter_staged_static_libraries(manifest: dict, integrations: list) -> list[dic
 def iter_builtin_module_registrations(source_root: Path, manifest: dict, integrations: list) -> list[dict]:
     registrations = manifest.get("builtin_module_registrations")
     if registrations:
-        candidates = [*registrations, *collect_builtin_module_registrations(integrations)]
+        manifest_candidates = list(registrations)
     else:
-        candidates = [{"name": name, "pyinit": f"PyInit_{name}"} for name in manifest.get("python_builtin_modules", [])]
+        manifest_candidates = [{"name": name, "pyinit": f"PyInit_{name}"} for name in manifest.get("python_builtin_modules", [])]
+    integration_candidates = collect_builtin_module_registrations(integrations)
 
     available_projects = {Path(project).stem for project in iter_static_library_projects(source_root, manifest, integrations)}
     filtered = []
-    for builtin in candidates:
+    seen: set[str] = set()
+    for builtin in manifest_candidates:
         if builtin["name"] in available_projects:
             filtered.append(builtin)
+            seen.add(builtin["name"])
         else:
             log(
                 f"skip builtin registration {builtin['name']} because the corresponding project is unavailable "
                 "in this CPython version"
             )
+    for builtin in integration_candidates:
+        if builtin["name"] in seen:
+            continue
+        filtered.append(builtin)
+        seen.add(builtin["name"])
     return filtered
 
 
@@ -222,14 +262,27 @@ def ensure_direct_child(parent: ET.Element, tag: str, *, condition: str | None =
 def set_frozen_data_compile_options(clcompile: ET.Element) -> None:
     include_dirs = ensure_direct_child(clcompile, "AdditionalIncludeDirectories")
     include_dirs.text = "$(GeneratedFrozenModulesDir)Python;%(AdditionalIncludeDirectories)"
-    for tag in (
+    # Frozen module headers are giant byte arrays. They do not benefit from
+    # LTCG, and letting them participate in /GL can exhaust MSVC/link heap once
+    # large pure-Python packages are frozen into the executable.
+    optimization = ensure_direct_child(
+        clcompile,
         "Optimization",
+        condition=MSBUILD_RELEASE_X64_CONDITION,
+    )
+    optimization.text = "Disabled"
+    inline_expansion = ensure_direct_child(
+        clcompile,
         "InlineFunctionExpansion",
+        condition=MSBUILD_RELEASE_X64_CONDITION,
+    )
+    inline_expansion.text = "Disabled"
+    whole_program_optimization = ensure_direct_child(
+        clcompile,
         "WholeProgramOptimization",
-        "MultiProcessorCompilation",
-    ):
-        for child in find_direct_children(clcompile, tag, condition=MSBUILD_RELEASE_X64_CONDITION):
-            clcompile.remove(child)
+        condition=MSBUILD_RELEASE_X64_CONDITION,
+    )
+    whole_program_optimization.text = "false"
 
 
 def _insert_before_predicate(root: ET.Element, element: ET.Element, predicate: callable) -> None:
@@ -414,6 +467,25 @@ def ensure_project_reference(root: ET.Element, project_name: str, guid: str) -> 
     reference.text = "false"
 
 
+def sync_python_project_references(root: ET.Element, desired_projects: list[dict]) -> None:
+    allowed = {project["project"] for project in desired_projects}
+    allowed.update(BASELINE_PYTHON_PROJECT_REFERENCES)
+    qname = msbuild_tag("ProjectReference")
+
+    for item_group in list(find_direct_children(root, "ItemGroup")):
+        removed = False
+        for project_ref in list(item_group):
+            if project_ref.tag != qname:
+                continue
+            if project_ref.get("Include") in allowed:
+                continue
+            item_group.remove(project_ref)
+            removed = True
+
+        if removed and not any(isinstance(child.tag, str) for child in item_group):
+            root.remove(item_group)
+
+
 def build_python_link_dependencies(source_root: Path, manifest: dict, integrations: list) -> str:
     all_project_stems = {Path(project).stem for project in all_static_library_projects(manifest, integrations)}
     available_project_stems = {Path(project).stem for project in iter_static_library_projects(source_root, manifest, integrations)}
@@ -567,6 +639,17 @@ def remove_line_contains(text: str, needle: str) -> str:
     lines = text.splitlines(keepends=True)
     kept = [line for line in lines if needle not in line]
     return "".join(kept)
+
+
+def replace_section_between_anchors(text: str, start_anchor: str, end_anchor: str, body: str, *, path: Path) -> str:
+    start_index = text.find(start_anchor)
+    if start_index < 0:
+        raise RuntimeError(f"expected start anchor not found in {path}: {start_anchor!r}")
+    start_index += len(start_anchor)
+    end_index = text.find(end_anchor, start_index)
+    if end_index < 0:
+        raise RuntimeError(f"expected end anchor not found in {path}: {end_anchor!r}")
+    return text[:start_index] + body + text[end_index:]
 
 
 def ensure_clcompile_preprocessor_definition(text: str, definition: str, *, path: Path) -> str:
@@ -743,6 +826,54 @@ def copy_overlay_entries(
             dst.parent.mkdir(parents=True, exist_ok=True)
             log(f"copy file {rel}")
             shutil.copy2(src, dst)
+
+
+def cleanup_unselected_third_party_sources(
+    source_root: Path,
+    all_integrations: list,
+    selected_integrations: list,
+) -> None:
+    desired = {
+        path.replace("\\", "/")
+        for integration in selected_integrations
+        for path in integration.materialized_paths
+    }
+    candidates = {
+        path.replace("\\", "/")
+        for integration in all_integrations
+        for path in integration.materialized_paths
+    }
+
+    for relative in sorted(candidates - desired, key=lambda value: (value.count("/"), len(value)), reverse=True):
+        if any(desired_path.startswith(relative + "/") for desired_path in desired):
+            continue
+        target = source_root / relative
+        if not target.exists():
+            continue
+        if target.is_dir():
+            shutil.rmtree(target)
+            log(f"removed stale third-party tree {relative}")
+        else:
+            target.unlink()
+            log(f"removed stale third-party file {relative}")
+
+
+def cleanup_integration_legacy_paths(source_root: Path, integrations: list) -> None:
+    stale_paths = {
+        path.replace("\\", "/")
+        for integration in integrations
+        for path in getattr(integration, "cleanup_paths", [])
+    }
+    for relative in sorted(stale_paths, key=lambda value: (value.count("/"), len(value)), reverse=True):
+        target = source_root / relative
+        if not target.exists():
+            continue
+        if target.is_dir():
+            shutil.rmtree(target)
+            log(f"removed stale integration tree {relative}")
+        else:
+            target.unlink()
+            log(f"removed stale integration file {relative}")
 
 def patch_site_py(source_root: Path, version_mm: str) -> None:
     path = source_root / "Lib" / "site.py"
@@ -1028,6 +1159,7 @@ def patch_freeze_module_vcxproj(source_root: Path) -> None:
 def patch_python_vcxproj(source_root: Path, manifest: dict, integrations: list) -> None:
     path = source_root / "PCbuild" / "python.vcxproj"
     tree, root = load_msbuild_project(path)
+    desired_projects = iter_native_static_projects(source_root, manifest, integrations)
 
     ensure_clcompile_preprocessor_token(root, "Py_NO_ENABLE_SHARED")
     ensure_release_x64_runtime_library(root)
@@ -1045,8 +1177,9 @@ def patch_python_vcxproj(source_root: Path, manifest: dict, integrations: list) 
         build_python_link_options(source_root, manifest, integrations),
         condition=MSBUILD_RELEASE_X64_CONDITION,
     )
+    sync_python_project_references(root, desired_projects)
 
-    for project in iter_native_static_projects(source_root, manifest, integrations):
+    for project in desired_projects:
         ensure_project_reference(root, project["project"], project["guid"])
 
     save_msbuild_project(path, tree)
@@ -1064,30 +1197,26 @@ def patch_pc_config(source_root: Path, manifest: dict, integrations: list) -> No
     ):
         text = remove_line_contains(text, needle)
 
-    missing_externs = []
-    missing_entries = []
-    for builtin in iter_builtin_module_registrations(source_root, manifest, integrations):
-        extern_line = f"extern PyObject* {builtin['pyinit']}(void);"
-        table_line = f'{{"{builtin["name"]}", {builtin["pyinit"]}}},'
-        if extern_line not in text:
-            missing_externs.append(f"\n{extern_line}\n")
-        if table_line not in text:
-            missing_entries.append(f'\n    {table_line}\n')
-
-    if missing_externs:
-        text = ensure_after(
-            text,
-            "/* -- ADDMODULE MARKER 1 -- */\n",
-            "".join(missing_externs),
-            path=path,
+    registrations = list(
+        dict.fromkeys(
+            (builtin["name"], builtin["pyinit"])
+            for builtin in iter_builtin_module_registrations(source_root, manifest, integrations)
         )
-    if missing_entries:
-        text = ensure_after(
-            text,
-            "/* -- ADDMODULE MARKER 2 -- */\n",
-            "".join(missing_entries),
-            path=path,
-        )
+    )
+    baseline_extern_lines = [
+        "extern PyObject* PyMarshal_Init(void);",
+        "extern PyObject* PyInit__imp(void);",
+    ]
+    extern_lines = [*baseline_extern_lines, *[f"extern PyObject* {pyinit}(void);" for _, pyinit in registrations]]
+    table_lines = [f'    {{"{name}", {pyinit}}},' for name, pyinit in registrations]
+    extern_body = "\n" if not extern_lines else "\n" + "\n\n".join(extern_lines) + "\n\n"
+    table_body = "\n" if not table_lines else "\n" + "\n\n".join(table_lines) + "\n\n"
+    marker_1 = "/* -- ADDMODULE MARKER 1 -- */\n"
+    marker_2 = "/* -- ADDMODULE MARKER 2 -- */\n"
+    inittab_anchor = "struct _inittab _PyImport_Inittab[] = {\n"
+    builtin_entries_anchor = '    /* This module "lives in" with marshal.c */\n'
+    text = replace_section_between_anchors(text, marker_1, inittab_anchor, extern_body, path=path)
+    text = replace_section_between_anchors(text, marker_2, builtin_entries_anchor, table_body, path=path)
 
     path.write_text(text, encoding="utf-8", newline="\n")
 
@@ -1511,20 +1640,25 @@ def patch_frozen_registry_symbol(text: str, module_name: str, old_symbol: str, n
 
 def chunk_frozen_headers(records: list[dict]) -> list[list[dict]]:
     chunks: list[list[dict]] = []
-    current: list[dict] = []
-    current_bytes = 0
+    chunk_sizes: list[int] = []
 
-    for record in records:
+    for record in sorted(records, key=lambda item: (-item["file_bytes"], item["source_index"])):
         file_bytes = record["file_bytes"]
-        if current and current_bytes + file_bytes > FROZEN_DATA_SHARD_BYTES:
-            chunks.append(current)
-            current = []
-            current_bytes = 0
-        current.append(record)
-        current_bytes += file_bytes
+        placed = False
+        for index, current_bytes in enumerate(chunk_sizes):
+            if current_bytes + file_bytes > FROZEN_DATA_SHARD_BYTES:
+                continue
+            chunks[index].append(record)
+            chunk_sizes[index] += file_bytes
+            placed = True
+            break
+        if placed:
+            continue
+        chunks.append([record])
+        chunk_sizes.append(file_bytes)
 
-    if current:
-        chunks.append(current)
+    for chunk in chunks:
+        chunk.sort(key=lambda item: item["source_index"])
     return chunks
 
 
@@ -1590,7 +1724,7 @@ def split_frozen_modules(source_root: Path) -> None:
     used_symbols: set[str] = set()
     renamed_symbols: list[tuple[str, str, str]] = []
     frozen_modules_dir = source_root / "Python" / "frozen_modules"
-    for match in include_matches:
+    for source_index, match in enumerate(include_matches):
         include_name = match.group(1)
         header_path = frozen_modules_dir / include_name
         if not header_path.exists():
@@ -1608,6 +1742,7 @@ def split_frozen_modules(source_root: Path) -> None:
                 "symbol": unique_symbol,
                 "size": size,
                 "file_bytes": header_path.stat().st_size,
+                "source_index": source_index,
             }
         )
 
@@ -1996,6 +2131,10 @@ def main() -> int:
     profile_name, profile = resolve_profile(config, args.profile)
     core_integrations = load_integrations(CORE_PATCH_ROOT, profile.get("core_libraries", "all"))
     third_party_integrations = load_integrations(LIB_PATCH_ROOT, profile.get("third_party_libraries", "all"))
+    if profile.get("third_party_libraries") == "all":
+        all_third_party_integrations = third_party_integrations
+    else:
+        all_third_party_integrations = load_integrations(LIB_PATCH_ROOT, "all")
     integrations = [*core_integrations, *third_party_integrations]
     version_info, version_mm, version_full = parse_cpython_version(source_root)
     if requested_version_info is not None and requested_version_info != version_info:
@@ -2011,6 +2150,14 @@ def main() -> int:
     DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     WORK_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     if integrations:
+        if profile.get("third_party_libraries") != "all":
+            log("pruning stale third-party source paths for the selected incremental profile")
+            cleanup_unselected_third_party_sources(
+                source_root,
+                all_third_party_integrations,
+                third_party_integrations,
+            )
+        cleanup_integration_legacy_paths(source_root, integrations)
         log(f"materializing configured integration sources into {source_root}")
         run_prepare_source_hooks(
             integrations,
@@ -2030,6 +2177,14 @@ def main() -> int:
         integrations,
         args.platform,
         args.configuration,
+    )
+    write_profile_metadata(
+        source_root,
+        profile_name,
+        config_path,
+        version_full,
+        core_integrations,
+        third_party_integrations,
     )
 
     if not args.skip_get_externals:

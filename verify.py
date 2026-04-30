@@ -14,6 +14,8 @@ from libs import (
     load_integrations,
 )
 
+PROFILE_METADATA_RELATIVE_PATH = Path("PCbuild") / "staticpython-profile.json"
+
 
 def log(message: str) -> None:
     text = f"[staticpython-verify] {message}"
@@ -28,6 +30,21 @@ def load_manifest(path: Path) -> dict:
 
 def load_config(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def profile_metadata_path(source_root: Path) -> Path:
+    return source_root / PROFILE_METADATA_RELATIVE_PATH
+
+
+def load_profile_metadata(source_root: Path) -> dict | None:
+    path = profile_metadata_path(source_root)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def integration_names(integrations: list) -> list[str]:
+    return [integration.name for integration in integrations]
 
 
 def resolve_profile(config: dict, profile_name: str | None) -> tuple[str, dict]:
@@ -77,6 +94,92 @@ def available_manifest_modules(source_root: Path, manifest: dict, integrations: 
                 "does not exist in this CPython version"
             )
     return list(dict.fromkeys(modules))
+
+
+def verify_profile_metadata(
+    source_root: Path,
+    profile_name: str,
+    core_integrations: list,
+    third_party_integrations: list,
+) -> list[dict]:
+    metadata = load_profile_metadata(source_root)
+    if metadata is None:
+        return [
+            {
+                "step": "profile-metadata",
+                "name": "build-profile",
+                "error_type": "MissingProfileMetadata",
+                "error": (
+                    "build profile metadata is missing; rerun build.py so verify can confirm the "
+                    "materialized source tree matches the requested profile"
+                ),
+                "details": [str(profile_metadata_path(source_root))],
+                "traceback": "",
+                "stdout": "",
+                "stderr": "",
+                "command": "",
+            }
+        ]
+
+    expected_core = integration_names(core_integrations)
+    expected_third_party = integration_names(third_party_integrations)
+    details = []
+    if metadata.get("profile_name") != profile_name:
+        details.append(f"expected profile name: {profile_name}")
+        details.append(f"recorded profile name: {metadata.get('profile_name')}")
+    if metadata.get("core_libraries") != expected_core:
+        details.append(f"expected core libraries: {expected_core}")
+        details.append(f"recorded core libraries: {metadata.get('core_libraries')}")
+    if metadata.get("third_party_libraries") != expected_third_party:
+        details.append(f"expected third-party libraries: {expected_third_party}")
+        details.append(f"recorded third-party libraries: {metadata.get('third_party_libraries')}")
+
+    if not details:
+        return []
+
+    return [
+        {
+            "step": "profile-metadata",
+            "name": "build-profile",
+            "error_type": "ProfileMismatch",
+            "error": (
+                "the patched CPython tree does not match the requested verification profile; "
+                "rerun build.py for this profile before trusting the verification result"
+            ),
+            "details": details,
+            "traceback": "",
+            "stdout": "",
+            "stderr": "",
+            "command": "",
+        }
+    ]
+
+
+def verify_materialized_paths(source_root: Path, integrations: list) -> list[dict]:
+    failures: list[dict] = []
+    total_paths = 0
+    for integration in integrations:
+        missing: list[str] = []
+        for relative in integration.materialized_paths:
+            total_paths += 1
+            if not (source_root / relative).exists():
+                missing.append(relative)
+        if missing:
+            failures.append(
+                {
+                    "step": "materialized-paths",
+                    "name": integration.name,
+                    "error_type": "MissingMaterializedPath",
+                    "error": f"{len(missing)} expected materialized path(s) are missing",
+                    "details": missing,
+                    "traceback": "",
+                    "stdout": "",
+                    "stderr": "",
+                    "command": "",
+                }
+            )
+    log(f"materialized path check: {total_paths} expected path(s) across {len(integrations)} integration(s)")
+    return failures
 
 
 def _to_text(value: str | bytes | None) -> str:
@@ -883,7 +986,7 @@ def verify_integration_steps(
             failures.extend(
                 run_command_step(
                     step["name"],
-                    [str(python_exe), "-m", step["module"]],
+                    [str(python_exe), "-m", step["module"], *[str(arg) for arg in step.get("args", [])]],
                     repo_root,
                     timeout,
                 )
@@ -893,7 +996,7 @@ def verify_integration_steps(
             failures.extend(
                 run_command_step(
                     step["name"],
-                    [str(python_exe), str(repo_root / step["script"])],
+                    [str(python_exe), str(repo_root / step["script"]), *[str(arg) for arg in step.get("args", [])]],
                     repo_root,
                     timeout,
                 )
@@ -936,6 +1039,11 @@ def emit_failure(failure: dict, index: int, total: int) -> None:
     command = failure.get("command")
     if command:
         log(f"  command: {command}")
+    details = failure.get("details", [])
+    if details:
+        log("  details:")
+        for line in details:
+            log(f"    {line}")
     traceback_text = failure.get("traceback", "").strip()
     if traceback_text:
         log("  traceback:")
@@ -985,8 +1093,12 @@ def main() -> None:
     repo_root = args.repo_root.resolve()
     config = load_config((args.config or (repo_root / "config.json")).resolve())
     profile_name, profile = resolve_profile(config, args.profile)
+    core_integrations = load_integrations(repo_root / "Core", profile.get("core_libraries", "all"))
     integrations = load_integrations(repo_root / "Lib", profile.get("third_party_libraries", "all"))
-    log(f"verification profile: {profile_name} ({len(integrations)} third-party integration(s))")
+    log(
+        f"verification profile: {profile_name} "
+        f"({len(core_integrations)} core integration(s), {len(integrations)} third-party integration(s))"
+    )
     coverage = verification_coverage(integrations)
     missing_steps = coverage["libraries_without_steps"]
     log(
@@ -1009,6 +1121,16 @@ def main() -> None:
         skipped_groups.add("gui")
 
     failures = []
+    failures.extend(verify_profile_metadata(source_root, profile_name, core_integrations, integrations))
+    if failures:
+        if args.report_json:
+            write_report(args.report_json.resolve(), python_exe, failures, coverage)
+        log(f"verification failed with {len(failures)} issue(s)")
+        for index, failure in enumerate(failures, start=1):
+            emit_failure(failure, index, len(failures))
+        raise SystemExit(1)
+
+    failures.extend(verify_materialized_paths(source_root, integrations))
     run_third_party_smoke = profile.get("third_party_libraries") == "all"
     failures.extend(
         verify_imports_and_smoke(

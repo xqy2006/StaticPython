@@ -15,6 +15,7 @@ downloads/
 build-*.log
 verify-report-*.json
 *.pid
+config.test-*.json
 
 # Visual Studio / MSBuild
 .vs/
