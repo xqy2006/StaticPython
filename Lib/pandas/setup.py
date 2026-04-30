@@ -160,6 +160,8 @@ def _render_meson_wrapper(context) -> str:
     platinclude_dir = get_pcbuild_output_dir(context.source_root, context.platform).as_posix()
     purelib_dir = (context.source_root / "Lib").as_posix()
     host_python = Path(sys.executable).as_posix()
+    cython_target_dir = pandas_cython_target_dir(context).as_posix()
+    cython_overlay_dir = pandas_cython_overlay_dir(context).as_posix()
     major, minor, patch = context.version_info
     version_short = f"{major}.{minor}"
     version_full = f"{major}.{minor}.{patch}"
@@ -210,13 +212,30 @@ def _render_meson_wrapper(context) -> str:
     return f"""from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 
 HOST_PYTHON = r"{host_python}"
+BOOTSTRAP_PATHS = [
+    r"{cython_target_dir}",
+    r"{cython_overlay_dir}",
+]
 INFO = {info!r}
+
+
+def _build_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONNOUSERSITE"] = "1"
+    bootstrap = os.pathsep.join(path for path in BOOTSTRAP_PATHS if path)
+    existing = env.get("PYTHONPATH", "")
+    if bootstrap and existing:
+        env["PYTHONPATH"] = bootstrap + os.pathsep + existing
+    elif bootstrap:
+        env["PYTHONPATH"] = bootstrap
+    return env
 
 
 def main() -> int:
@@ -227,7 +246,7 @@ def main() -> int:
     if args == ["--version"]:
         print("Python {version_full}")
         return 0
-    completed = subprocess.run([HOST_PYTHON, *args], check=False)
+    completed = subprocess.run([HOST_PYTHON, *args], check=False, env=_build_env())
     return completed.returncode
 
 
@@ -513,16 +532,30 @@ def _meson_setup_command(context) -> list[str]:
 def _missing_pandas_outputs(context) -> list[str]:
     missing = []
     for module_name in PANDAS_EXTENSION_MODULES:
-        object_dir = pandas_module_object_dir(context, module_name)
-        object_files = list(object_dir.rglob("*.obj"))
-        if not object_files:
-            missing.append(f"{object_dir.relative_to(pandas_build_dir(context))}/*.obj")
-            continue
-        required_suffixes = PANDAS_REQUIRED_OBJECT_SUFFIXES.get(module_name, ())
-        for suffix in required_suffixes:
-            if not any(path.name.endswith(suffix) for path in object_files):
-                missing.append(f"{object_dir.relative_to(pandas_build_dir(context))}/*{suffix}")
+        missing.extend(_missing_pandas_outputs_for_module(context, module_name))
     return missing
+
+
+def _missing_pandas_outputs_for_module(context, module_name: str) -> list[str]:
+    object_dir = pandas_module_object_dir(context, module_name)
+    object_files = list(object_dir.rglob("*.obj"))
+    if not object_files:
+        return [f"{object_dir.relative_to(pandas_build_dir(context))}/*.obj"]
+
+    missing = []
+    required_suffixes = PANDAS_REQUIRED_OBJECT_SUFFIXES.get(module_name, ())
+    for suffix in required_suffixes:
+        if not any(path.name.endswith(suffix) for path in object_files):
+            missing.append(f"{object_dir.relative_to(pandas_build_dir(context))}/*{suffix}")
+    return missing
+
+
+def _missing_pandas_modules(context) -> list[str]:
+    return [
+        module_name
+        for module_name in PANDAS_EXTENSION_MODULES
+        if _missing_pandas_outputs_for_module(context, module_name)
+    ]
 
 
 def _wait_for_expected_pandas_outputs(context, timeout_seconds: float = 5.0) -> list[str]:
@@ -570,7 +603,7 @@ def _ninja_target_listing(context) -> list[tuple[str, str]]:
     return entries
 
 
-def _pandas_object_targets(context) -> list[str]:
+def _pandas_object_targets_by_module(context) -> dict[str, list[str]]:
     build_dir = pandas_build_dir(context)
     prefixes = {
         module_name: pandas_module_object_dir(context, module_name).relative_to(build_dir).as_posix() + "/"
@@ -594,26 +627,40 @@ def _pandas_object_targets(context) -> list[str]:
             + ", ".join(missing_modules)
         )
 
+    return {
+        module_name: sorted(per_module_targets[module_name])
+        for module_name in PANDAS_EXTENSION_MODULES
+    }
+
+
+def _pandas_object_targets(context) -> list[str]:
+    per_module_targets = _pandas_object_targets_by_module(context)
     targets: list[str] = []
     for module_name in PANDAS_EXTENSION_MODULES:
-        targets.extend(sorted(per_module_targets[module_name]))
+        targets.extend(per_module_targets[module_name])
     return targets
 
 
-def _compile_pandas_extensions(context) -> None:
-    env = _pandas_build_env(context)
-    object_targets = _pandas_object_targets(context)
+def _run_pandas_ninja(
+    context,
+    env: dict[str, str],
+    *,
+    targets: list[str],
+    jobs: int | None = None,
+) -> subprocess.CompletedProcess[str]:
     command = [
         "ninja",
         "-C",
         str(pandas_build_dir(context)),
         "-k",
         "0",
-        *object_targets,
     ]
+    if jobs is not None:
+        command.extend(["-j", str(jobs)])
+    command.extend(targets)
     display = subprocess.list2cmdline(command)
     context.log(f"RUN {display}")
-    completed = subprocess.run(
+    return subprocess.run(
         command,
         cwd=str(pandas_source_root(context)),
         env=env,
@@ -621,6 +668,20 @@ def _compile_pandas_extensions(context) -> None:
         text=True,
         encoding="utf-8",
         errors="replace",
+    )
+
+
+def _compile_pandas_extensions(context) -> None:
+    env = _pandas_build_env(context)
+    object_targets_by_module = _pandas_object_targets_by_module(context)
+    completed = _run_pandas_ninja(
+        context,
+        env,
+        targets=[
+            target
+            for module_name in PANDAS_EXTENSION_MODULES
+            for target in object_targets_by_module[module_name]
+        ],
     )
     if completed.returncode == 0:
         return
@@ -631,6 +692,53 @@ def _compile_pandas_extensions(context) -> None:
             "reusing the successfully compiled objects for builtin static archives."
         )
         return
+
+    pending_modules = _missing_pandas_modules(context)
+    if pending_modules:
+        context.log(
+            "pandas Meson batch compile left missing objects for: "
+            + ", ".join(pending_modules)
+            + "; retrying those modules sequentially with -j 1"
+        )
+        retry_failures: list[tuple[str, subprocess.CompletedProcess[str], list[str]]] = []
+        for module_name in pending_modules:
+            module_missing = _missing_pandas_outputs_for_module(context, module_name)
+            if not module_missing:
+                continue
+            module_completed = _run_pandas_ninja(
+                context,
+                env,
+                targets=object_targets_by_module[module_name],
+                jobs=1,
+            )
+            module_missing = _missing_pandas_outputs_for_module(context, module_name)
+            if module_missing:
+                retry_failures.append((module_name, module_completed, module_missing))
+                continue
+            if module_completed.returncode != 0:
+                context.log(
+                    "pandas Meson retry for "
+                    f"{module_name} returned non-zero after producing the required objects; "
+                    "reusing the generated objects."
+                )
+
+        missing_outputs = _wait_for_expected_pandas_outputs(context)
+        if not missing_outputs:
+            context.log(
+                "pandas Meson sequential retry produced the remaining required objects; "
+                "continuing with builtin static archives."
+            )
+            return
+        if retry_failures:
+            module_name, module_completed, module_missing = retry_failures[0]
+            raise RuntimeError(
+                "pandas Meson compile failed after sequential retry.\n"
+                f"failed module: {module_name}\n"
+                f"missing outputs: {', '.join(module_missing)}\n"
+                f"stdout:\n{module_completed.stdout[-12000:]}\n"
+                f"stderr:\n{module_completed.stderr[-12000:]}"
+            )
+
     raise RuntimeError(
         "pandas Meson compile failed before the required artifacts were generated.\n"
         f"missing outputs: {', '.join(missing_outputs)}\n"
