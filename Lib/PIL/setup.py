@@ -113,22 +113,32 @@ def _render_pil_project(
 """
 
 
+def _parse_literal_module_attribute(path: Path, attribute_name: str) -> str | None:
+    module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == attribute_name for target in node.targets):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (SyntaxError, ValueError):
+            return None
+        if isinstance(value, str):
+            return value
+        return None
+    return None
+
+
 def _parse_pillow_version(context) -> str:
     for candidate in ("Lib/PIL/_version.py", "Lib/PIL/__init__.py"):
         path = source_path(context, candidate)
         if not path.exists():
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.startswith("__version__"):
-                try:
-                    return ast.literal_eval(line.split("=", 1)[1].strip())
-                except (SyntaxError, ValueError):
-                    break
-    init_py = source_path(context, "Lib/PIL/__init__.py")
-    for line in init_py.read_text(encoding="utf-8").splitlines():
-        if line.startswith("__version__"):
-            return ast.literal_eval(line.split("=", 1)[1].strip())
-    raise RuntimeError(f"could not find Pillow __version__ in {init_py}")
+        version = _parse_literal_module_attribute(path, "__version__")
+        if version:
+            return version
+    raise RuntimeError("could not find a literal Pillow __version__ in Lib/PIL/_version.py or Lib/PIL/__init__.py")
 
 
 def _discover_imaging_sources(context) -> list[str]:
@@ -190,6 +200,19 @@ LIBRARY_INTEGRATION = pypi_library(
         "src/PIL": "Lib/PIL",
         "src": "pillow_builtin/src",
     },
+    materialized_paths=[
+        "Lib/PIL/__init__.py",
+        "Lib/PIL/_version.py",
+        "Lib/PIL/Image.py",
+        "Lib/PIL/ImageFile.py",
+        "Lib/PIL/BmpImagePlugin.py",
+        "Lib/PIL/PngImagePlugin.py",
+        "pillow_builtin/src/_imaging.c",
+        "pillow_builtin/src/_imagingmath.c",
+        "pillow_builtin/src/_imagingmorph.c",
+        "pillow_builtin/src/libImaging/Access.c",
+        "pillow_builtin/src/libImaging/Storage.c",
+    ],
     python_packages=["PIL"],
     verification_imports=["PIL.Image", "PIL._imaging", "PIL._imagingmath", "PIL._imagingmorph"],
     static_library_projects_release_x64=[
@@ -222,20 +245,34 @@ LIBRARY_INTEGRATION = pypi_library(
 import importlib.util
 from io import BytesIO
 
-from PIL import Image, ImageChops, ImageMath, ImageMorph, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageMath, ImageMorph, ImageOps, ImageStat
 
 assert importlib.util.find_spec("PIL._imaging").origin == "built-in"
 assert importlib.util.find_spec("PIL._imagingmath").origin == "built-in"
 assert importlib.util.find_spec("PIL._imagingmorph").origin == "built-in"
 
-image = Image.new("RGB", (4, 4), "navy")
-image.putpixel((1, 1), (255, 0, 0))
+Image.preinit()
+Image.init()
+registered = Image.registered_extensions()
+assert registered[".bmp"] == "BMP"
+assert registered[".png"] == "PNG"
+
+image = Image.new("RGB", (6, 6), "navy")
+draw = ImageDraw.Draw(image)
+draw.rectangle((1, 1, 4, 4), fill=(255, 0, 0))
+
 assert image.getpixel((1, 1)) == (255, 0, 0)
-assert image.crop((1, 1, 3, 3)).size == (2, 2)
+assert image.crop((1, 1, 5, 5)).size == (4, 4)
 assert image.resize((2, 2)).size == (2, 2)
 assert image.convert("L").mode == "L"
 assert ImageOps.mirror(image).size == image.size
 assert ImageChops.difference(image, image).getbbox() is None
+assert image.filter(ImageFilter.BLUR).size == image.size
+assert ImageStat.Stat(image).sum[0] > 0
+
+thumbnail = image.copy()
+thumbnail.thumbnail((3, 3))
+assert thumbnail.size == (3, 3)
 
 alpha = Image.new("RGBA", (2, 2), (10, 20, 30, 128))
 composited = Image.alpha_composite(Image.new("RGBA", (2, 2), (0, 0, 0, 255)), alpha)
@@ -247,13 +284,14 @@ assert math_result.getpixel((0, 0)) == 42
 morph = ImageMorph.MorphOp(op_name="dilation4")
 assert morph.get_on_pixels(Image.new("L", (3, 3), 0)) == []
 
-buffer = BytesIO()
-image.save(buffer, format="PNG")
-buffer.seek(0)
-loaded = Image.open(buffer)
-loaded.load()
-assert loaded.size == (4, 4)
-assert loaded.mode == "RGB"
+for image_format in ("BMP", "PNG"):
+    buffer = BytesIO()
+    image.save(buffer, format=image_format)
+    buffer.seek(0)
+    loaded = Image.open(buffer)
+    loaded.load()
+    assert loaded.size == (6, 6)
+    assert loaded.mode == "RGB"
 """,
             timeout=300,
         )

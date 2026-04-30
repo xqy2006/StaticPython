@@ -363,13 +363,52 @@ def _patch_numpy_top_level_imports(context) -> None:
 
 
 def _ensure_generated_pyconfig_header(context) -> None:
-    output_dir = get_pcbuild_output_dir(context.source_root, context.platform)
-    generated = output_dir / "pyconfig.h"
-    if not generated.exists():
-        raise RuntimeError(f"expected generated pyconfig.h at {generated}")
+    generated = get_pcbuild_output_dir(context.source_root, context.platform) / "pyconfig.h"
     include_target = context.source_root / "Include" / "pyconfig.h"
+    generated.parent.mkdir(parents=True, exist_ok=True)
     include_target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(generated, include_target)
+    candidates = [
+        generated,
+        include_target,
+        context.source_root / "PC" / "pyconfig.h.in",
+    ]
+    source = next(
+        (
+            candidate
+            for candidate in candidates
+            if candidate.exists() and candidate.stat().st_size > 0
+        ),
+        None,
+    )
+    if source is None:
+        checked = ", ".join(path.relative_to(context.source_root).as_posix() for path in candidates)
+        raise RuntimeError(
+            "could not bootstrap pyconfig.h; checked "
+            f"{checked}"
+        )
+
+    for target in (generated, include_target):
+        if source.resolve() == target.resolve():
+            continue
+        shutil.copy2(source, target)
+
+    if source.resolve() == generated.resolve():
+        context.log(
+            "refreshed pyconfig.h from "
+            f"{generated.relative_to(context.source_root).as_posix()}"
+        )
+    else:
+        context.log(
+            "bootstrapped pyconfig.h from "
+            f"{source.relative_to(context.source_root).as_posix()}"
+        )
+
+    if not generated.exists() or not include_target.exists():
+        checked = ", ".join(path.relative_to(context.source_root).as_posix() for path in candidates)
+        raise RuntimeError(
+            "pyconfig.h bootstrap did not populate both targets; checked "
+            f"{checked}"
+        )
 
 
 def prepare_numpy_project(context) -> None:

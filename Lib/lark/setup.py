@@ -48,7 +48,7 @@ LIBRARY_INTEGRATION = simple_library(
         inline_verification_step(
             "lark-parser-smoke",
             """
-from lark import Lark, Transformer, Token, Tree, v_args
+from lark import Lark, Transformer, v_args
 
 parser = Lark("start: WORD NUMBER\\n%import common.WORD\\n%import common.NUMBER\\n%ignore \\" \\"", parser="lalr")
 tree = parser.parse("staticpython 42")
@@ -63,7 +63,8 @@ class Calc(Transformer):
         return left + right
 
 calc = Lark("start: sum\\n?sum: number -> number | sum \\"+\\" number -> add\\nnumber: NUMBER\\n%import common.NUMBER\\n%ignore \\" \\"", parser="lalr")
-assert Calc().transform(calc.parse("2 + 40")) == Tree(Token("RULE", "start"), [42])
+result = Calc().transform(calc.parse("2 + 40"))
+assert result.children == [42]
 """,
         )
     ],

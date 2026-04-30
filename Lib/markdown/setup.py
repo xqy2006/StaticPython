@@ -3,7 +3,9 @@ from libs import inline_verification_step, replace_text_once, simple_library, tr
 
 def patch_markdown_sources(context) -> None:
     def patch_core(text: str) -> str:
-        return replace_text_once(
+        if "module_name = ext_name if '.' in ext_name else f'markdown.extensions.{ext_name}'" in text:
+            return text
+        text = replace_text_once(
             text,
             (
                 "        try:\n"
@@ -22,6 +24,7 @@ def patch_markdown_sources(context) -> None:
             ),
             label="markdown short extension fallback",
         )
+        return text
 
     transform_source_text(context, "Lib/markdown/core.py", patch_core)
 

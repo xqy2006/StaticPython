@@ -14,6 +14,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 from zipfile import ZipFile
 
+from packaging.version import Version
+
 from libs import (
     LibraryHookContext,
     collect_builtin_module_registrations,
@@ -2125,18 +2127,27 @@ def main() -> int:
         ensure_tool("msbuild")
     verify_source_root(source_root)
 
+    version_info, version_mm, version_full = parse_cpython_version(source_root)
     manifest = load_manifest()
     config_path = (args.config or CONFIG_PATH).resolve()
     config = load_config(config_path)
     profile_name, profile = resolve_profile(config, args.profile)
-    core_integrations = load_integrations(CORE_PATCH_ROOT, profile.get("core_libraries", "all"))
-    third_party_integrations = load_integrations(LIB_PATCH_ROOT, profile.get("third_party_libraries", "all"))
+    target_version = Version(version_full)
+    core_integrations = load_integrations(
+        CORE_PATCH_ROOT,
+        profile.get("core_libraries", "all"),
+        target_version=target_version,
+    )
+    third_party_integrations = load_integrations(
+        LIB_PATCH_ROOT,
+        profile.get("third_party_libraries", "all"),
+        target_version=target_version,
+    )
     if profile.get("third_party_libraries") == "all":
         all_third_party_integrations = third_party_integrations
     else:
-        all_third_party_integrations = load_integrations(LIB_PATCH_ROOT, "all")
+        all_third_party_integrations = load_integrations(LIB_PATCH_ROOT, "all", target_version=target_version)
     integrations = [*core_integrations, *third_party_integrations]
-    version_info, version_mm, version_full = parse_cpython_version(source_root)
     if requested_version_info is not None and requested_version_info != version_info:
         raise RuntimeError(
             f"downloaded source version {version_full} does not match requested version {args.cpython_version}"

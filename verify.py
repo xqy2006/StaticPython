@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from packaging.version import Version
+
 from libs import (
     collect_python_packages,
     collect_static_library_projects,
@@ -1093,8 +1095,32 @@ def main() -> None:
     repo_root = args.repo_root.resolve()
     config = load_config((args.config or (repo_root / "config.json")).resolve())
     profile_name, profile = resolve_profile(config, args.profile)
-    core_integrations = load_integrations(repo_root / "Core", profile.get("core_libraries", "all"))
-    integrations = load_integrations(repo_root / "Lib", profile.get("third_party_libraries", "all"))
+    log(
+        f"verification profile: {profile_name}"
+    )
+    source_root = args.source_root.resolve()
+    if not python_exe.exists():
+        raise RuntimeError(f"python executable not found: {python_exe}")
+    metadata = load_profile_metadata(source_root) or {}
+    version_text = metadata.get("version_full")
+    if not version_text:
+        patchlevel = source_root / "Include" / "patchlevel.h"
+        patchlevel_text = patchlevel.read_text(encoding="utf-8")
+        major = int(next(line.split()[-1] for line in patchlevel_text.splitlines() if line.startswith("#define PY_MAJOR_VERSION")))
+        minor = int(next(line.split()[-1] for line in patchlevel_text.splitlines() if line.startswith("#define PY_MINOR_VERSION")))
+        micro = int(next(line.split()[-1] for line in patchlevel_text.splitlines() if line.startswith("#define PY_MICRO_VERSION")))
+        version_text = f"{major}.{minor}.{micro}"
+    target_version = Version(version_text)
+    core_integrations = load_integrations(
+        repo_root / "Core",
+        profile.get("core_libraries", "all"),
+        target_version=target_version,
+    )
+    integrations = load_integrations(
+        repo_root / "Lib",
+        profile.get("third_party_libraries", "all"),
+        target_version=target_version,
+    )
     log(
         f"verification profile: {profile_name} "
         f"({len(core_integrations)} core integration(s), {len(integrations)} third-party integration(s))"
@@ -1110,9 +1136,6 @@ def main() -> None:
         preview = ", ".join(missing_steps[:20])
         suffix = f" ... (+{len(missing_steps) - 20} more)" if len(missing_steps) > 20 else ""
         log(f"verification gaps still import-only: {preview}{suffix}")
-    source_root = args.source_root.resolve()
-    if not python_exe.exists():
-        raise RuntimeError(f"python executable not found: {python_exe}")
 
     skipped_groups = set()
     if args.skip_crypto:

@@ -27,14 +27,19 @@ def _ensure_repo_packaging_on_path() -> None:
 
 _ensure_repo_packaging_on_path()
 
+from packaging.markers import default_environment
+from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 
 Hook = Callable[["LibraryHookContext"], None]
 PYPI_API_URL_TEMPLATE = "https://pypi.org/pypi/{project}/json"
+PYPI_VERSION_API_URL_TEMPLATE = "https://pypi.org/pypi/{project}/{version}/json"
 GITHUB_ARCHIVE_URL_TEMPLATE = "https://github.com/{repo}/archive/refs/{ref_kind}/{ref}.zip"
 SOURCE_ROOT_CANDIDATES = ("", "src", "lib", "python")
+REPO_ROOT = Path(__file__).resolve().parent
+DOWNLOAD_CACHE_ROOT = REPO_ROOT / "downloads"
 SIMPLE_LIBRARY_PROJECT_ALIASES = {
     "annotated_doc": "annotated-doc",
     "attr": "attrs",
@@ -64,6 +69,11 @@ class LibraryHookContext:
 @dataclass
 class LibraryIntegration:
     name: str
+    source_provider: str = "local"
+    project_name: str | None = None
+    release_version: str | None = None
+    dependencies: list[str] = field(default_factory=list)
+    auto_resolve_dependencies: bool = False
     overlay_entries: list[str] = field(default_factory=list)
     materialized_paths: list[str] = field(default_factory=list)
     cleanup_paths: list[str] = field(default_factory=list)
@@ -312,6 +322,25 @@ def _read_url_bytes(url: str, *, attempts: int = 5, initial_delay_seconds: float
             delay = min(delay * 2, 15.0)
     assert last_error is not None
     raise last_error
+
+
+def _marker_environment(target_version: Version) -> dict[str, str]:
+    environment = default_environment()
+    major = target_version.release[0] if len(target_version.release) >= 1 else 0
+    minor = target_version.release[1] if len(target_version.release) >= 2 else 0
+    environment.update(
+        {
+            "python_version": f"{major}.{minor}",
+            "python_full_version": ".".join(str(part) for part in target_version.release[:3]),
+            "implementation_name": "cpython",
+            "platform_system": "Windows",
+            "sys_platform": "win32",
+            "os_name": "nt",
+            "platform_machine": "AMD64",
+            "extra": "",
+        }
+    )
+    return environment
 
 
 def _supports_target_python(requires_python: str | None, target_version: Version) -> bool:
@@ -659,6 +688,8 @@ def pypi_library(
     *,
     project_name: str | None = None,
     release_version: str | None = None,
+    dependencies: list[str] | None = None,
+    auto_resolve_dependencies: bool = True,
     source_entries: list[str] | None = None,
     source_mapping: dict[str, str] | None = None,
     overlay_entries: list[str] | None = None,
@@ -689,6 +720,11 @@ def pypi_library(
 
     return LibraryIntegration(
         name=name,
+        source_provider="pypi",
+        project_name=project_name or name,
+        release_version=release_version,
+        dependencies=list(dependencies or []),
+        auto_resolve_dependencies=auto_resolve_dependencies,
         overlay_entries=normalized_overlay_entries,
         materialized_paths=_build_materialized_paths(
             resolved_mapping,
@@ -722,6 +758,8 @@ def github_library(
     ref: str,
     ref_kind: str = "tags",
     archive_url_template: str | None = None,
+    dependencies: list[str] | None = None,
+    auto_resolve_dependencies: bool = False,
     source_entries: list[str] | None = None,
     source_mapping: dict[str, str] | None = None,
     overlay_entries: list[str] | None = None,
@@ -752,6 +790,11 @@ def github_library(
 
     return LibraryIntegration(
         name=name,
+        source_provider="github",
+        project_name=repo,
+        release_version=ref,
+        dependencies=list(dependencies or []),
+        auto_resolve_dependencies=auto_resolve_dependencies,
         overlay_entries=normalized_overlay_entries,
         materialized_paths=_build_materialized_paths(
             resolved_mapping,
@@ -794,6 +837,8 @@ def simple_library(
     name: str,
     *,
     project_name: str | None = None,
+    dependencies: list[str] | None = None,
+    auto_resolve_dependencies: bool | None = None,
     source_entries: list[str] | None = None,
     source_mapping: dict[str, str] | None = None,
     overlay_entries: list[str] | None = None,
@@ -820,6 +865,7 @@ def simple_library(
 
     common_kwargs = {
         "name": name,
+        "dependencies": dependencies,
         "source_entries": source_entries,
         "source_mapping": resolved_mapping,
         "overlay_entries": passthrough_overlay_entries,
@@ -834,10 +880,12 @@ def simple_library(
         "pre_build_hooks": pre_build_hooks,
     }
     if source_provider == "pypi":
+        common_kwargs["auto_resolve_dependencies"] = True if auto_resolve_dependencies is None else auto_resolve_dependencies
         return pypi_library(project_name=resolved_project_name, **common_kwargs)
     if source_provider == "github":
         if not github_repo:
             raise RuntimeError(f"{name} uses source_provider='github' but github_repo is missing")
+        common_kwargs["auto_resolve_dependencies"] = False if auto_resolve_dependencies is None else auto_resolve_dependencies
         return github_library(
             repo=github_repo,
             ref=github_ref,
@@ -864,24 +912,217 @@ def _normalize_integration(path: Path, raw: object) -> LibraryIntegration:
     raise RuntimeError(f"{path} must define LIBRARY_INTEGRATION as LibraryIntegration or dict")
 
 
+def _load_pypi_release_payload(project_name: str, release_version: str | None) -> dict:
+    normalized = _normalized_project_name(project_name)
+    version_key = release_version or "__latest__"
+    cache_path = DOWNLOAD_CACHE_ROOT / "pypi-metadata" / normalized / f"{version_key}.json"
+    if cache_path.exists():
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+
+    if release_version:
+        payload = _http_get_json(PYPI_VERSION_API_URL_TEMPLATE.format(project=project_name, version=release_version))
+    else:
+        payload = _http_get_json(PYPI_API_URL_TEMPLATE.format(project=project_name))
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+    return payload
+
+
+def _integration_lookup_keys(integration: LibraryIntegration) -> list[str]:
+    keys = [
+        integration.name.casefold(),
+        _normalized_project_name(integration.name),
+        _normalized_project_name(integration.name).replace("-", "_"),
+    ]
+    if integration.project_name:
+        keys.extend(
+            [
+                integration.project_name.casefold(),
+                _normalized_project_name(integration.project_name),
+                _normalized_project_name(integration.project_name).replace("-", "_"),
+            ]
+        )
+    for package_name in integration.python_packages:
+        keys.extend(
+            [
+                package_name.casefold(),
+                _normalized_project_name(package_name),
+                _normalized_project_name(package_name).replace("-", "_"),
+            ]
+        )
+    return _unique(keys)
+
+
+def _build_dependency_aliases(integrations: list[LibraryIntegration]) -> dict[str, str]:
+    alias_to_name: dict[str, str] = {}
+    for integration in integrations:
+        canonical = integration.name.casefold()
+        exact_keys = [
+            integration.name.casefold(),
+            _normalized_project_name(integration.name),
+            _normalized_project_name(integration.name).replace("-", "_"),
+        ]
+        if integration.project_name:
+            exact_keys.extend(
+                [
+                    integration.project_name.casefold(),
+                    _normalized_project_name(integration.project_name),
+                    _normalized_project_name(integration.project_name).replace("-", "_"),
+                ]
+            )
+        for key in exact_keys:
+            alias_to_name[key] = canonical
+    for integration in integrations:
+        canonical = integration.name.casefold()
+        for key in _integration_lookup_keys(integration):
+            alias_to_name.setdefault(key, canonical)
+    return alias_to_name
+
+
+def _resolve_dependency_name(requirement_name: str, alias_to_name: dict[str, str]) -> str | None:
+    normalized = _normalized_project_name(requirement_name)
+    candidates = [
+        requirement_name.casefold(),
+        normalized,
+        normalized.replace("-", "_"),
+    ]
+    for candidate in candidates:
+        resolved = alias_to_name.get(candidate)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _pypi_requires_dist(
+    integration: LibraryIntegration,
+    target_version: Version,
+) -> list[str]:
+    project_name = integration.project_name or integration.name
+    payload = _load_pypi_release_payload(project_name, integration.release_version)
+    info = payload.get("info", {})
+    raw_requirements = info.get("requires_dist") or []
+    if not raw_requirements:
+        return []
+
+    environment = _marker_environment(target_version)
+    resolved: list[str] = []
+    for raw in raw_requirements:
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement:
+            continue
+        if requirement.marker is not None and not requirement.marker.evaluate(environment):
+            continue
+        resolved.append(requirement.name)
+    return _unique(resolved)
+
+
+def _integration_dependency_names(
+    integration: LibraryIntegration,
+    target_version: Version | None,
+) -> list[str]:
+    dependencies = list(integration.dependencies)
+    if integration.auto_resolve_dependencies:
+        if target_version is not None and integration.source_provider == "pypi":
+            dependencies.extend(_pypi_requires_dist(integration, target_version))
+    return _unique(dependencies)
+
+
+def _order_integrations_by_dependency(
+    selected_names: list[str],
+    by_name: dict[str, LibraryIntegration],
+    dependency_graph: dict[str, list[str]],
+) -> list[LibraryIntegration]:
+    ordered: list[LibraryIntegration] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visited:
+            return
+        if name in visiting:
+            cycle = " -> ".join([*visiting, name])
+            raise RuntimeError(f"dependency cycle detected: {cycle}")
+        visiting.add(name)
+        for dependency in dependency_graph.get(name, []):
+            visit(dependency)
+        visiting.remove(name)
+        visited.add(name)
+        ordered.append(by_name[name])
+
+    for selected_name in selected_names:
+        visit(selected_name)
+    return ordered
+
+
+def _resolve_selected_integrations(
+    integrations: list[LibraryIntegration],
+    selected_libraries: str | list[str] | tuple[str, ...] | set[str],
+    *,
+    target_version: Version | None,
+) -> list[LibraryIntegration]:
+    by_name = {integration.name.casefold(): integration for integration in integrations}
+    alias_to_name = _build_dependency_aliases(integrations)
+    if selected_libraries == "all":
+        selected_names = [integration.name.casefold() for integration in integrations]
+    else:
+        if not isinstance(selected_libraries, (list, tuple, set)):
+            raise RuntimeError('library selection must be "all" or a list of integration names')
+        selected_names = [str(name).casefold() for name in selected_libraries]
+        missing = sorted(set(selected_names) - set(by_name))
+        if missing:
+            raise RuntimeError("unknown libraries in config: " + ", ".join(missing))
+
+    dependency_graph: dict[str, list[str]] = {}
+    resolved_selected: set[str] = set()
+    stack = list(dict.fromkeys(selected_names))
+    while stack:
+        name = stack.pop()
+        if name in resolved_selected:
+            continue
+        integration = by_name[name]
+        dependencies: list[str] = []
+        for dependency_name in _integration_dependency_names(integration, target_version):
+            dependency_key = _resolve_dependency_name(dependency_name, alias_to_name)
+            if dependency_key is None or dependency_key not in by_name:
+                continue
+            dependencies.append(dependency_key)
+            if dependency_key not in resolved_selected:
+                stack.append(dependency_key)
+        dependency_graph[name] = dependencies
+        resolved_selected.add(name)
+
+    ordered = _order_integrations_by_dependency(
+        [name for name in selected_names if name in resolved_selected],
+        by_name,
+        dependency_graph,
+    )
+    ordered_names = {integration.name.casefold() for integration in ordered}
+    for name in sorted(resolved_selected):
+        if name in ordered_names:
+            continue
+        for integration in _order_integrations_by_dependency([name], by_name, dependency_graph):
+            key = integration.name.casefold()
+            if key in ordered_names:
+                continue
+            ordered.append(integration)
+            ordered_names.add(key)
+    return ordered
+
+
 def select_integrations(
     integrations: list[LibraryIntegration],
     selected_libraries: str | list[str] | tuple[str, ...] | set[str],
 ) -> list[LibraryIntegration]:
-    if selected_libraries == "all":
-        return integrations
-    if not isinstance(selected_libraries, (list, tuple, set)):
-        raise RuntimeError('library selection must be "all" or a list of integration names')
-
-    selected = {str(name).casefold() for name in selected_libraries}
-    by_name = {integration.name.casefold(): integration for integration in integrations}
-    missing = sorted(selected - set(by_name))
-    if missing:
-        raise RuntimeError("unknown libraries in config: " + ", ".join(missing))
-    return [integration for integration in integrations if integration.name.casefold() in selected]
+    return _resolve_selected_integrations(integrations, selected_libraries, target_version=None)
 
 
-def load_integrations(library_root: Path, selected_libraries: str | list[str] | None = "all") -> list[LibraryIntegration]:
+def load_integrations(
+    library_root: Path,
+    selected_libraries: str | list[str] | None = "all",
+    *,
+    target_version: Version | None = None,
+) -> list[LibraryIntegration]:
     integrations: list[LibraryIntegration] = []
     for library_dir in sorted((path for path in library_root.iterdir() if path.is_dir()), key=lambda item: item.name.casefold()):
         path = library_dir / "setup.py"
@@ -896,7 +1137,11 @@ def load_integrations(library_root: Path, selected_libraries: str | list[str] | 
         if raw is None:
             raise RuntimeError(f"{path} does not define LIBRARY_INTEGRATION")
         integrations.append(_normalize_integration(path, raw))
-    return select_integrations(integrations, "all" if selected_libraries is None else selected_libraries)
+    return _resolve_selected_integrations(
+        integrations,
+        "all" if selected_libraries is None else selected_libraries,
+        target_version=target_version,
+    )
 
 
 def collect_overlay_entries(integrations: list[LibraryIntegration]) -> list[str]:
