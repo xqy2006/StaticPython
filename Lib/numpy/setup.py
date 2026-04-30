@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,7 @@ NUMPY_RANDOM_BIT_GENERATOR_PROJECT_NAME = "numpy.random.bit_generator"
 NUMPY_RANDOM_GENERATOR_PROJECT_NAME = "numpy.random._generator"
 NUMPY_RANDOM_MTRAND_PROJECT_NAME = "numpy.random.mtrand"
 NUMPY_RANDOM_BUILTIN_LIBRARY_NAME = "numpy.random._builtin"
+NUMPY_CYTHON_REQUIREMENT = "Cython>=3.0.6,<4.0.0"
 NUMPY_RANDOM_SUPPORT_OBJECT_NAMES = {
     "src_distributions_distributions.c.obj",
     "src_distributions_logfactorial.c.obj",
@@ -223,6 +225,19 @@ def numpy_meson_native_file_path(context) -> Path:
     return source_path(context, "numpy_builtin/meson-python.ini")
 
 
+def numpy_cython_cache_dir(context) -> Path:
+    version_tag = f"py{sys.version_info.major}{sys.version_info.minor}"
+    return context.download_cache_root / "build-tools" / "numpy-cython" / version_tag
+
+
+def numpy_cython_target_dir(context) -> Path:
+    return numpy_cython_cache_dir(context) / "site"
+
+
+def numpy_cython_wrapper_path(context) -> Path:
+    return source_path(context, "numpy_builtin/tools/cython.cmd")
+
+
 def _replace_tree(source: Path, destination: Path) -> None:
     if destination.exists():
         shutil.rmtree(destination)
@@ -312,9 +327,12 @@ if __name__ == "__main__":
 
 def _render_numpy_meson_native_file(context) -> str:
     launcher = numpy_meson_launcher_path(context).as_posix()
+    cython = numpy_cython_wrapper_path(context).as_posix()
     return f"""[binaries]
 python = '{launcher}'
 python3 = '{launcher}'
+cython = '{cython}'
+cython3 = '{cython}'
 """
 
 
@@ -325,6 +343,65 @@ def _render_numpy_meson_launcher(context) -> str:
         "@echo off\n"
         f"\"{host_python}\" \"{wrapper}\" %*\n"
     )
+
+
+def _render_numpy_cython_wrapper(context, target_dir: Path) -> str:
+    host_python = Path(sys.executable)
+    return (
+        "@echo off\n"
+        "setlocal\n"
+        "set \"PYTHONNOUSERSITE=1\"\n"
+        f"set \"PYTHONPATH={target_dir}\"\n"
+        f"\"{host_python}\" -S -m cython %*\n"
+    )
+
+
+def _ensure_numpy_cython(context) -> Path:
+    target_dir = numpy_cython_target_dir(context)
+    package_dir = target_dir / "Cython"
+    if not package_dir.exists():
+        cache_dir = numpy_cython_cache_dir(context)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        context.log(f"installing local numpy build dependency {NUMPY_CYTHON_REQUIREMENT}")
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-compile",
+                "--target",
+                str(target_dir),
+                NUMPY_CYTHON_REQUIREMENT,
+            ],
+            check=True,
+            timeout=60 * 10,
+        )
+    wrapper_path = numpy_cython_wrapper_path(context)
+    wrapper_path.parent.mkdir(parents=True, exist_ok=True)
+    wrapper_path.write_text(
+        _render_numpy_cython_wrapper(context, target_dir),
+        encoding="utf-8",
+        newline="\n",
+    )
+    return wrapper_path
+
+
+def _numpy_build_env(context) -> dict[str, str]:
+    wrapper_dir = str(_ensure_numpy_cython(context).parent)
+    env = os.environ.copy()
+    env["PATH"] = wrapper_dir + os.pathsep + env.get("PATH", "")
+    env["CYTHON"] = "cython.cmd"
+    return env
+
+
+def _run_with_env(context, command: list[str], *, cwd: Path, timeout: float, env: dict[str, str]) -> None:
+    display = subprocess.list2cmdline([str(part) for part in command])
+    context.log(f"RUN {display}")
+    subprocess.run(command, cwd=str(cwd), env=env, check=True, timeout=timeout)
 
 
 def _patch_numpy_meson_build(context) -> None:
@@ -529,6 +606,7 @@ def _wait_for_expected_numpy_outputs(context, timeout_seconds: float = 5.0) -> l
 
 
 def _compile_numpy_core(context) -> None:
+    env = _numpy_build_env(context)
     command = [
         "ninja",
         "-C",
@@ -545,6 +623,7 @@ def _compile_numpy_core(context) -> None:
     completed = subprocess.run(
         command,
         cwd=str(numpy_source_root(context)),
+        env=env,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -661,13 +740,15 @@ def prepare_numpy_artifacts(context) -> None:
 
     ensure_tool("ninja")
     ensure_tool("lib")
+    env = _numpy_build_env(context)
 
     _replace_tree(numpy_runtime_dir(context), numpy_build_package_dir(context))
-    run(
-        context.log,
+    _run_with_env(
+        context,
         _meson_setup_command(context),
         cwd=numpy_source_root(context),
         timeout=60 * 20,
+        env=env,
     )
 
     if not _expected_numpy_outputs_exist(context):
@@ -705,6 +786,7 @@ LIBRARY_INTEGRATION = pypi_library(
         "numpy_builtin/meson_target_python.py",
         "numpy_builtin/meson_target_python.cmd",
         "numpy_builtin/meson-python.ini",
+        "numpy_builtin/tools/cython.cmd",
     ],
     python_packages=["numpy"],
     verification_imports=[

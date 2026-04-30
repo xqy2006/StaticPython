@@ -105,7 +105,8 @@ def pandas_meson_native_file_path(context) -> Path:
 
 
 def pandas_cython_cache_dir(context) -> Path:
-    return context.download_cache_root / "build-tools" / "pandas-cython"
+    version_tag = f"py{sys.version_info.major}{sys.version_info.minor}"
+    return context.download_cache_root / "build-tools" / "pandas-cython" / version_tag
 
 
 def pandas_cython_target_dir(context) -> Path:

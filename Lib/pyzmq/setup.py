@@ -135,7 +135,8 @@ def pyzmq_bundle_library_dir(context) -> Path:
 
 
 def pyzmq_cython_cache_dir(context) -> Path:
-    return context.download_cache_root / "build-tools" / "pyzmq-cython"
+    version_tag = f"py{sys.version_info.major}{sys.version_info.minor}"
+    return context.download_cache_root / "build-tools" / "pyzmq-cython" / version_tag
 
 
 def pyzmq_cython_target_dir(context) -> Path:
