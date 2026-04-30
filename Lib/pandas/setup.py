@@ -534,14 +534,82 @@ def _wait_for_expected_pandas_outputs(context, timeout_seconds: float = 5.0) -> 
     return missing
 
 
+def _ninja_target_listing(context) -> list[tuple[str, str]]:
+    command = [
+        "ninja",
+        "-C",
+        str(pandas_build_dir(context)),
+        "-t",
+        "targets",
+        "all",
+    ]
+    display = subprocess.list2cmdline(command)
+    context.log(f"RUN {display}")
+    completed = subprocess.run(
+        command,
+        cwd=str(pandas_source_root(context)),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "failed to enumerate pandas Meson targets.\n"
+            f"stdout:\n{completed.stdout[-12000:]}\n"
+            f"stderr:\n{completed.stderr[-12000:]}"
+        )
+    entries: list[tuple[str, str]] = []
+    for raw_line in completed.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or ": " not in line:
+            continue
+        target, rule = line.split(": ", 1)
+        entries.append((target.strip(), rule.strip()))
+    return entries
+
+
+def _pandas_object_targets(context) -> list[str]:
+    build_dir = pandas_build_dir(context)
+    prefixes = {
+        module_name: pandas_module_object_dir(context, module_name).relative_to(build_dir).as_posix() + "/"
+        for module_name in PANDAS_EXTENSION_MODULES
+    }
+    per_module_targets: dict[str, list[str]] = {module_name: [] for module_name in PANDAS_EXTENSION_MODULES}
+    for target, rule in _ninja_target_listing(context):
+        if not target.endswith(".obj"):
+            continue
+        if rule not in {"c_COMPILER", "cpp_COMPILER"}:
+            continue
+        for module_name, prefix in prefixes.items():
+            if target.startswith(prefix):
+                per_module_targets[module_name].append(target)
+                break
+
+    missing_modules = [module_name for module_name, targets in per_module_targets.items() if not targets]
+    if missing_modules:
+        raise RuntimeError(
+            "failed to map pandas Meson object targets for: "
+            + ", ".join(missing_modules)
+        )
+
+    targets: list[str] = []
+    for module_name in PANDAS_EXTENSION_MODULES:
+        targets.extend(sorted(per_module_targets[module_name]))
+    return targets
+
+
 def _compile_pandas_extensions(context) -> None:
     env = _pandas_build_env(context)
+    object_targets = _pandas_object_targets(context)
     command = [
         "ninja",
         "-C",
         str(pandas_build_dir(context)),
         "-k",
         "0",
+        *object_targets,
     ]
     display = subprocess.list2cmdline(command)
     context.log(f"RUN {display}")
@@ -559,7 +627,7 @@ def _compile_pandas_extensions(context) -> None:
     missing_outputs = _wait_for_expected_pandas_outputs(context)
     if not missing_outputs:
         context.log(
-            "pandas Meson compile ended with the expected shared-module link failure; "
+            "pandas Meson object compile returned non-zero after producing the required objects; "
             "reusing the successfully compiled objects for builtin static archives."
         )
         return
