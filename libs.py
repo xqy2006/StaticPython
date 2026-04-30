@@ -578,13 +578,14 @@ def _version_format_args(context: LibraryHookContext) -> dict[str, int | str]:
 
 
 def _build_pypi_source_hook(
+    integration: LibraryIntegration,
     project_name: str,
     source_mapping: dict[str, str],
-    release_version: str | None = None,
 ) -> Hook:
     normalized = _normalized_project_name(project_name)
 
     def prepare_source(context: LibraryHookContext) -> None:
+        release_version = integration.release_version
         target_version = Version(".".join(str(part) for part in context.version_info))
         cached_archive_path: Path | None = None
         if release_version is not None:
@@ -718,7 +719,7 @@ def pypi_library(
         raise RuntimeError(f"{name} must declare at least one source entry or source mapping")
     normalized_overlay_entries = [_normalized_relpath(entry) for entry in overlay_entries or []]
 
-    return LibraryIntegration(
+    integration = LibraryIntegration(
         name=name,
         source_provider="pypi",
         project_name=project_name or name,
@@ -741,14 +742,16 @@ def pypi_library(
         python_link_dependencies_release_x64=list(python_link_dependencies_release_x64 or []),
         python_link_wholearchive_release_x64=list(python_link_wholearchive_release_x64 or []),
         verification_steps=list(verification_steps or []),
-        prepare_source_hooks=[
-            _build_pypi_source_hook(project_name or name, resolved_mapping, release_version),
-            *(prepare_source_hooks or []),
-        ],
+        prepare_source_hooks=[],
         pre_patch_hooks=list(pre_patch_hooks or []),
         post_patch_hooks=list(post_patch_hooks or []),
         pre_build_hooks=list(pre_build_hooks or []),
     )
+    integration.prepare_source_hooks = [
+        _build_pypi_source_hook(integration, project_name or name, resolved_mapping),
+        *(prepare_source_hooks or []),
+    ]
+    return integration
 
 
 def github_library(
@@ -1117,11 +1120,40 @@ def select_integrations(
     return _resolve_selected_integrations(integrations, selected_libraries, target_version=None)
 
 
+def _apply_version_overrides(
+    integrations: list[LibraryIntegration],
+    version_overrides: dict[str, str] | None,
+) -> None:
+    if not version_overrides:
+        return
+    by_name = {integration.name.casefold(): integration for integration in integrations}
+    alias_to_name = _build_dependency_aliases(integrations)
+    unresolved: list[str] = []
+    resolved_overrides: dict[str, str] = {}
+    for raw_name, raw_version in version_overrides.items():
+        if not isinstance(raw_name, str):
+            raise RuntimeError("library version override names must be strings")
+        if not isinstance(raw_version, str):
+            raise RuntimeError(f"library version override for {raw_name!r} must be a string")
+        dependency_key = _resolve_dependency_name(raw_name, alias_to_name)
+        if dependency_key is None or dependency_key not in by_name:
+            unresolved.append(raw_name)
+            continue
+        resolved_overrides[dependency_key] = raw_version
+    if unresolved:
+        raise RuntimeError(
+            "unknown libraries in library_version_overrides: " + ", ".join(sorted(unresolved))
+        )
+    for dependency_key, release_version in resolved_overrides.items():
+        by_name[dependency_key].release_version = release_version
+
+
 def load_integrations(
     library_root: Path,
     selected_libraries: str | list[str] | None = "all",
     *,
     target_version: Version | None = None,
+    version_overrides: dict[str, str] | None = None,
 ) -> list[LibraryIntegration]:
     integrations: list[LibraryIntegration] = []
     for library_dir in sorted((path for path in library_root.iterdir() if path.is_dir()), key=lambda item: item.name.casefold()):
@@ -1137,6 +1169,7 @@ def load_integrations(
         if raw is None:
             raise RuntimeError(f"{path} does not define LIBRARY_INTEGRATION")
         integrations.append(_normalize_integration(path, raw))
+    _apply_version_overrides(integrations, version_overrides)
     return _resolve_selected_integrations(
         integrations,
         "all" if selected_libraries is None else selected_libraries,

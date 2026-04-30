@@ -83,6 +83,17 @@ def integration_names(integrations: list) -> list[str]:
     return [integration.name for integration in integrations]
 
 
+def integration_versions(integrations: list) -> dict[str, dict[str, str | None]]:
+    payload: dict[str, dict[str, str | None]] = {}
+    for integration in integrations:
+        payload[integration.name] = {
+            "source_provider": integration.source_provider,
+            "project_name": integration.project_name,
+            "release_version": integration.release_version,
+        }
+    return payload
+
+
 def write_profile_metadata(
     source_root: Path,
     profile_name: str,
@@ -98,6 +109,8 @@ def write_profile_metadata(
         "version_full": version_full,
         "core_libraries": integration_names(core_integrations),
         "third_party_libraries": integration_names(third_party_integrations),
+        "core_library_versions": integration_versions(core_integrations),
+        "third_party_library_versions": integration_versions(third_party_integrations),
     }
     path = profile_metadata_path(source_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2133,20 +2146,29 @@ def main() -> int:
     config = load_config(config_path)
     profile_name, profile = resolve_profile(config, args.profile)
     target_version = Version(version_full)
+    core_version_overrides = profile.get("core_library_version_overrides")
+    third_party_version_overrides = profile.get("third_party_library_version_overrides")
     core_integrations = load_integrations(
         CORE_PATCH_ROOT,
         profile.get("core_libraries", "all"),
         target_version=target_version,
+        version_overrides=core_version_overrides,
     )
     third_party_integrations = load_integrations(
         LIB_PATCH_ROOT,
         profile.get("third_party_libraries", "all"),
         target_version=target_version,
+        version_overrides=third_party_version_overrides,
     )
     if profile.get("third_party_libraries") == "all":
         all_third_party_integrations = third_party_integrations
     else:
-        all_third_party_integrations = load_integrations(LIB_PATCH_ROOT, "all", target_version=target_version)
+        all_third_party_integrations = load_integrations(
+            LIB_PATCH_ROOT,
+            "all",
+            target_version=target_version,
+            version_overrides=third_party_version_overrides,
+        )
     integrations = [*core_integrations, *third_party_integrations]
     if requested_version_info is not None and requested_version_info != version_info:
         raise RuntimeError(

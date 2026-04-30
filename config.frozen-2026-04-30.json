@@ -1,0 +1,1426 @@
+{
+  "default_profile": "full-frozen-2026-04-30",
+  "profiles": {
+    "full-frozen-2026-04-30": {
+      "description": "Frozen restore profile pinned to the currently resolved default integration versions as of 2026-04-30.",
+      "core_libraries": "all",
+      "third_party_libraries": "all",
+      "third_party_library_version_overrides": {
+        "aiohappyeyeballs": "2.6.1",
+        "frozenlist": "1.8.0",
+        "aiosignal": "1.4.0",
+        "attrs": "26.1.0",
+        "multidict": "6.7.1",
+        "propcache": "0.4.1",
+        "idna": "3.13",
+        "yarl": "1.23.0",
+        "aiohttp": "3.13.5",
+        "typing_extensions": "4.15.0",
+        "sqlalchemy": "2.0.49",
+        "markupsafe": "3.0.3",
+        "mako": "1.3.12",
+        "alembic": "1.18.4",
+        "annotated_doc": "0.0.4",
+        "annotated_types": "0.7.0",
+        "anyio": "4.13.0",
+        "asgiref": "3.11.1",
+        "asttokens": "3.0.1",
+        "async_lru": "2.3.0",
+        "attr": "26.1.0",
+        "babel": "2.18.0",
+        "colorama": "0.4.6",
+        "click": "8.3.3",
+        "mypy_extensions": "1.1.0",
+        "packaging": "26.2",
+        "pathspec": "1.1.1",
+        "platformdirs": "4.9.6",
+        "pytokens": "0.4.1",
+        "black": "26.3.1",
+        "webencodings": "0.5.1",
+        "bleach": "6.3.0",
+        "blinker": "1.9.0",
+        "soupsieve": "2.8.3",
+        "bs4": "4.14.3",
+        "cachetools": "7.0.6",
+        "cattr": "26.1.0",
+        "cattrs": "26.1.0",
+        "certifi": "2026.4.22",
+        "chardet": "7.4.3",
+        "charset_normalizer": "3.4.7",
+        "cloudpickle": "3.1.2",
+        "comm": "0.2.3",
+        "comtypes": "1.4.16",
+        "Crypto": "3.20.0",
+        "cycler": "0.12.1",
+        "six": "1.17.0",
+        "dateutil": "2.9.0.post0",
+        "decorator": "5.2.1",
+        "defusedxml": "0.7.1",
+        "dill": "0.4.1",
+        "sqlparse": "0.5.5",
+        "tzdata": "2026.2",
+        "django": "6.0.4",
+        "dns": "2.8.0",
+        "docutils": "0.22.4",
+        "dotenv": "1.2.2",
+        "email_validator": "2.3.0",
+        "et_xmlfile": "2.0.0",
+        "executing": "2.2.1",
+        "faker": "40.15.0",
+        "fastjsonschema": "2.21.2",
+        "filelock": "3.29.0",
+        "itsdangerous": "2.2.0",
+        "jinja2": "3.1.6",
+        "werkzeug": "3.1.8",
+        "flask": "3.1.3",
+        "fontTools": "4.62.1",
+        "freezegun": "1.5.5",
+        "fsspec": "2026.4.0",
+        "h11": "0.16.0",
+        "hyperframe": "6.1.0",
+        "hpack": "4.1.0",
+        "h2": "4.3.0",
+        "html5lib": "1.1",
+        "httpcore": "1.0.9",
+        "httpx": "0.28.1",
+        "humanize": "4.15.0",
+        "sortedcontainers": "2.4.0",
+        "hypothesis": "6.152.4",
+        "zipp": "3.23.1",
+        "importlib_metadata": "9.0.0",
+        "iniconfig": "2.3.0",
+        "pygments": "2.20.0",
+        "ipython_pygments_lexers": "1.1.1",
+        "parso": "0.8.6",
+        "jedi": "0.19.2",
+        "traitlets": "5.14.3",
+        "matplotlib_inline": "0.2.1",
+        "wcwidth": "0.6.0",
+        "prompt_toolkit": "3.0.52",
+        "psutil": "7.2.2",
+        "pure_eval": "0.2.3",
+        "stack_data": "0.6.3",
+        "IPython": "9.13.0",
+        "jupyter_core": "5.9.1",
+        "pyzmq": "27.1.0",
+        "tornado": "6.5.5",
+        "jupyter_client": "8.8.0",
+        "nest_asyncio": "1.6.0",
+        "ipykernel": "7.2.0",
+        "isort": "8.0.1",
+        "jmespath": "1.1.0",
+        "joblib": "1.5.3",
+        "json5": "0.14.0",
+        "jsonpickle": "4.1.1",
+        "pyrsistent": "0.20.0",
+        "jsonschema": "4.17.3",
+        "pythonjsonlogger": "4.1.0",
+        "yaml": "6.0.3",
+        "rfc3339_validator": "0.1.4",
+        "rfc3986_validator": "0.1.1",
+        "jupyter_events": "0.6.3",
+        "jupyterlab_pygments": "0.3.0",
+        "mistune": "3.2.0",
+        "nbformat": "5.10.4",
+        "nbclient": "0.10.4",
+        "pandocfilters": "1.5.1",
+        "nbconvert": "7.17.1",
+        "overrides": "7.7.0",
+        "prometheus_client": "0.25.0",
+        "send2trash": "2.1.0",
+        "terminado": "0.18.1",
+        "websocket": "1.9.0",
+        "jupyter_server": "2.7.0",
+        "jupyter_lsp": "2.3.1",
+        "urllib3": "2.6.3",
+        "requests": "2.33.1",
+        "jupyterlab_server": "2.24.0",
+        "notebook_shim": "0.2.4",
+        "jupyterlab": "4.0.9",
+        "lark": "1.3.1",
+        "libui": "0.2.2",
+        "win32_setctime": "1.2.0",
+        "loguru": "0.7.3",
+        "markdown": "3.10.2",
+        "mdurl": "0.1.2",
+        "markdown_it": "4.0.0",
+        "marshmallow": "4.3.0",
+        "more_itertools": "11.0.2",
+        "mpmath": "1.4.1",
+        "msgpack": "1.1.2",
+        "narwhals": "2.20.0",
+        "networkx": "3.6.1",
+        "notebook": "7.0.8",
+        "numpy": "2.4.4",
+        "oauthlib": "3.3.1",
+        "openpyxl": "3.1.5",
+        "outcome": "1.3.0.post0",
+        "pandas": "3.0.2",
+        "PIL": "12.2.0",
+        "plotly": "6.7.0",
+        "pluggy": "1.6.0",
+        "portalocker": "3.2.0",
+        "protobuf": "7.34.1",
+        "py": "1.11.0",
+        "pyasn1": "0.6.3",
+        "pyasn1_modules": "0.4.2",
+        "pycparser": "3.0",
+        "pymongo": "4.17.0",
+        "pymysql": "1.1.2",
+        "pyparsing": "3.3.2",
+        "pypdf": "6.10.2",
+        "pyperclip": "1.11.0",
+        "pytest": "9.0.3",
+        "python_multipart": "0.0.27",
+        "pytz": "2026.1.post1",
+        "rapidfuzz": "3.14.5",
+        "redis": "7.4.0",
+        "regex": "2026.4.4",
+        "requests_oauthlib": "2.0.0",
+        "requests_toolbelt": "1.0.0",
+        "responses": "0.26.0",
+        "rich": "15.0.0",
+        "rsa": "4.9.1",
+        "selenium": "4.43.0",
+        "shellingham": "1.5.4",
+        "text_unidecode": "1.3",
+        "slugify": "8.0.4",
+        "sniffio": "1.3.1",
+        "socks": "1.7.1",
+        "starlette": "1.0.0",
+        "sympy": "1.14.0",
+        "tabulate": "0.10.0",
+        "tenacity": "9.1.4",
+        "threadpoolctl": "3.6.0",
+        "tinycss2": "1.5.1",
+        "tomlkit": "0.14.0",
+        "tqdm": "4.67.3",
+        "typer": "0.25.0",
+        "typing_inspect": "0.9.0",
+        "typing_inspection": "0.4.2",
+        "ujson": "5.12.0",
+        "uvicorn": "0.46.0",
+        "websockets": "16.0",
+        "wsproto": "1.3.2",
+        "xlsxwriter": "3.2.9",
+        "xmltodict": "1.0.4"
+      },
+      "notes": {
+        "target_cpython_version_validated_for_snapshot": "3.13.2",
+        "generated_from": "config.json full profile",
+        "purpose": "Restore the full current third-party version set after future upgrades or regressions.",
+        "core_library_versions_are_recorded_in_snapshot_only": true
+      }
+    }
+  },
+  "snapshot": {
+    "generated_on": "2026-04-30",
+    "target_cpython_version": "3.13.2",
+    "core_integrations": {
+      "libffi": {
+        "source_provider": "local",
+        "project_name": null,
+        "release_version": null,
+        "detected_cpython_version": "3.4.4"
+      },
+      "openssl": {
+        "source_provider": "local",
+        "project_name": null,
+        "release_version": null,
+        "detected_cpython_version": "3.0.15"
+      }
+    },
+    "third_party_integrations": {
+      "aiohappyeyeballs": {
+        "source_provider": "pypi",
+        "project_name": "aiohappyeyeballs",
+        "declared_release_version": null,
+        "resolved_release_version": "2.6.1"
+      },
+      "frozenlist": {
+        "source_provider": "pypi",
+        "project_name": "frozenlist",
+        "declared_release_version": null,
+        "resolved_release_version": "1.8.0"
+      },
+      "aiosignal": {
+        "source_provider": "pypi",
+        "project_name": "aiosignal",
+        "declared_release_version": null,
+        "resolved_release_version": "1.4.0"
+      },
+      "attrs": {
+        "source_provider": "pypi",
+        "project_name": "attrs",
+        "declared_release_version": null,
+        "resolved_release_version": "26.1.0"
+      },
+      "multidict": {
+        "source_provider": "pypi",
+        "project_name": "multidict",
+        "declared_release_version": null,
+        "resolved_release_version": "6.7.1"
+      },
+      "propcache": {
+        "source_provider": "pypi",
+        "project_name": "propcache",
+        "declared_release_version": null,
+        "resolved_release_version": "0.4.1"
+      },
+      "idna": {
+        "source_provider": "pypi",
+        "project_name": "idna",
+        "declared_release_version": null,
+        "resolved_release_version": "3.13"
+      },
+      "yarl": {
+        "source_provider": "pypi",
+        "project_name": "yarl",
+        "declared_release_version": null,
+        "resolved_release_version": "1.23.0"
+      },
+      "aiohttp": {
+        "source_provider": "pypi",
+        "project_name": "aiohttp",
+        "declared_release_version": null,
+        "resolved_release_version": "3.13.5"
+      },
+      "typing_extensions": {
+        "source_provider": "pypi",
+        "project_name": "typing_extensions",
+        "declared_release_version": null,
+        "resolved_release_version": "4.15.0"
+      },
+      "sqlalchemy": {
+        "source_provider": "pypi",
+        "project_name": "SQLAlchemy",
+        "declared_release_version": null,
+        "resolved_release_version": "2.0.49"
+      },
+      "markupsafe": {
+        "source_provider": "pypi",
+        "project_name": "markupsafe",
+        "declared_release_version": null,
+        "resolved_release_version": "3.0.3"
+      },
+      "mako": {
+        "source_provider": "pypi",
+        "project_name": "Mako",
+        "declared_release_version": null,
+        "resolved_release_version": "1.3.12"
+      },
+      "alembic": {
+        "source_provider": "pypi",
+        "project_name": "alembic",
+        "declared_release_version": null,
+        "resolved_release_version": "1.18.4"
+      },
+      "annotated_doc": {
+        "source_provider": "pypi",
+        "project_name": "annotated-doc",
+        "declared_release_version": null,
+        "resolved_release_version": "0.0.4"
+      },
+      "annotated_types": {
+        "source_provider": "pypi",
+        "project_name": "annotated-types",
+        "declared_release_version": null,
+        "resolved_release_version": "0.7.0"
+      },
+      "anyio": {
+        "source_provider": "pypi",
+        "project_name": "anyio",
+        "declared_release_version": null,
+        "resolved_release_version": "4.13.0"
+      },
+      "asgiref": {
+        "source_provider": "pypi",
+        "project_name": "asgiref",
+        "declared_release_version": null,
+        "resolved_release_version": "3.11.1"
+      },
+      "asttokens": {
+        "source_provider": "pypi",
+        "project_name": "asttokens",
+        "declared_release_version": null,
+        "resolved_release_version": "3.0.1"
+      },
+      "async_lru": {
+        "source_provider": "pypi",
+        "project_name": "async-lru",
+        "declared_release_version": null,
+        "resolved_release_version": "2.3.0"
+      },
+      "attr": {
+        "source_provider": "pypi",
+        "project_name": "attrs",
+        "declared_release_version": null,
+        "resolved_release_version": "26.1.0"
+      },
+      "babel": {
+        "source_provider": "pypi",
+        "project_name": "Babel",
+        "declared_release_version": null,
+        "resolved_release_version": "2.18.0"
+      },
+      "colorama": {
+        "source_provider": "pypi",
+        "project_name": "colorama",
+        "declared_release_version": null,
+        "resolved_release_version": "0.4.6"
+      },
+      "click": {
+        "source_provider": "pypi",
+        "project_name": "click",
+        "declared_release_version": null,
+        "resolved_release_version": "8.3.3"
+      },
+      "mypy_extensions": {
+        "source_provider": "pypi",
+        "project_name": "mypy-extensions",
+        "declared_release_version": null,
+        "resolved_release_version": "1.1.0"
+      },
+      "packaging": {
+        "source_provider": "pypi",
+        "project_name": "packaging",
+        "declared_release_version": null,
+        "resolved_release_version": "26.2"
+      },
+      "pathspec": {
+        "source_provider": "pypi",
+        "project_name": "pathspec",
+        "declared_release_version": null,
+        "resolved_release_version": "1.1.1"
+      },
+      "platformdirs": {
+        "source_provider": "pypi",
+        "project_name": "platformdirs",
+        "declared_release_version": null,
+        "resolved_release_version": "4.9.6"
+      },
+      "pytokens": {
+        "source_provider": "pypi",
+        "project_name": "pytokens",
+        "declared_release_version": null,
+        "resolved_release_version": "0.4.1"
+      },
+      "black": {
+        "source_provider": "pypi",
+        "project_name": "black",
+        "declared_release_version": null,
+        "resolved_release_version": "26.3.1"
+      },
+      "webencodings": {
+        "source_provider": "pypi",
+        "project_name": "webencodings",
+        "declared_release_version": null,
+        "resolved_release_version": "0.5.1"
+      },
+      "bleach": {
+        "source_provider": "pypi",
+        "project_name": "bleach",
+        "declared_release_version": null,
+        "resolved_release_version": "6.3.0"
+      },
+      "blinker": {
+        "source_provider": "pypi",
+        "project_name": "blinker",
+        "declared_release_version": null,
+        "resolved_release_version": "1.9.0"
+      },
+      "soupsieve": {
+        "source_provider": "pypi",
+        "project_name": "soupsieve",
+        "declared_release_version": null,
+        "resolved_release_version": "2.8.3"
+      },
+      "bs4": {
+        "source_provider": "pypi",
+        "project_name": "beautifulsoup4",
+        "declared_release_version": null,
+        "resolved_release_version": "4.14.3"
+      },
+      "cachetools": {
+        "source_provider": "pypi",
+        "project_name": "cachetools",
+        "declared_release_version": null,
+        "resolved_release_version": "7.0.6"
+      },
+      "cattr": {
+        "source_provider": "pypi",
+        "project_name": "cattrs",
+        "declared_release_version": null,
+        "resolved_release_version": "26.1.0"
+      },
+      "cattrs": {
+        "source_provider": "pypi",
+        "project_name": "cattrs",
+        "declared_release_version": null,
+        "resolved_release_version": "26.1.0"
+      },
+      "certifi": {
+        "source_provider": "pypi",
+        "project_name": "certifi",
+        "declared_release_version": null,
+        "resolved_release_version": "2026.4.22"
+      },
+      "chardet": {
+        "source_provider": "pypi",
+        "project_name": "chardet",
+        "declared_release_version": null,
+        "resolved_release_version": "7.4.3"
+      },
+      "charset_normalizer": {
+        "source_provider": "pypi",
+        "project_name": "charset_normalizer",
+        "declared_release_version": null,
+        "resolved_release_version": "3.4.7"
+      },
+      "cloudpickle": {
+        "source_provider": "pypi",
+        "project_name": "cloudpickle",
+        "declared_release_version": null,
+        "resolved_release_version": "3.1.2"
+      },
+      "comm": {
+        "source_provider": "pypi",
+        "project_name": "comm",
+        "declared_release_version": null,
+        "resolved_release_version": "0.2.3"
+      },
+      "comtypes": {
+        "source_provider": "pypi",
+        "project_name": "comtypes",
+        "declared_release_version": null,
+        "resolved_release_version": "1.4.16"
+      },
+      "Crypto": {
+        "source_provider": "pypi",
+        "project_name": "pycryptodome",
+        "declared_release_version": "3.20.0",
+        "resolved_release_version": "3.20.0"
+      },
+      "cycler": {
+        "source_provider": "pypi",
+        "project_name": "cycler",
+        "declared_release_version": null,
+        "resolved_release_version": "0.12.1"
+      },
+      "six": {
+        "source_provider": "pypi",
+        "project_name": "six",
+        "declared_release_version": null,
+        "resolved_release_version": "1.17.0"
+      },
+      "dateutil": {
+        "source_provider": "pypi",
+        "project_name": "python-dateutil",
+        "declared_release_version": null,
+        "resolved_release_version": "2.9.0.post0"
+      },
+      "decorator": {
+        "source_provider": "pypi",
+        "project_name": "decorator",
+        "declared_release_version": null,
+        "resolved_release_version": "5.2.1"
+      },
+      "defusedxml": {
+        "source_provider": "pypi",
+        "project_name": "defusedxml",
+        "declared_release_version": null,
+        "resolved_release_version": "0.7.1"
+      },
+      "dill": {
+        "source_provider": "pypi",
+        "project_name": "dill",
+        "declared_release_version": null,
+        "resolved_release_version": "0.4.1"
+      },
+      "sqlparse": {
+        "source_provider": "pypi",
+        "project_name": "sqlparse",
+        "declared_release_version": null,
+        "resolved_release_version": "0.5.5"
+      },
+      "tzdata": {
+        "source_provider": "pypi",
+        "project_name": "tzdata",
+        "declared_release_version": null,
+        "resolved_release_version": "2026.2"
+      },
+      "django": {
+        "source_provider": "pypi",
+        "project_name": "django",
+        "declared_release_version": null,
+        "resolved_release_version": "6.0.4"
+      },
+      "dns": {
+        "source_provider": "pypi",
+        "project_name": "dnspython",
+        "declared_release_version": null,
+        "resolved_release_version": "2.8.0"
+      },
+      "docutils": {
+        "source_provider": "pypi",
+        "project_name": "docutils",
+        "declared_release_version": null,
+        "resolved_release_version": "0.22.4"
+      },
+      "dotenv": {
+        "source_provider": "pypi",
+        "project_name": "python-dotenv",
+        "declared_release_version": null,
+        "resolved_release_version": "1.2.2"
+      },
+      "email_validator": {
+        "source_provider": "pypi",
+        "project_name": "email-validator",
+        "declared_release_version": null,
+        "resolved_release_version": "2.3.0"
+      },
+      "et_xmlfile": {
+        "source_provider": "pypi",
+        "project_name": "et_xmlfile",
+        "declared_release_version": null,
+        "resolved_release_version": "2.0.0"
+      },
+      "executing": {
+        "source_provider": "pypi",
+        "project_name": "executing",
+        "declared_release_version": null,
+        "resolved_release_version": "2.2.1"
+      },
+      "faker": {
+        "source_provider": "pypi",
+        "project_name": "Faker",
+        "declared_release_version": null,
+        "resolved_release_version": "40.15.0"
+      },
+      "fastjsonschema": {
+        "source_provider": "pypi",
+        "project_name": "fastjsonschema",
+        "declared_release_version": null,
+        "resolved_release_version": "2.21.2"
+      },
+      "filelock": {
+        "source_provider": "pypi",
+        "project_name": "filelock",
+        "declared_release_version": null,
+        "resolved_release_version": "3.29.0"
+      },
+      "itsdangerous": {
+        "source_provider": "pypi",
+        "project_name": "itsdangerous",
+        "declared_release_version": null,
+        "resolved_release_version": "2.2.0"
+      },
+      "jinja2": {
+        "source_provider": "pypi",
+        "project_name": "jinja2",
+        "declared_release_version": null,
+        "resolved_release_version": "3.1.6"
+      },
+      "werkzeug": {
+        "source_provider": "pypi",
+        "project_name": "werkzeug",
+        "declared_release_version": null,
+        "resolved_release_version": "3.1.8"
+      },
+      "flask": {
+        "source_provider": "pypi",
+        "project_name": "flask",
+        "declared_release_version": null,
+        "resolved_release_version": "3.1.3"
+      },
+      "fontTools": {
+        "source_provider": "pypi",
+        "project_name": "fonttools",
+        "declared_release_version": null,
+        "resolved_release_version": "4.62.1"
+      },
+      "freezegun": {
+        "source_provider": "pypi",
+        "project_name": "freezegun",
+        "declared_release_version": null,
+        "resolved_release_version": "1.5.5"
+      },
+      "fsspec": {
+        "source_provider": "pypi",
+        "project_name": "fsspec",
+        "declared_release_version": null,
+        "resolved_release_version": "2026.4.0"
+      },
+      "h11": {
+        "source_provider": "pypi",
+        "project_name": "h11",
+        "declared_release_version": null,
+        "resolved_release_version": "0.16.0"
+      },
+      "hyperframe": {
+        "source_provider": "pypi",
+        "project_name": "hyperframe",
+        "declared_release_version": null,
+        "resolved_release_version": "6.1.0"
+      },
+      "hpack": {
+        "source_provider": "pypi",
+        "project_name": "hpack",
+        "declared_release_version": null,
+        "resolved_release_version": "4.1.0"
+      },
+      "h2": {
+        "source_provider": "pypi",
+        "project_name": "h2",
+        "declared_release_version": null,
+        "resolved_release_version": "4.3.0"
+      },
+      "html5lib": {
+        "source_provider": "pypi",
+        "project_name": "html5lib",
+        "declared_release_version": null,
+        "resolved_release_version": "1.1"
+      },
+      "httpcore": {
+        "source_provider": "pypi",
+        "project_name": "httpcore",
+        "declared_release_version": null,
+        "resolved_release_version": "1.0.9"
+      },
+      "httpx": {
+        "source_provider": "pypi",
+        "project_name": "httpx",
+        "declared_release_version": null,
+        "resolved_release_version": "0.28.1"
+      },
+      "humanize": {
+        "source_provider": "pypi",
+        "project_name": "humanize",
+        "declared_release_version": null,
+        "resolved_release_version": "4.15.0"
+      },
+      "sortedcontainers": {
+        "source_provider": "pypi",
+        "project_name": "sortedcontainers",
+        "declared_release_version": null,
+        "resolved_release_version": "2.4.0"
+      },
+      "hypothesis": {
+        "source_provider": "pypi",
+        "project_name": "hypothesis",
+        "declared_release_version": null,
+        "resolved_release_version": "6.152.4"
+      },
+      "zipp": {
+        "source_provider": "pypi",
+        "project_name": "zipp",
+        "declared_release_version": null,
+        "resolved_release_version": "3.23.1"
+      },
+      "importlib_metadata": {
+        "source_provider": "pypi",
+        "project_name": "importlib-metadata",
+        "declared_release_version": null,
+        "resolved_release_version": "9.0.0"
+      },
+      "iniconfig": {
+        "source_provider": "pypi",
+        "project_name": "iniconfig",
+        "declared_release_version": null,
+        "resolved_release_version": "2.3.0"
+      },
+      "pygments": {
+        "source_provider": "pypi",
+        "project_name": "pygments",
+        "declared_release_version": null,
+        "resolved_release_version": "2.20.0"
+      },
+      "ipython_pygments_lexers": {
+        "source_provider": "pypi",
+        "project_name": "ipython-pygments-lexers",
+        "declared_release_version": null,
+        "resolved_release_version": "1.1.1"
+      },
+      "parso": {
+        "source_provider": "pypi",
+        "project_name": "parso",
+        "declared_release_version": null,
+        "resolved_release_version": "0.8.6"
+      },
+      "jedi": {
+        "source_provider": "pypi",
+        "project_name": "jedi",
+        "declared_release_version": null,
+        "resolved_release_version": "0.19.2"
+      },
+      "traitlets": {
+        "source_provider": "pypi",
+        "project_name": "traitlets",
+        "declared_release_version": null,
+        "resolved_release_version": "5.14.3"
+      },
+      "matplotlib_inline": {
+        "source_provider": "pypi",
+        "project_name": "matplotlib-inline",
+        "declared_release_version": null,
+        "resolved_release_version": "0.2.1"
+      },
+      "wcwidth": {
+        "source_provider": "pypi",
+        "project_name": "wcwidth",
+        "declared_release_version": null,
+        "resolved_release_version": "0.6.0"
+      },
+      "prompt_toolkit": {
+        "source_provider": "pypi",
+        "project_name": "prompt_toolkit",
+        "declared_release_version": null,
+        "resolved_release_version": "3.0.52"
+      },
+      "psutil": {
+        "source_provider": "pypi",
+        "project_name": "psutil",
+        "declared_release_version": null,
+        "resolved_release_version": "7.2.2"
+      },
+      "pure_eval": {
+        "source_provider": "pypi",
+        "project_name": "pure-eval",
+        "declared_release_version": null,
+        "resolved_release_version": "0.2.3"
+      },
+      "stack_data": {
+        "source_provider": "pypi",
+        "project_name": "stack-data",
+        "declared_release_version": null,
+        "resolved_release_version": "0.6.3"
+      },
+      "IPython": {
+        "source_provider": "pypi",
+        "project_name": "ipython",
+        "declared_release_version": null,
+        "resolved_release_version": "9.13.0"
+      },
+      "jupyter_core": {
+        "source_provider": "pypi",
+        "project_name": "jupyter-core",
+        "declared_release_version": null,
+        "resolved_release_version": "5.9.1"
+      },
+      "pyzmq": {
+        "source_provider": "pypi",
+        "project_name": "pyzmq",
+        "declared_release_version": null,
+        "resolved_release_version": "27.1.0"
+      },
+      "tornado": {
+        "source_provider": "pypi",
+        "project_name": "tornado",
+        "declared_release_version": null,
+        "resolved_release_version": "6.5.5"
+      },
+      "jupyter_client": {
+        "source_provider": "pypi",
+        "project_name": "jupyter-client",
+        "declared_release_version": null,
+        "resolved_release_version": "8.8.0"
+      },
+      "nest_asyncio": {
+        "source_provider": "pypi",
+        "project_name": "nest-asyncio",
+        "declared_release_version": null,
+        "resolved_release_version": "1.6.0"
+      },
+      "ipykernel": {
+        "source_provider": "pypi",
+        "project_name": "ipykernel",
+        "declared_release_version": null,
+        "resolved_release_version": "7.2.0"
+      },
+      "isort": {
+        "source_provider": "pypi",
+        "project_name": "isort",
+        "declared_release_version": null,
+        "resolved_release_version": "8.0.1"
+      },
+      "jmespath": {
+        "source_provider": "pypi",
+        "project_name": "jmespath",
+        "declared_release_version": null,
+        "resolved_release_version": "1.1.0"
+      },
+      "joblib": {
+        "source_provider": "pypi",
+        "project_name": "joblib",
+        "declared_release_version": null,
+        "resolved_release_version": "1.5.3"
+      },
+      "json5": {
+        "source_provider": "pypi",
+        "project_name": "json5",
+        "declared_release_version": null,
+        "resolved_release_version": "0.14.0"
+      },
+      "jsonpickle": {
+        "source_provider": "pypi",
+        "project_name": "jsonpickle",
+        "declared_release_version": null,
+        "resolved_release_version": "4.1.1"
+      },
+      "pyrsistent": {
+        "source_provider": "pypi",
+        "project_name": "pyrsistent",
+        "declared_release_version": null,
+        "resolved_release_version": "0.20.0"
+      },
+      "jsonschema": {
+        "source_provider": "pypi",
+        "project_name": "jsonschema",
+        "declared_release_version": "4.17.3",
+        "resolved_release_version": "4.17.3"
+      },
+      "pythonjsonlogger": {
+        "source_provider": "pypi",
+        "project_name": "python-json-logger",
+        "declared_release_version": null,
+        "resolved_release_version": "4.1.0"
+      },
+      "yaml": {
+        "source_provider": "pypi",
+        "project_name": "PyYAML",
+        "declared_release_version": null,
+        "resolved_release_version": "6.0.3"
+      },
+      "rfc3339_validator": {
+        "source_provider": "pypi",
+        "project_name": "rfc3339-validator",
+        "declared_release_version": null,
+        "resolved_release_version": "0.1.4"
+      },
+      "rfc3986_validator": {
+        "source_provider": "pypi",
+        "project_name": "rfc3986-validator",
+        "declared_release_version": null,
+        "resolved_release_version": "0.1.1"
+      },
+      "jupyter_events": {
+        "source_provider": "pypi",
+        "project_name": "jupyter-events",
+        "declared_release_version": "0.6.3",
+        "resolved_release_version": "0.6.3"
+      },
+      "jupyterlab_pygments": {
+        "source_provider": "pypi",
+        "project_name": "jupyterlab-pygments",
+        "declared_release_version": null,
+        "resolved_release_version": "0.3.0"
+      },
+      "mistune": {
+        "source_provider": "pypi",
+        "project_name": "mistune",
+        "declared_release_version": null,
+        "resolved_release_version": "3.2.0"
+      },
+      "nbformat": {
+        "source_provider": "pypi",
+        "project_name": "nbformat",
+        "declared_release_version": null,
+        "resolved_release_version": "5.10.4"
+      },
+      "nbclient": {
+        "source_provider": "pypi",
+        "project_name": "nbclient",
+        "declared_release_version": null,
+        "resolved_release_version": "0.10.4"
+      },
+      "pandocfilters": {
+        "source_provider": "pypi",
+        "project_name": "pandocfilters",
+        "declared_release_version": null,
+        "resolved_release_version": "1.5.1"
+      },
+      "nbconvert": {
+        "source_provider": "pypi",
+        "project_name": "nbconvert",
+        "declared_release_version": null,
+        "resolved_release_version": "7.17.1"
+      },
+      "overrides": {
+        "source_provider": "pypi",
+        "project_name": "overrides",
+        "declared_release_version": null,
+        "resolved_release_version": "7.7.0"
+      },
+      "prometheus_client": {
+        "source_provider": "pypi",
+        "project_name": "prometheus-client",
+        "declared_release_version": null,
+        "resolved_release_version": "0.25.0"
+      },
+      "send2trash": {
+        "source_provider": "pypi",
+        "project_name": "send2trash",
+        "declared_release_version": null,
+        "resolved_release_version": "2.1.0"
+      },
+      "terminado": {
+        "source_provider": "pypi",
+        "project_name": "terminado",
+        "declared_release_version": null,
+        "resolved_release_version": "0.18.1"
+      },
+      "websocket": {
+        "source_provider": "pypi",
+        "project_name": "websocket-client",
+        "declared_release_version": null,
+        "resolved_release_version": "1.9.0"
+      },
+      "jupyter_server": {
+        "source_provider": "pypi",
+        "project_name": "jupyter-server",
+        "declared_release_version": "2.7.0",
+        "resolved_release_version": "2.7.0"
+      },
+      "jupyter_lsp": {
+        "source_provider": "pypi",
+        "project_name": "jupyter-lsp",
+        "declared_release_version": null,
+        "resolved_release_version": "2.3.1"
+      },
+      "urllib3": {
+        "source_provider": "pypi",
+        "project_name": "urllib3",
+        "declared_release_version": null,
+        "resolved_release_version": "2.6.3"
+      },
+      "requests": {
+        "source_provider": "pypi",
+        "project_name": "requests",
+        "declared_release_version": null,
+        "resolved_release_version": "2.33.1"
+      },
+      "jupyterlab_server": {
+        "source_provider": "pypi",
+        "project_name": "jupyterlab-server",
+        "declared_release_version": "2.24.0",
+        "resolved_release_version": "2.24.0"
+      },
+      "notebook_shim": {
+        "source_provider": "pypi",
+        "project_name": "notebook-shim",
+        "declared_release_version": null,
+        "resolved_release_version": "0.2.4"
+      },
+      "jupyterlab": {
+        "source_provider": "pypi",
+        "project_name": "jupyterlab",
+        "declared_release_version": "4.0.9",
+        "resolved_release_version": "4.0.9"
+      },
+      "lark": {
+        "source_provider": "pypi",
+        "project_name": "lark",
+        "declared_release_version": null,
+        "resolved_release_version": "1.3.1"
+      },
+      "libui": {
+        "source_provider": "pypi",
+        "project_name": "libui",
+        "declared_release_version": null,
+        "resolved_release_version": "0.2.2"
+      },
+      "win32_setctime": {
+        "source_provider": "pypi",
+        "project_name": "win32_setctime",
+        "declared_release_version": null,
+        "resolved_release_version": "1.2.0"
+      },
+      "loguru": {
+        "source_provider": "pypi",
+        "project_name": "loguru",
+        "declared_release_version": null,
+        "resolved_release_version": "0.7.3"
+      },
+      "markdown": {
+        "source_provider": "pypi",
+        "project_name": "markdown",
+        "declared_release_version": null,
+        "resolved_release_version": "3.10.2"
+      },
+      "mdurl": {
+        "source_provider": "pypi",
+        "project_name": "mdurl",
+        "declared_release_version": null,
+        "resolved_release_version": "0.1.2"
+      },
+      "markdown_it": {
+        "source_provider": "pypi",
+        "project_name": "markdown-it-py",
+        "declared_release_version": null,
+        "resolved_release_version": "4.0.0"
+      },
+      "marshmallow": {
+        "source_provider": "pypi",
+        "project_name": "marshmallow",
+        "declared_release_version": null,
+        "resolved_release_version": "4.3.0"
+      },
+      "more_itertools": {
+        "source_provider": "pypi",
+        "project_name": "more-itertools",
+        "declared_release_version": null,
+        "resolved_release_version": "11.0.2"
+      },
+      "mpmath": {
+        "source_provider": "pypi",
+        "project_name": "mpmath",
+        "declared_release_version": null,
+        "resolved_release_version": "1.4.1"
+      },
+      "msgpack": {
+        "source_provider": "pypi",
+        "project_name": "msgpack",
+        "declared_release_version": null,
+        "resolved_release_version": "1.1.2"
+      },
+      "narwhals": {
+        "source_provider": "pypi",
+        "project_name": "narwhals",
+        "declared_release_version": null,
+        "resolved_release_version": "2.20.0"
+      },
+      "networkx": {
+        "source_provider": "pypi",
+        "project_name": "networkx",
+        "declared_release_version": null,
+        "resolved_release_version": "3.6.1"
+      },
+      "notebook": {
+        "source_provider": "pypi",
+        "project_name": "notebook",
+        "declared_release_version": "7.0.8",
+        "resolved_release_version": "7.0.8"
+      },
+      "numpy": {
+        "source_provider": "pypi",
+        "project_name": "numpy",
+        "declared_release_version": "2.4.4",
+        "resolved_release_version": "2.4.4"
+      },
+      "oauthlib": {
+        "source_provider": "pypi",
+        "project_name": "oauthlib",
+        "declared_release_version": null,
+        "resolved_release_version": "3.3.1"
+      },
+      "openpyxl": {
+        "source_provider": "pypi",
+        "project_name": "openpyxl",
+        "declared_release_version": null,
+        "resolved_release_version": "3.1.5"
+      },
+      "outcome": {
+        "source_provider": "pypi",
+        "project_name": "outcome",
+        "declared_release_version": null,
+        "resolved_release_version": "1.3.0.post0"
+      },
+      "pandas": {
+        "source_provider": "pypi",
+        "project_name": "pandas",
+        "declared_release_version": "3.0.2",
+        "resolved_release_version": "3.0.2"
+      },
+      "PIL": {
+        "source_provider": "pypi",
+        "project_name": "pillow",
+        "declared_release_version": null,
+        "resolved_release_version": "12.2.0"
+      },
+      "plotly": {
+        "source_provider": "pypi",
+        "project_name": "plotly",
+        "declared_release_version": null,
+        "resolved_release_version": "6.7.0"
+      },
+      "pluggy": {
+        "source_provider": "pypi",
+        "project_name": "pluggy",
+        "declared_release_version": null,
+        "resolved_release_version": "1.6.0"
+      },
+      "portalocker": {
+        "source_provider": "pypi",
+        "project_name": "portalocker",
+        "declared_release_version": null,
+        "resolved_release_version": "3.2.0"
+      },
+      "protobuf": {
+        "source_provider": "pypi",
+        "project_name": "protobuf",
+        "declared_release_version": null,
+        "resolved_release_version": "7.34.1"
+      },
+      "py": {
+        "source_provider": "pypi",
+        "project_name": "py",
+        "declared_release_version": null,
+        "resolved_release_version": "1.11.0"
+      },
+      "pyasn1": {
+        "source_provider": "pypi",
+        "project_name": "pyasn1",
+        "declared_release_version": null,
+        "resolved_release_version": "0.6.3"
+      },
+      "pyasn1_modules": {
+        "source_provider": "pypi",
+        "project_name": "pyasn1-modules",
+        "declared_release_version": null,
+        "resolved_release_version": "0.4.2"
+      },
+      "pycparser": {
+        "source_provider": "pypi",
+        "project_name": "pycparser",
+        "declared_release_version": null,
+        "resolved_release_version": "3.0"
+      },
+      "pymongo": {
+        "source_provider": "pypi",
+        "project_name": "pymongo",
+        "declared_release_version": null,
+        "resolved_release_version": "4.17.0"
+      },
+      "pymysql": {
+        "source_provider": "pypi",
+        "project_name": "pymysql",
+        "declared_release_version": null,
+        "resolved_release_version": "1.1.2"
+      },
+      "pyparsing": {
+        "source_provider": "pypi",
+        "project_name": "pyparsing",
+        "declared_release_version": null,
+        "resolved_release_version": "3.3.2"
+      },
+      "pypdf": {
+        "source_provider": "pypi",
+        "project_name": "pypdf",
+        "declared_release_version": null,
+        "resolved_release_version": "6.10.2"
+      },
+      "pyperclip": {
+        "source_provider": "pypi",
+        "project_name": "pyperclip",
+        "declared_release_version": null,
+        "resolved_release_version": "1.11.0"
+      },
+      "pytest": {
+        "source_provider": "pypi",
+        "project_name": "pytest",
+        "declared_release_version": null,
+        "resolved_release_version": "9.0.3"
+      },
+      "python_multipart": {
+        "source_provider": "pypi",
+        "project_name": "python-multipart",
+        "declared_release_version": null,
+        "resolved_release_version": "0.0.27"
+      },
+      "pytz": {
+        "source_provider": "pypi",
+        "project_name": "pytz",
+        "declared_release_version": null,
+        "resolved_release_version": "2026.1.post1"
+      },
+      "rapidfuzz": {
+        "source_provider": "pypi",
+        "project_name": "RapidFuzz",
+        "declared_release_version": null,
+        "resolved_release_version": "3.14.5"
+      },
+      "redis": {
+        "source_provider": "pypi",
+        "project_name": "redis",
+        "declared_release_version": null,
+        "resolved_release_version": "7.4.0"
+      },
+      "regex": {
+        "source_provider": "pypi",
+        "project_name": "regex",
+        "declared_release_version": null,
+        "resolved_release_version": "2026.4.4"
+      },
+      "requests_oauthlib": {
+        "source_provider": "pypi",
+        "project_name": "requests-oauthlib",
+        "declared_release_version": null,
+        "resolved_release_version": "2.0.0"
+      },
+      "requests_toolbelt": {
+        "source_provider": "pypi",
+        "project_name": "requests-toolbelt",
+        "declared_release_version": null,
+        "resolved_release_version": "1.0.0"
+      },
+      "responses": {
+        "source_provider": "pypi",
+        "project_name": "responses",
+        "declared_release_version": null,
+        "resolved_release_version": "0.26.0"
+      },
+      "rich": {
+        "source_provider": "pypi",
+        "project_name": "rich",
+        "declared_release_version": null,
+        "resolved_release_version": "15.0.0"
+      },
+      "rsa": {
+        "source_provider": "pypi",
+        "project_name": "rsa",
+        "declared_release_version": null,
+        "resolved_release_version": "4.9.1"
+      },
+      "selenium": {
+        "source_provider": "pypi",
+        "project_name": "selenium",
+        "declared_release_version": null,
+        "resolved_release_version": "4.43.0"
+      },
+      "shellingham": {
+        "source_provider": "pypi",
+        "project_name": "shellingham",
+        "declared_release_version": null,
+        "resolved_release_version": "1.5.4"
+      },
+      "text_unidecode": {
+        "source_provider": "pypi",
+        "project_name": "text-unidecode",
+        "declared_release_version": null,
+        "resolved_release_version": "1.3"
+      },
+      "slugify": {
+        "source_provider": "pypi",
+        "project_name": "python-slugify",
+        "declared_release_version": null,
+        "resolved_release_version": "8.0.4"
+      },
+      "sniffio": {
+        "source_provider": "pypi",
+        "project_name": "sniffio",
+        "declared_release_version": null,
+        "resolved_release_version": "1.3.1"
+      },
+      "socks": {
+        "source_provider": "pypi",
+        "project_name": "PySocks",
+        "declared_release_version": null,
+        "resolved_release_version": "1.7.1"
+      },
+      "starlette": {
+        "source_provider": "pypi",
+        "project_name": "starlette",
+        "declared_release_version": null,
+        "resolved_release_version": "1.0.0"
+      },
+      "sympy": {
+        "source_provider": "pypi",
+        "project_name": "sympy",
+        "declared_release_version": null,
+        "resolved_release_version": "1.14.0"
+      },
+      "tabulate": {
+        "source_provider": "pypi",
+        "project_name": "tabulate",
+        "declared_release_version": null,
+        "resolved_release_version": "0.10.0"
+      },
+      "tenacity": {
+        "source_provider": "pypi",
+        "project_name": "tenacity",
+        "declared_release_version": null,
+        "resolved_release_version": "9.1.4"
+      },
+      "threadpoolctl": {
+        "source_provider": "pypi",
+        "project_name": "threadpoolctl",
+        "declared_release_version": null,
+        "resolved_release_version": "3.6.0"
+      },
+      "tinycss2": {
+        "source_provider": "pypi",
+        "project_name": "tinycss2",
+        "declared_release_version": null,
+        "resolved_release_version": "1.5.1"
+      },
+      "tomlkit": {
+        "source_provider": "pypi",
+        "project_name": "tomlkit",
+        "declared_release_version": null,
+        "resolved_release_version": "0.14.0"
+      },
+      "tqdm": {
+        "source_provider": "pypi",
+        "project_name": "tqdm",
+        "declared_release_version": null,
+        "resolved_release_version": "4.67.3"
+      },
+      "typer": {
+        "source_provider": "pypi",
+        "project_name": "typer",
+        "declared_release_version": null,
+        "resolved_release_version": "0.25.0"
+      },
+      "typing_inspect": {
+        "source_provider": "pypi",
+        "project_name": "typing-inspect",
+        "declared_release_version": null,
+        "resolved_release_version": "0.9.0"
+      },
+      "typing_inspection": {
+        "source_provider": "pypi",
+        "project_name": "typing-inspection",
+        "declared_release_version": null,
+        "resolved_release_version": "0.4.2"
+      },
+      "ujson": {
+        "source_provider": "pypi",
+        "project_name": "ujson",
+        "declared_release_version": null,
+        "resolved_release_version": "5.12.0"
+      },
+      "uvicorn": {
+        "source_provider": "pypi",
+        "project_name": "uvicorn",
+        "declared_release_version": null,
+        "resolved_release_version": "0.46.0"
+      },
+      "websockets": {
+        "source_provider": "pypi",
+        "project_name": "websockets",
+        "declared_release_version": null,
+        "resolved_release_version": "16.0"
+      },
+      "wsproto": {
+        "source_provider": "pypi",
+        "project_name": "wsproto",
+        "declared_release_version": null,
+        "resolved_release_version": "1.3.2"
+      },
+      "xlsxwriter": {
+        "source_provider": "pypi",
+        "project_name": "xlsxwriter",
+        "declared_release_version": null,
+        "resolved_release_version": "3.2.9"
+      },
+      "xmltodict": {
+        "source_provider": "pypi",
+        "project_name": "xmltodict",
+        "declared_release_version": null,
+        "resolved_release_version": "1.0.4"
+      }
+    },
+    "third_party_pinned_count": 198,
+    "third_party_total_count": 198
+  }
+}
