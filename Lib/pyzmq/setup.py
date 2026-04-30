@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ from tools import (
 
 PYZMQ_PROJECT_GUID = "{A2E3F81C-84B6-4A6D-905D-4D70D728A0A1}"
 PYZMQ_PROJECT_NAME = "zmq.backend.cython._zmq"
+PYZMQ_CYTHON_REQUIREMENT = "Cython>=3.0.0,<4.0.0"
 
 LIBSODIUM_ARCHIVE_URL_TEMPLATE = (
     "https://github.com/jedisct1/libsodium/releases/download/{version}-RELEASE/libsodium-{version}.tar.gz"
@@ -132,6 +134,14 @@ def pyzmq_bundle_library_dir(context) -> Path:
     return pyzmq_bundle_root(context) / "lib"
 
 
+def pyzmq_cython_cache_dir(context) -> Path:
+    return context.download_cache_root / "build-tools" / "pyzmq-cython"
+
+
+def pyzmq_cython_target_dir(context) -> Path:
+    return pyzmq_cython_cache_dir(context) / "site"
+
+
 def libzmq_build_dir(context) -> Path:
     return (
         context.source_root
@@ -152,6 +162,33 @@ def libsodium_archive_path(context) -> Path:
 def libzmq_archive_path(context) -> Path:
     version = libzmq_version(context)
     return context.download_cache_root / "libzmq" / version / f"zeromq-{version}.tar.gz"
+
+
+def _ensure_pyzmq_cython(context) -> Path:
+    target_dir = pyzmq_cython_target_dir(context)
+    package_dir = target_dir / "Cython"
+    if not package_dir.exists():
+        cache_dir = pyzmq_cython_cache_dir(context)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        context.log(f"installing local pyzmq build dependency {PYZMQ_CYTHON_REQUIREMENT}")
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-compile",
+                "--target",
+                str(target_dir),
+                PYZMQ_CYTHON_REQUIREMENT,
+            ],
+            check=True,
+            timeout=60 * 10,
+        )
+    return target_dir
 
 
 def ensure_libsodium_source(context) -> Path:
@@ -407,20 +444,29 @@ def ensure_static_libzmq(context) -> Path:
 def generate_pyzmq_c_source(context) -> str:
     generated_path = pyzmq_generated_c_path(context)
     generated_path.parent.mkdir(parents=True, exist_ok=True)
-    run(
-        context.log,
-        [
-            sys.executable,
-            "-m",
-            "cython",
-            "--output-file",
-            str(generated_path),
-            "--module-name",
-            "zmq.backend.cython._zmq",
-            str(source_path(context, "Lib/zmq/backend/cython/_zmq.py")),
-        ],
-        cwd=context.source_root,
+    cython_target = _ensure_pyzmq_cython(context)
+    env = os.environ.copy()
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONPATH"] = str(cython_target)
+    command = [
+        sys.executable,
+        "-S",
+        "-m",
+        "cython",
+        "--output-file",
+        str(generated_path),
+        "--module-name",
+        "zmq.backend.cython._zmq",
+        str(source_path(context, "Lib/zmq/backend/cython/_zmq.py")),
+    ]
+    display = subprocess.list2cmdline([str(part) for part in command])
+    context.log(f"RUN {display}")
+    subprocess.run(
+        command,
+        cwd=str(context.source_root),
+        check=True,
         timeout=60 * 10,
+        env=env,
     )
     return generated_path.relative_to(context.source_root).as_posix()
 
