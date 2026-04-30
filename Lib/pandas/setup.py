@@ -524,6 +524,20 @@ they can coexist with the standalone ujson builtin in the final static link.
         patch_ultrajson_header,
     )
 
+    def patch_ujson_module(text: str) -> str:
+        return replace_text_once(
+            text,
+            '#include "numpy/arrayobject.h"\n',
+            '#include "numpy/arrayobject.h"\n#include "pandas/vendored/ujson/lib/staticpython_rename.h"\n',
+            label="pandas vendored ujson module rename header include",
+        )
+
+    transform_source_text(
+        context,
+        "pandas_builtin/source/pandas/_libs/src/vendored/ujson/python/ujson.c",
+        patch_ujson_module,
+    )
+
 
 def prepare_pandas_project(context) -> None:
     if context.platform != "x64":
