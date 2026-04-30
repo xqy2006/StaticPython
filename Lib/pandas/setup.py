@@ -481,6 +481,50 @@ def _patch_pandas_datetime_symbols(context) -> None:
     )
 
 
+def _patch_pandas_ujson_symbols(context) -> None:
+    rename_header = """#pragma once
+
+/*
+Keep pandas' vendored UltraJSON objects in a private symbol namespace so
+they can coexist with the standalone ujson builtin in the final static link.
+*/
+#define JSON_EncodeObject pandas_ujson_JSON_EncodeObject
+#define JSON_DecodeObject pandas_ujson_JSON_DecodeObject
+#define encode pandas_ujson_encode
+#define createDouble pandas_ujson_createDouble
+#define SkipWhitespace pandas_ujson_SkipWhitespace
+#define Buffer_Realloc pandas_ujson_Buffer_Realloc
+#define objToJSON pandas_ujson_objToJSON
+#define JSONToObj pandas_ujson_JSONToObj
+#define get_nat pandas_ujson_get_nat
+#define object_is_decimal_type pandas_ujson_object_is_decimal_type
+#define object_is_dataframe_type pandas_ujson_object_is_dataframe_type
+#define object_is_series_type pandas_ujson_object_is_series_type
+#define object_is_index_type pandas_ujson_object_is_index_type
+#define object_is_nat_type pandas_ujson_object_is_nat_type
+#define object_is_na_type pandas_ujson_object_is_na_type
+"""
+    write_source_text(
+        context,
+        "pandas_builtin/source/pandas/_libs/include/pandas/vendored/ujson/lib/staticpython_rename.h",
+        rename_header,
+    )
+
+    def patch_ultrajson_header(text: str) -> str:
+        return replace_text_once(
+            text,
+            '#include "pandas/portable.h"\n',
+            '#include "pandas/portable.h"\n#include "pandas/vendored/ujson/lib/staticpython_rename.h"\n',
+            label="pandas vendored ujson rename header include",
+        )
+
+    transform_source_text(
+        context,
+        "pandas_builtin/source/pandas/_libs/include/pandas/vendored/ujson/lib/ultrajson.h",
+        patch_ultrajson_header,
+    )
+
+
 def prepare_pandas_project(context) -> None:
     if context.platform != "x64":
         raise RuntimeError(f"pandas builtin integration currently supports only x64, not {context.platform}")
@@ -869,6 +913,7 @@ LIBRARY_INTEGRATION = pypi_library(
         _patch_pandas_numpy_include,
         _patch_generate_version,
         _patch_pandas_datetime_symbols,
+        _patch_pandas_ujson_symbols,
         prepare_pandas_artifacts,
     ],
     verification_steps=[
@@ -930,6 +975,11 @@ assert pivot.loc["b", "x"] == 3
 rolling = pd.Series([1, 2, 3, 4], dtype="float64").rolling(2).sum()
 assert pd.isna(rolling.iloc[0])
 assert rolling.iloc[1:].tolist() == [3.0, 5.0, 7.0]
+
+encoded = left.to_json()
+decoded = pd.read_json(io.StringIO(encoded))
+assert decoded.shape[0] == 3
+assert sorted(decoded.columns.tolist()) == ["id", "value", "when"]
 
 timestamp = pd.Timestamp("2024-01-02T03:04:05", tz="UTC")
 assert timestamp.tz is not None
