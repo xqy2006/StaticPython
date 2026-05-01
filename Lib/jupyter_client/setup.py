@@ -63,7 +63,9 @@ with tempfile.TemporaryDirectory() as temp_dir:
     assert Path(written_path) == connection_path
     assert connection_info["ip"] == "127.0.0.1"
     assert connection_info["transport"] == "tcp"
-    assert os.path.abspath(find_connection_file(connection_path.name, path=[temp_dir])) == str(connection_path.resolve())
+    found_connection_file = Path(find_connection_file(connection_path.name, path=[temp_dir]))
+    assert found_connection_file.name == connection_path.name
+    assert found_connection_file.resolve() == connection_path.resolve()
 
     kernels_dir = Path(temp_dir) / "kernels"
     spec_dir = kernels_dir / "python3"

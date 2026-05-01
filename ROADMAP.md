@@ -67,6 +67,15 @@
 - `humanize`
 - `pycparser`
 
+### 已覆盖但此前 roadmap 漏写的一批常用中小型库
+
+- Web / API 方向：`starlette`、`uvicorn`、`websockets`、`python_multipart`
+- 序列化 / 交换格式：`protobuf`、`msgpack`、`ujson`、`yaml`
+- 数据库 / 缓存 / 服务端常见客户端：`redis`、`pymongo`、`pymysql`
+- 文本 / 文档 / 解析：`bs4`、`pypdf`、`regex`、`rapidfuzz`、`lark`、`markdown`
+- CLI / 工具 / 测试：`rich`、`typer`、`tqdm`、`pytest`、`black`
+- 其他仍然算常用且体量可控的库：`sympy`、`networkx`、`fsspec`
+
 ## 已知现状说明
 
 - 当前仓库 `Lib/` 下已有约 `200` 个第三方 integration 目录，代码层面已经明显超出早期 README 中提到的 `163` 个 integration 快照

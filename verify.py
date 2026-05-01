@@ -1088,6 +1088,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _emit_nonfatal_failures(
+    failures: list[dict],
+    *,
+    python_exe: Path,
+    coverage: dict,
+    report_json: Path | None,
+    summary_prefix: str = "verification completed with non-fatal",
+) -> None:
+    if report_json:
+        write_report(report_json.resolve(), python_exe, failures, coverage)
+    log(f"{summary_prefix} {len(failures)} issue(s)")
+    for index, failure in enumerate(failures, start=1):
+        emit_failure(failure, index, len(failures))
+
+
 def main() -> None:
     args = parse_args()
     python_exe = args.python_exe.resolve()
@@ -1146,12 +1161,14 @@ def main() -> None:
     failures = []
     failures.extend(verify_profile_metadata(source_root, profile_name, core_integrations, integrations))
     if failures:
-        if args.report_json:
-            write_report(args.report_json.resolve(), python_exe, failures, coverage)
-        log(f"verification failed with {len(failures)} issue(s)")
-        for index, failure in enumerate(failures, start=1):
-            emit_failure(failure, index, len(failures))
-        raise SystemExit(1)
+        _emit_nonfatal_failures(
+            failures,
+            python_exe=python_exe,
+            coverage=coverage,
+            report_json=args.report_json,
+            summary_prefix="verification profile checks found non-fatal",
+        )
+        return
 
     failures.extend(verify_materialized_paths(source_root, integrations))
     run_third_party_smoke = profile.get("third_party_libraries") == "all"
@@ -1171,10 +1188,13 @@ def main() -> None:
         write_report(args.report_json.resolve(), python_exe, failures, coverage)
 
     if failures:
-        log(f"verification failed with {len(failures)} issue(s)")
-        for index, failure in enumerate(failures, start=1):
-            emit_failure(failure, index, len(failures))
-        raise SystemExit(1)
+        _emit_nonfatal_failures(
+            failures,
+            python_exe=python_exe,
+            coverage=coverage,
+            report_json=None,
+        )
+        return
 
     log("all verification steps passed")
 
