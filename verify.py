@@ -1088,13 +1088,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _emit_nonfatal_failures(
+def _emit_failures(
     failures: list[dict],
     *,
     python_exe: Path,
     coverage: dict,
     report_json: Path | None,
-    summary_prefix: str = "verification completed with non-fatal",
+    summary_prefix: str = "verification failed with",
 ) -> None:
     if report_json:
         write_report(report_json.resolve(), python_exe, failures, coverage)
@@ -1161,14 +1161,14 @@ def main() -> None:
     failures = []
     failures.extend(verify_profile_metadata(source_root, profile_name, core_integrations, integrations))
     if failures:
-        _emit_nonfatal_failures(
+        _emit_failures(
             failures,
             python_exe=python_exe,
             coverage=coverage,
             report_json=args.report_json,
-            summary_prefix="verification profile checks found non-fatal",
+            summary_prefix="verification profile checks failed with",
         )
-        return
+        raise SystemExit(1)
 
     failures.extend(verify_materialized_paths(source_root, integrations))
     run_third_party_smoke = profile.get("third_party_libraries") == "all"
@@ -1188,13 +1188,13 @@ def main() -> None:
         write_report(args.report_json.resolve(), python_exe, failures, coverage)
 
     if failures:
-        _emit_nonfatal_failures(
+        _emit_failures(
             failures,
             python_exe=python_exe,
             coverage=coverage,
             report_json=None,
         )
-        return
+        raise SystemExit(1)
 
     log("all verification steps passed")
 
