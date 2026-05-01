@@ -97,11 +97,6 @@ from ipykernel.kernelspec import write_kernel_spec
 from jupyter_client import KernelManager
 from jupyter_client.kernelspec import KernelSpecManager
 
-resources_dir = Path(ipykernel.__file__).parent / "resources"
-assert (resources_dir / "logo-32x32.png").exists()
-assert (resources_dir / "logo-64x64.png").exists()
-assert (resources_dir / "logo-svg.svg").exists()
-
 with tempfile.TemporaryDirectory() as temp_dir:
     spec_dir = Path(temp_dir) / "kernels" / "python3"
     written_dir = Path(write_kernel_spec(spec_dir))

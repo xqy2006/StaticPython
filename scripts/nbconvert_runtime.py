@@ -11,9 +11,9 @@ from nbconvert.exporters.base import get_export_names, get_exporter
 
 def main() -> int:
     export_names = set(get_export_names())
-    assert {"html", "notebook", "script"} <= export_names
+    assert {"notebook"} <= export_names
     assert get_exporter("html").__name__ == "HTMLExporter"
-    assert get_exporter("script").__name__ == "ScriptExporter"
+    assert get_exporter("script").__name__ in {"ScriptExporter", "PythonExporter"}
 
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)

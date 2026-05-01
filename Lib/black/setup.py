@@ -18,6 +18,7 @@ def patch_black_sources(context) -> None:
 
 LIBRARY_INTEGRATION = simple_library(
     name="black",
+    dependencies=["aiohttp"],
     source_mapping={
         "_black_version.py": "Lib/_black_version.py",
         "black": "Lib/black",
@@ -36,6 +37,17 @@ source = "def add(a,b):\\n return a+b\\n"
 formatted = black.format_str(source, mode=black.FileMode())
 assert "def add(a, b):" in formatted
 assert "return a + b" in formatted
+""",
+        )
+        ,
+        inline_verification_step(
+            "blackd-smoke",
+            """
+import blackd
+
+app = blackd.make_app()
+assert app is not None
+assert len(app.router.routes()) == 1
 """,
         )
     ],

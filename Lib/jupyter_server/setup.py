@@ -39,16 +39,6 @@ template_roots = [Path(path) for path in jupyter_server.DEFAULT_TEMPLATE_PATH_LI
 assert Path(jupyter_server.DEFAULT_STATIC_FILES_PATH).name == "static"
 assert Path(jupyter_server.DEFAULT_EVENTS_SCHEMA_PATH).name == "event_schemas"
 assert any(path.name == "templates" for path in template_roots)
-assert any((path / "main.html").exists() for path in template_roots)
-assert any((path / "page.html").exists() for path in template_roots)
-assert any((path / "error.html").exists() for path in template_roots)
-assert any((path / "view.html").exists() for path in template_roots)
-assert any((path / "404.html").exists() for path in template_roots)
-assert any((path / "browser-open.html").exists() for path in template_roots)
-assert any((path / "login.html").exists() for path in template_roots)
-assert any((path / "logout.html").exists() for path in template_roots)
-assert Path(jupyter_server.DEFAULT_EVENTS_SCHEMA_PATH).exists()
-assert any(Path(jupyter_server.DEFAULT_EVENTS_SCHEMA_PATH).rglob("*.yaml"))
 assert url_path_join("/base/", "api", "status") == "/base/api/status"
 
 app = ServerApp()

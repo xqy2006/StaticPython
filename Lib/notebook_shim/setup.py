@@ -43,7 +43,7 @@ shimmed = app.shim_config_from_notebook_to_jupyter_server(cfg)
 assert shimmed["ServerApp"]["allow_remote_access"] is True
 assert shimmed["ServerApp"]["port"] == 9999
 assert shimmed["DemoApp"]["default_url"] == "/demo"
-config_path = Path(sys.prefix) / "etc" / "jupyter" / "jupyter_server_config.d" / "notebook_shim.json"
+config_path = Path(__import__("notebook_shim").__file__).resolve().parents[2] / "etc" / "jupyter" / "jupyter_server_config.d" / "notebook_shim.json"
 assert config_path.exists()
 assert json.loads(config_path.read_text(encoding="utf-8"))["ServerApp"]["jpserver_extensions"]["notebook_shim"] is True
 """,

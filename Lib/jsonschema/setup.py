@@ -107,7 +107,7 @@ LIBRARY_INTEGRATION = pypi_library(
             "jsonschema-smoke",
             """
 import jsonschema
-from jsonschema import Draft7Validator, FormatChecker, ValidationError
+from jsonschema import Draft7Validator, Draft202012Validator, FormatChecker, ValidationError
 
 schema = {
     "type": "object",
@@ -129,6 +129,25 @@ except ValidationError as exc:
     assert exc.validator == "type"
 else:
     raise AssertionError("jsonschema accepted invalid data")
+
+schema_2020 = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    },
+    "required": ["name"],
+    "additionalProperties": False,
+}
+validator_2020 = Draft202012Validator(schema_2020)
+validator_2020.validate({"name": "codex", "tags": ["a"]})
+errors_2020 = sorted(
+    validator_2020.iter_errors({"name": "codex", "tags": [1], "extra": 1}),
+    key=lambda error: error.json_path,
+)
+assert len(errors_2020) == 2
+assert {error.validator for error in errors_2020} == {"type", "additionalProperties"}
 """,
         )
     ],

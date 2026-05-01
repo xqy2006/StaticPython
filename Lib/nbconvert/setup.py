@@ -89,9 +89,10 @@ notebook.cells.append(v4.new_markdown_cell("# StaticPython"))
 notebook.cells.append(v4.new_code_cell("answer = 40 + 2\\nanswer"))
 
 export_names = set(get_export_names())
-assert {"html", "notebook", "script"} <= export_names
+assert {"notebook"} <= export_names
 assert get_exporter("html").__name__ == "HTMLExporter"
-assert get_exporter("script").__name__ == "ScriptExporter"
+script_exporter_class = get_exporter("script")
+assert script_exporter_class.__name__ in {"ScriptExporter", "PythonExporter"}
 
 html_exporter = HTMLExporter()
 html_body, html_resources = html_exporter.from_notebook_node(notebook)

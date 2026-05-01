@@ -29,3 +29,4 @@ config.test-*.json
 Thumbs.db
 Desktop.ini
 /docs/
+ROADMAP.md

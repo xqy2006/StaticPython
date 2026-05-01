@@ -17,9 +17,16 @@ from pathlib import Path
 import pytest
 
 with tempfile.TemporaryDirectory() as temp_dir:
-    test_file = Path(temp_dir) / "test_staticpython.py"
-    test_file.write_text("def test_ok():\\n    assert 1 + 1 == 2\\n", encoding="utf-8")
-    result = pytest.main([str(test_file), "-q", "-p", "no:cacheprovider"])
+    root = Path(temp_dir)
+    (root / "conftest.py").write_text(
+        "import pytest\\n@pytest.fixture()\\ndef answer():\\n    return 42\\n",
+        encoding="utf-8",
+    )
+    (root / "test_staticpython.py").write_text(
+        "import pytest\\n\\n@pytest.mark.parametrize('value', [1, 2, 3])\\ndef test_ok(answer, value):\\n    assert answer + value in {43, 44, 45}\\n",
+        encoding="utf-8",
+    )
+    result = pytest.main([str(root), "-q", "-p", "no:cacheprovider"])
     assert result == 0
 """,
             timeout=300,

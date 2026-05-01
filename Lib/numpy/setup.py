@@ -788,6 +788,12 @@ LIBRARY_INTEGRATION = pypi_library(
         "numpy_builtin/meson-python.ini",
         "numpy_builtin/tools/cython.cmd",
     ],
+    verification_materialized_paths=[
+        "Lib/numpy/__init__.py",
+        "Lib/numpy/_core/__init__.py",
+        "Lib/numpy/linalg/__init__.py",
+        "Lib/numpy/random/__init__.py",
+    ],
     python_packages=["numpy"],
     verification_imports=[
         "numpy._core._multiarray_umath",

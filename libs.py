@@ -76,6 +76,7 @@ class LibraryIntegration:
     auto_resolve_dependencies: bool = False
     overlay_entries: list[str] = field(default_factory=list)
     materialized_paths: list[str] = field(default_factory=list)
+    verification_materialized_paths: list[str] = field(default_factory=list)
     cleanup_paths: list[str] = field(default_factory=list)
     python_packages: list[str] = field(default_factory=list)
     verification_imports: list[str] = field(default_factory=list)
@@ -704,6 +705,7 @@ def pypi_library(
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
     materialized_paths: list[str] | None = None,
+    verification_materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
     pre_patch_hooks: list[Hook] | None = None,
@@ -731,6 +733,11 @@ def pypi_library(
             resolved_mapping,
             normalized_overlay_entries,
             materialized_paths,
+        ),
+        verification_materialized_paths=_build_materialized_paths(
+            resolved_mapping,
+            normalized_overlay_entries,
+            verification_materialized_paths if verification_materialized_paths is not None else materialized_paths,
         ),
         cleanup_paths=_build_cleanup_paths(cleanup_paths),
         python_packages=list(python_packages or [name]),
@@ -776,6 +783,7 @@ def github_library(
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
     materialized_paths: list[str] | None = None,
+    verification_materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
     pre_patch_hooks: list[Hook] | None = None,
@@ -803,6 +811,11 @@ def github_library(
             resolved_mapping,
             normalized_overlay_entries,
             materialized_paths,
+        ),
+        verification_materialized_paths=_build_materialized_paths(
+            resolved_mapping,
+            normalized_overlay_entries,
+            verification_materialized_paths if verification_materialized_paths is not None else materialized_paths,
         ),
         cleanup_paths=_build_cleanup_paths(cleanup_paths),
         python_packages=list(python_packages or [name]),
@@ -849,6 +862,7 @@ def simple_library(
     verification_imports: list[str] | None = None,
     verification_steps: list[dict] | None = None,
     materialized_paths: list[str] | None = None,
+    verification_materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
     pre_patch_hooks: list[Hook] | None = None,
@@ -876,6 +890,7 @@ def simple_library(
         "verification_imports": verification_imports,
         "verification_steps": verification_steps,
         "materialized_paths": materialized_paths,
+        "verification_materialized_paths": verification_materialized_paths,
         "cleanup_paths": cleanup_paths,
         "prepare_source_hooks": prepare_source_hooks,
         "pre_patch_hooks": pre_patch_hooks,

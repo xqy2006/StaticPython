@@ -904,6 +904,15 @@ LIBRARY_INTEGRATION = pypi_library(
         "pandas_builtin/source/generate_pxi.py",
         "pandas_builtin/source/generate_version.py",
     ],
+    verification_materialized_paths=[
+        "Lib/pandas/__init__.py",
+        "Lib/pandas/_version.py",
+        "Lib/pandas/core/frame.py",
+        "Lib/pandas/io/parsers/readers.py",
+        "Lib/pandas/_libs/lib.pyx",
+        "Lib/pandas/_libs/tslibs/timestamps.pyx",
+        "Lib/pandas/_libs/window/aggregations.pyx",
+    ],
     python_packages=["pandas"],
     verification_imports=PANDAS_EXTENSION_MODULES,
     builtin_module_registrations=[

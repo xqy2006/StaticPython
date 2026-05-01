@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -47,6 +48,12 @@ def load_profile_metadata(source_root: Path) -> dict | None:
 
 def integration_names(integrations: list) -> list[str]:
     return [integration.name for integration in integrations]
+
+
+def _normalized_name_list(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    return sorted(str(value) for value in values)
 
 
 def resolve_profile(config: dict, profile_name: str | None) -> tuple[str, dict]:
@@ -125,16 +132,22 @@ def verify_profile_metadata(
 
     expected_core = integration_names(core_integrations)
     expected_third_party = integration_names(third_party_integrations)
+    expected_core_normalized = _normalized_name_list(expected_core)
+    expected_third_party_normalized = _normalized_name_list(expected_third_party)
+    recorded_core = metadata.get("core_libraries")
+    recorded_third_party = metadata.get("third_party_libraries")
+    recorded_core_normalized = _normalized_name_list(recorded_core)
+    recorded_third_party_normalized = _normalized_name_list(recorded_third_party)
     details = []
     if metadata.get("profile_name") != profile_name:
         details.append(f"expected profile name: {profile_name}")
         details.append(f"recorded profile name: {metadata.get('profile_name')}")
-    if metadata.get("core_libraries") != expected_core:
-        details.append(f"expected core libraries: {expected_core}")
-        details.append(f"recorded core libraries: {metadata.get('core_libraries')}")
-    if metadata.get("third_party_libraries") != expected_third_party:
-        details.append(f"expected third-party libraries: {expected_third_party}")
-        details.append(f"recorded third-party libraries: {metadata.get('third_party_libraries')}")
+    if recorded_core_normalized != expected_core_normalized:
+        details.append(f"expected core libraries: {expected_core_normalized}")
+        details.append(f"recorded core libraries: {recorded_core_normalized}")
+    if recorded_third_party_normalized != expected_third_party_normalized:
+        details.append(f"expected third-party libraries: {expected_third_party_normalized}")
+        details.append(f"recorded third-party libraries: {recorded_third_party_normalized}")
 
     if not details:
         return []
@@ -162,7 +175,8 @@ def verify_materialized_paths(source_root: Path, integrations: list) -> list[dic
     total_paths = 0
     for integration in integrations:
         missing: list[str] = []
-        for relative in integration.materialized_paths:
+        verification_paths = getattr(integration, "verification_materialized_paths", integration.materialized_paths)
+        for relative in verification_paths:
             total_paths += 1
             if not (source_root / relative).exists():
                 missing.append(relative)
@@ -192,13 +206,14 @@ def _to_text(value: str | bytes | None) -> str:
     return value
 
 
-def run_capture(cmd: list[str], *, cwd: Path, timeout: float) -> dict:
+def run_capture(cmd: list[str], *, cwd: Path, timeout: float, env: dict[str, str] | None = None) -> dict:
     display = subprocess.list2cmdline([str(part) for part in cmd])
     log(f"RUN {display}")
     try:
         completed = subprocess.run(
             cmd,
             cwd=str(cwd),
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -923,8 +938,32 @@ def summarize_json_failures(step: str, items: list[dict]) -> list[dict]:
     return failures
 
 
-def run_json_step(step: str, python_exe: Path, code: str, cwd: Path, timeout: float) -> list[dict]:
-    result = run_capture([str(python_exe), "-c", code], cwd=cwd, timeout=timeout)
+def build_target_command_prefix(python_exe: Path, *, source_mode: bool) -> list[str]:
+    prefix = [str(python_exe)]
+    if source_mode:
+        prefix.extend(["-X", "frozen_modules=off"])
+    return prefix
+
+
+def build_target_env(source_root: Path, *, source_mode: bool) -> dict[str, str] | None:
+    if not source_mode:
+        return None
+    env = os.environ.copy()
+    env["PYTHONHOME"] = str(source_root)
+    env["PYTHONPATH"] = str(source_root / "Lib")
+    return env
+
+
+def run_json_step(
+    step: str,
+    python_cmd_prefix: list[str],
+    code: str,
+    cwd: Path,
+    timeout: float,
+    *,
+    env: dict[str, str] | None = None,
+) -> list[dict]:
+    result = run_capture([*python_cmd_prefix, "-c", code], cwd=cwd, timeout=timeout, env=env)
     if result.get("timeout") or not result.get("ok"):
         return [make_process_failure(step, result)]
     try:
@@ -934,8 +973,15 @@ def run_json_step(step: str, python_exe: Path, code: str, cwd: Path, timeout: fl
     return summarize_json_failures(step, items)
 
 
-def run_command_step(step: str, cmd: list[str], cwd: Path, timeout: float) -> list[dict]:
-    result = run_capture(cmd, cwd=cwd, timeout=timeout)
+def run_command_step(
+    step: str,
+    cmd: list[str],
+    cwd: Path,
+    timeout: float,
+    *,
+    env: dict[str, str] | None = None,
+) -> list[dict]:
+    result = run_capture(cmd, cwd=cwd, timeout=timeout, env=env)
     if result.get("ok"):
         log(f"{step}: passed")
         return []
@@ -943,7 +989,8 @@ def run_command_step(step: str, cmd: list[str], cwd: Path, timeout: float) -> li
 
 
 def verify_imports_and_smoke(
-    python_exe: Path,
+    python_cmd_prefix: list[str],
+    target_env: dict[str, str] | None,
     source_root: Path,
     manifest: dict,
     integrations: list,
@@ -954,15 +1001,25 @@ def verify_imports_and_smoke(
     failures.extend(
         run_json_step(
             "imports",
-            python_exe,
+            python_cmd_prefix,
             build_import_check_code(source_root, manifest, integrations),
             cwd,
             300,
+            env=target_env,
         )
     )
-    failures.extend(run_json_step("stdlib-smoke", python_exe, STDLIB_SMOKE, cwd, 300))
+    failures.extend(run_json_step("stdlib-smoke", python_cmd_prefix, STDLIB_SMOKE, cwd, 300, env=target_env))
     if integrations and run_third_party_smoke:
-        failures.extend(run_json_step("third-party-smoke", python_exe, THIRD_PARTY_SMOKE, cwd, 300))
+        failures.extend(
+            run_json_step(
+                "third-party-smoke",
+                python_cmd_prefix,
+                THIRD_PARTY_SMOKE,
+                cwd,
+                300,
+                env=target_env,
+            )
+        )
     elif integrations:
         log("skip third-party-smoke because this profile selects an incremental library subset")
     else:
@@ -971,7 +1028,8 @@ def verify_imports_and_smoke(
 
 
 def verify_integration_steps(
-    python_exe: Path,
+    python_cmd_prefix: list[str],
+    target_env: dict[str, str] | None,
     repo_root: Path,
     integrations: list,
     skipped_groups: set[str],
@@ -988,9 +1046,10 @@ def verify_integration_steps(
             failures.extend(
                 run_command_step(
                     step["name"],
-                    [str(python_exe), "-m", step["module"], *[str(arg) for arg in step.get("args", [])]],
+                    [*python_cmd_prefix, "-m", step["module"], *[str(arg) for arg in step.get("args", [])]],
                     repo_root,
                     timeout,
+                    env=target_env,
                 )
             )
             continue
@@ -998,9 +1057,10 @@ def verify_integration_steps(
             failures.extend(
                 run_command_step(
                     step["name"],
-                    [str(python_exe), str(repo_root / step["script"]), *[str(arg) for arg in step.get("args", [])]],
+                    [*python_cmd_prefix, str(repo_root / step["script"]), *[str(arg) for arg in step.get("args", [])]],
                     repo_root,
                     timeout,
+                    env=target_env,
                 )
             )
             continue
@@ -1008,9 +1068,10 @@ def verify_integration_steps(
             failures.extend(
                 run_command_step(
                     step["name"],
-                    [str(python_exe), "-c", step["code"]],
+                    [*python_cmd_prefix, "-c", step["code"]],
                     repo_root,
                     timeout,
+                    env=target_env,
                 )
             )
             continue
@@ -1084,6 +1145,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", help="Build profile from config.json. Defaults to config.default_profile.")
     parser.add_argument("--skip-crypto", action="store_true", help="Skip the full Crypto.SelfTest suite")
     parser.add_argument("--skip-gui", action="store_true", help="Skip libui smoke and GUI tests")
+    parser.add_argument(
+        "--target-source-mode",
+        action="store_true",
+        help=(
+            "Run the target python.exe against --source-root via PYTHONHOME/PYTHONPATH and "
+            "-X frozen_modules=off. Useful for manually reproducing stale-binary failures with "
+            "the current patched sources."
+        ),
+    )
     parser.add_argument("--report-json", type=Path, help="Optional path to write a JSON verification report")
     return parser.parse_args()
 
@@ -1140,6 +1210,14 @@ def main() -> None:
         f"verification profile: {profile_name} "
         f"({len(core_integrations)} core integration(s), {len(integrations)} third-party integration(s))"
     )
+    target_source_mode = args.target_source_mode
+    python_cmd_prefix = build_target_command_prefix(python_exe, source_mode=target_source_mode)
+    target_env = build_target_env(source_root, source_mode=target_source_mode)
+    if target_source_mode:
+        log(
+            "target source mode enabled: running the target python.exe with "
+            f"PYTHONHOME={source_root} PYTHONPATH={source_root / 'Lib'} and -X frozen_modules=off"
+        )
     coverage = verification_coverage(integrations)
     missing_steps = coverage["libraries_without_steps"]
     log(
@@ -1174,7 +1252,8 @@ def main() -> None:
     run_third_party_smoke = profile.get("third_party_libraries") == "all"
     failures.extend(
         verify_imports_and_smoke(
-            python_exe,
+            python_cmd_prefix,
+            target_env,
             source_root,
             manifest,
             integrations,
@@ -1182,7 +1261,7 @@ def main() -> None:
             run_third_party_smoke,
         )
     )
-    failures.extend(verify_integration_steps(python_exe, repo_root, integrations, skipped_groups))
+    failures.extend(verify_integration_steps(python_cmd_prefix, target_env, repo_root, integrations, skipped_groups))
 
     if args.report_json:
         write_report(args.report_json.resolve(), python_exe, failures, coverage)

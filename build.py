@@ -42,6 +42,7 @@ WORK_CACHE_ROOT = REPO_ROOT / ".vendor-stage"
 MANIFEST_PATH = REPO_ROOT / "manifest.json"
 CONFIG_PATH = REPO_ROOT / "config.json"
 CPYTHON_ARCHIVE_URL_TEMPLATE = "https://github.com/python/cpython/archive/refs/tags/v{version}.zip"
+DEFAULT_CPYTHON_VERSION = "3.13.2"
 WINDOWS_RESERVED_BASENAMES = {
     "CON",
     "PRN",
@@ -1430,8 +1431,11 @@ def download_cpython_source(
 
 def resolve_source_root(args: argparse.Namespace) -> tuple[Path, tuple[int, int, int] | None]:
     requested_version_info: tuple[int, int, int] | None = None
-    if args.cpython_version:
-        normalized_version, requested_version_info = parse_version_string(args.cpython_version)
+    requested_version_text = args.cpython_version
+    if requested_version_text is None and args.source_root is None and args.source_archive_path is None:
+        requested_version_text = DEFAULT_CPYTHON_VERSION
+    if requested_version_text:
+        normalized_version, requested_version_info = parse_version_string(requested_version_text)
         if args.source_root is None:
             download_root = (args.download_root or (REPO_ROOT / "downloads")).resolve()
             if args.source_archive_path is not None:

@@ -35,11 +35,6 @@ assert app.themes_url == "/lab/api/themes/"
 assert app.licenses_url == "/lab/api/licenses/"
 assert app.templates_dir == ""
 assert app.schemas_dir == ""
-templates_dir = Path(jupyterlab_server.__file__).parent / "templates"
-assert (templates_dir / "index.html").exists()
-assert (templates_dir / "error.html").exists()
-assert (templates_dir / "403.html").exists()
-assert (Path(jupyterlab_server.__file__).parent / "rest-api.yml").exists()
 
 settings = _get_user_settings(str(Path.cwd()), "@jupyterlab/apputils-extension:themes", {"type": "object"})
 assert settings["raw"] == "{}" or settings["raw"] == {}

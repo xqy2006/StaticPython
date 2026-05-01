@@ -1,6 +1,8 @@
 name: Build StaticPython Release
 
 on:
+  push:
+  pull_request:
   workflow_dispatch:
     inputs:
       cpython_version:
@@ -33,6 +35,7 @@ env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: "utf-8"
   STATICPYTHON_BUILD_WORKERS: "2"
+  DEFAULT_CPYTHON_VERSION: "3.13.2"
 
 jobs:
   build:
@@ -47,6 +50,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve CPython version
+        id: cpython
+        shell: pwsh
+        run: |
+          $version = "${{ inputs.cpython_version }}".Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = $env:DEFAULT_CPYTHON_VERSION
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -73,7 +86,7 @@ jobs:
           $dist = "$env:GITHUB_WORKSPACE\dist\${{ matrix.profile }}"
           New-Item -ItemType Directory -Force $dist | Out-Null
           python .\build.py `
-            --cpython-version "${{ inputs.cpython_version }}" `
+            --cpython-version "${{ steps.cpython.outputs.version }}" `
             --download-root "$env:RUNNER_TEMP\cpython-${{ matrix.profile }}" `
             --profile "${{ matrix.profile }}" `
             --build-workers "$env:STATICPYTHON_BUILD_WORKERS" `
@@ -93,13 +106,13 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: staticpython-${{ inputs.cpython_version }}-${{ matrix.profile }}
+          name: staticpython-${{ steps.cpython.outputs.version }}-${{ matrix.profile }}
           path: ${{ steps.artifact.outputs.path }}
 
       - name: Verify built executable
         shell: pwsh
         run: |
-          $sourceRoot = Join-Path "$env:RUNNER_TEMP\cpython-${{ matrix.profile }}" "cpython-${{ inputs.cpython_version }}"
+          $sourceRoot = Join-Path "$env:RUNNER_TEMP\cpython-${{ matrix.profile }}" "cpython-${{ steps.cpython.outputs.version }}"
           if (-not (Test-Path $sourceRoot)) {
             throw "Expected extracted source root not found: $sourceRoot"
           }
@@ -117,12 +130,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: staticpython-${{ inputs.cpython_version }}-${{ matrix.profile }}-verify-report
+          name: staticpython-${{ steps.cpython.outputs.version }}-${{ matrix.profile }}-verify-report
           path: ${{ github.workspace }}\dist\${{ matrix.profile }}\verify-report-${{ matrix.profile }}.json
           if-no-files-found: warn
 
   release:
-    if: ${{ inputs.publish_release }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
     runs-on: windows-2022
     needs: build
 
@@ -130,7 +143,7 @@ jobs:
       - name: Download built executables
         uses: actions/download-artifact@v4
         with:
-          pattern: staticpython-${{ inputs.cpython_version }}-*
+          pattern: staticpython-${{ inputs.cpython_version || env.DEFAULT_CPYTHON_VERSION }}-*
           path: dist
           merge-multiple: true
 
@@ -140,6 +153,9 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ inputs.cpython_version }}".Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = $env:DEFAULT_CPYTHON_VERSION
+          }
           $tag = "${{ inputs.release_tag }}".Trim()
           $name = "${{ inputs.release_name }}".Trim()
           if ([string]::IsNullOrWhiteSpace($tag)) {
