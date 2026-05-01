@@ -16,6 +16,8 @@ from libs import (
 
 PYCRYPTODOME_PROJECT_GUID = "{6C86E524-8C37-4E87-8F0B-8D1748F81234}"
 POLY1305_EMBEDDED_PREFIX = "pycryptodome_poly1305"
+BLAKE2B_EMBEDDED_PREFIX = "pycryptodome_blake2b"
+BLAKE2S_EMBEDDED_PREFIX = "pycryptodome_blake2s"
 
 def _call_name(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
@@ -431,6 +433,62 @@ def _patch_poly1305_py(text: str) -> str:
     )
 
 
+def _patch_blake2b_c(text: str) -> str:
+    return _replace_required_tokens(
+        text,
+        [
+            ("#define blake2_init blake2b_init", f"#define blake2_init {BLAKE2B_EMBEDDED_PREFIX}_init"),
+            ("#define blake2_copy blake2b_copy", f"#define blake2_copy {BLAKE2B_EMBEDDED_PREFIX}_copy"),
+            ("#define blake2_destroy blake2b_destroy", f"#define blake2_destroy {BLAKE2B_EMBEDDED_PREFIX}_destroy"),
+            ("#define blake2_digest blake2b_digest", f"#define blake2_digest {BLAKE2B_EMBEDDED_PREFIX}_digest"),
+            ("#define blake2_update blake2b_update", f"#define blake2_update {BLAKE2B_EMBEDDED_PREFIX}_update"),
+        ],
+        label="pycryptodome blake2b symbol prefix",
+    )
+
+
+def _patch_blake2b_py(text: str) -> str:
+    return _replace_required_tokens(
+        text,
+        [
+            ("blake2b_init", f"{BLAKE2B_EMBEDDED_PREFIX}_init"),
+            ("blake2b_destroy", f"{BLAKE2B_EMBEDDED_PREFIX}_destroy"),
+            ("blake2b_update", f"{BLAKE2B_EMBEDDED_PREFIX}_update"),
+            ("blake2b_digest", f"{BLAKE2B_EMBEDDED_PREFIX}_digest"),
+            ("blake2b_copy", f"{BLAKE2B_EMBEDDED_PREFIX}_copy"),
+        ],
+        label="Crypto.Hash.BLAKE2b",
+    )
+
+
+def _patch_blake2s_c(text: str) -> str:
+    return _replace_required_tokens(
+        text,
+        [
+            ("#define blake2_init blake2s_init", f"#define blake2_init {BLAKE2S_EMBEDDED_PREFIX}_init"),
+            ("#define blake2_copy blake2s_copy", f"#define blake2_copy {BLAKE2S_EMBEDDED_PREFIX}_copy"),
+            ("#define blake2_destroy blake2s_destroy", f"#define blake2_destroy {BLAKE2S_EMBEDDED_PREFIX}_destroy"),
+            ("#define blake2_digest blake2s_digest", f"#define blake2_digest {BLAKE2S_EMBEDDED_PREFIX}_digest"),
+            ("#define blake2_update blake2s_update", f"#define blake2_update {BLAKE2S_EMBEDDED_PREFIX}_update"),
+        ],
+        label="pycryptodome blake2s symbol prefix",
+    )
+
+
+def _patch_blake2s_py(text: str) -> str:
+    return _replace_required_tokens(
+        text,
+        [
+            ("blake2s_init", f"{BLAKE2S_EMBEDDED_PREFIX}_init"),
+            ("blake2s_destroy", f"{BLAKE2S_EMBEDDED_PREFIX}_destroy"),
+            ("blake2s_update", f"{BLAKE2S_EMBEDDED_PREFIX}_update"),
+            ("blake2s_digest", f"{BLAKE2S_EMBEDDED_PREFIX}_digest"),
+            ("blake2s_copy", f"{BLAKE2S_EMBEDDED_PREFIX}_copy"),
+        ],
+        label="Crypto.Hash.BLAKE2s",
+    )
+
+
 def _patch_bignum_c(text: str) -> str:
     return replace_text_once(
         text,
@@ -443,6 +501,10 @@ def _patch_bignum_c(text: str) -> str:
 def patch_crypto_sources(context) -> None:
     transform_source_text(context, "Lib/Crypto/Util/_raw_api.py", _patch_raw_api)
     transform_source_text(context, "pycryptodome_builtin/src/bignum.c", _patch_bignum_c)
+    transform_source_text(context, "pycryptodome_builtin/src/blake2b.c", _patch_blake2b_c)
+    transform_source_text(context, "Lib/Crypto/Hash/BLAKE2b.py", _patch_blake2b_py)
+    transform_source_text(context, "pycryptodome_builtin/src/blake2s.c", _patch_blake2s_c)
+    transform_source_text(context, "Lib/Crypto/Hash/BLAKE2s.py", _patch_blake2s_py)
     transform_source_text(context, "pycryptodome_builtin/src/poly1305.c", _patch_poly1305_c)
     transform_source_text(context, "Lib/Crypto/Hash/Poly1305.py", _patch_poly1305_py)
 
