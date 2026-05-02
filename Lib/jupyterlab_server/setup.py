@@ -8,9 +8,6 @@ LIBRARY_INTEGRATION = pypi_library(
     source_mapping={
         "jupyterlab_server": "Lib/jupyterlab_server",
     },
-    runtime_resource_paths=[
-        "Lib/jupyterlab_server/templates",
-    ],
     materialized_paths=[
         "Lib/jupyterlab_server/templates/index.html",
         "Lib/jupyterlab_server/templates/error.html",

@@ -165,78 +165,6 @@ def libzmq_archive_path(context) -> Path:
     return context.download_cache_root / "libzmq" / version / f"zeromq-{version}.tar.gz"
 
 
-def _resolve_pyzmq_bundle_override(context) -> Path | None:
-    override = os.environ.get("PYZMQ_BUNDLE_DIR")
-    if not override:
-        return None
-
-    override_path = Path(override).expanduser().resolve()
-    candidates = [override_path]
-    platform_dir_name = platform_output_dir_name(context.platform)
-    if override_path.name != platform_dir_name:
-        candidates.append(override_path / platform_dir_name)
-
-    for candidate in candidates:
-        if (candidate / "include").is_dir() and (candidate / "lib").is_dir():
-            return candidate
-
-    raise RuntimeError(
-        "PYZMQ_BUNDLE_DIR does not point to a reusable pyzmq bundle directory "
-        f"with include/lib subdirectories: {override_path}"
-    )
-
-
-def _reuse_pyzmq_bundle_override(context, require_libzmq: bool) -> Path | None:
-    override_root = _resolve_pyzmq_bundle_override(context)
-    if override_root is None:
-        return None
-
-    current_root = pyzmq_bundle_root(context)
-    if override_root == current_root:
-        return current_root
-
-    override_include = override_root / "include"
-    override_lib_dir = override_root / "lib"
-    missing = [
-        str(path.relative_to(override_root))
-        for path in [
-            override_include / "sodium.h",
-            override_lib_dir / "libsodium.lib",
-        ]
-        if not path.exists()
-    ]
-    if require_libzmq:
-        missing.extend(
-            str(path.relative_to(override_root))
-            for path in [
-                override_include / "zmq.h",
-                override_include / "zmq_utils.h",
-                override_lib_dir / "libzmq-static.lib",
-                override_root / "libzmq-build-stamp.txt",
-            ]
-            if not path.exists()
-        )
-    if missing:
-        raise RuntimeError(
-            "PYZMQ_BUNDLE_DIR is missing required reusable bundle artifact(s):\n"
-            + "\n".join(sorted(set(missing)))
-        )
-
-    current_root.mkdir(parents=True, exist_ok=True)
-    _copy_directory_contents(override_include, current_root / "include")
-    _copy_directory_contents(override_lib_dir, current_root / "lib")
-
-    stamp_path = override_root / "libzmq-build-stamp.txt"
-    if stamp_path.exists():
-        shutil.copy2(stamp_path, current_root / "libzmq-build-stamp.txt")
-
-    context.log(
-        "reused pyzmq bundle override from "
-        f"{override_root} into {current_root.relative_to(context.source_root)}"
-    )
-    return current_root
-
-
 def _ensure_pyzmq_cython(context) -> Path:
     target_dir = pyzmq_cython_target_dir(context)
     package_dir = target_dir / "Cython"
@@ -362,38 +290,11 @@ def patch_generated_libzmq_project(build_dir: Path) -> None:
     tree.write(project_path, encoding="utf-8", xml_declaration=True)
 
 
-def iter_libsodium_source_files(source_dir: Path) -> list[Path]:
-    project_path = source_dir / "builds" / "msvc" / "vs2022" / "libsodium" / "libsodium.vcxproj"
-    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
-    tree = ET.parse(project_path, parser=parser)
-    root = tree.getroot()
-    namespace = "{http://schemas.microsoft.com/developer/msbuild/2003}"
-
-    source_files: list[Path] = []
-    for element in root.iter(namespace + "ClCompile"):
-        include = element.get("Include")
-        if not include:
-            continue
-        source_files.append((project_path.parent / Path(include)).resolve())
-
-    if not source_files:
-        raise RuntimeError(f"could not find any libsodium source files in {project_path}")
-    return source_files
-
-
-def prepare_libsodium_version_header(source_dir: Path) -> None:
-    version_header = source_dir / "builds" / "msvc" / "version.h"
-    destination = source_dir / "src" / "libsodium" / "include" / "sodium" / "version.h"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(version_header, destination)
-
-
 def ensure_static_libsodium(context) -> Path:
     if context.platform != "x64":
         raise RuntimeError(f"pyzmq static libsodium build currently supports only x64, not {context.platform}")
 
     source_dir = ensure_libsodium_source(context)
-    _reuse_pyzmq_bundle_override(context, require_libzmq=False)
     bundle_root = pyzmq_bundle_root(context)
     bundle_include = pyzmq_bundle_include_dir(context)
     bundle_lib_dir = pyzmq_bundle_library_dir(context)
@@ -403,118 +304,24 @@ def ensure_static_libsodium(context) -> Path:
         context.log(f"using existing bundled libsodium at {bundle_root.relative_to(context.source_root)}")
         return bundled_library
 
-    ensure_tool("cl")
-    ensure_tool("lib")
-    built_library = source_dir / "bin" / "x64" / "Release" / "v143" / "static" / "libsodium.lib"
-    pdb_path = built_library.parent / "libsodium.pdb"
-    object_root = source_dir / "obj" / "libsodium" / "x64" / "Release" / "v143" / "static"
-    include_root = source_dir / "src" / "libsodium" / "include"
-    version_include_root = include_root / "sodium"
-    source_files = iter_libsodium_source_files(source_dir)
-
-    _clear_directory(object_root)
-    built_library.parent.mkdir(parents=True, exist_ok=True)
-    if built_library.exists():
-        built_library.unlink()
-    if pdb_path.exists():
-        pdb_path.unlink()
-
-    prepare_libsodium_version_header(source_dir)
-    context.log(f"building libsodium from {len(source_files)} source file(s) with manual cl/lib fallback")
-
-    object_files: list[Path] = []
-    common_args = [
-        "cl",
-        "/c",
-        f"/I{include_root}",
-        f"/I{version_include_root}",
-        "/Zi",
-        "/nologo",
-        "/W3",
-        "/WX-",
-        "/diagnostics:column",
-        "/O2",
-        "/Ob1",
-        "/Oi",
-        "/D",
-        "SODIUM_STATIC",
-        "/D",
-        "inline=__inline",
-        "/D",
-        "NATIVE_LITTLE_ENDIAN",
-        "/D",
-        "_CRT_SECURE_NO_WARNINGS",
-        "/D",
-        "_LIB",
-        "/D",
-        "NDEBUG",
-        "/D",
-        "UNICODE",
-        "/D",
-        "_UNICODE",
-        "/D",
-        "WIN32",
-        "/D",
-        "_WIN32",
-        "/D",
-        "WIN64",
-        "/D",
-        "_WIN64",
-        "/Gm-",
-        "/EHsc",
-        "/MT",
-        "/GS",
-        "/Gy",
-        "/fp:precise",
-        "/Zc:wchar_t",
-        "/Zc:forScope",
-        "/Zc:inline",
-        f"/Fd{pdb_path}",
-        "/external:W3",
-        "/Gd",
-        "/TC",
-        "/wd4146",
-        "/wd4244",
-        "/analyze-",
-        "/FC",
-        "/errorReport:queue",
-        "/Oy-",
-    ]
-    for index, source_file in enumerate(source_files, start=1):
-        relative_source = source_file.relative_to(source_dir)
-        object_path = object_root / relative_source.with_suffix(".obj")
-        object_path.parent.mkdir(parents=True, exist_ok=True)
-        context.log(f"compiling libsodium source {index}/{len(source_files)}: {relative_source.as_posix()}")
-        run(
-            context.log,
-            [
-                *common_args,
-                f"/Fo{object_path}",
-                str(source_file),
-            ],
-            cwd=source_dir,
-            timeout=60 * 5,
-        )
-        object_files.append(object_path)
-
-    response_path = source_dir / "builds" / "msvc" / "vs2022" / "libsodium-staticpython-objects.rsp"
-    response_path.write_text(
-        "\n".join(f'"{path}"' for path in object_files) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+    ensure_tool("msbuild")
+    solution = source_dir / "builds" / "msvc" / "vs2022" / "libsodium.sln"
     run(
         context.log,
         [
-            "lib.exe",
+            "msbuild",
+            str(solution),
+            "/m",
             "/nologo",
-            f"/OUT:{built_library}",
-            f"@{response_path}",
+            "/p:Configuration=StaticRelease",
+            "/p:Platform=x64",
+            "/p:VcpkgEnabled=false",
         ],
-        cwd=source_dir,
-        timeout=60 * 10,
+        cwd=solution.parent,
+        timeout=60 * 30,
     )
 
+    built_library = source_dir / "bin" / "x64" / "Release" / "v143" / "static" / "libsodium.lib"
     if not built_library.exists():
         raise RuntimeError(f"libsodium build did not produce {built_library}")
 
@@ -532,7 +339,6 @@ def ensure_static_libzmq(context) -> Path:
 
     source_dir = ensure_libzmq_source(context)
     ensure_static_libsodium(context)
-    _reuse_pyzmq_bundle_override(context, require_libzmq=True)
     bundle_root = pyzmq_bundle_root(context)
     bundle_include = pyzmq_bundle_include_dir(context)
     bundle_lib_dir = pyzmq_bundle_library_dir(context)

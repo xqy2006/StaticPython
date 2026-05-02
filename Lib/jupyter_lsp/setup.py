@@ -5,10 +5,6 @@ LIBRARY_INTEGRATION = simple_library(
     name="jupyter_lsp",
     project_name="jupyter-lsp",
     overlay_entries=["Lib/jupyter_lsp"],
-    runtime_resource_paths=[
-        "Lib/jupyter_lsp/schema",
-        "Lib/jupyter_lsp/specs",
-    ],
     materialized_paths=[
         "Lib/jupyter_lsp/schema/schema.json",
     ],

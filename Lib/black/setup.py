@@ -25,10 +25,6 @@ LIBRARY_INTEGRATION = simple_library(
         "blackd": "Lib/blackd",
         "blib2to3": "Lib/blib2to3",
     },
-    runtime_resource_paths=[
-        "Lib/blib2to3/Grammar.txt",
-        "Lib/blib2to3/PatternGrammar.txt",
-    ],
     python_packages=["black", "blackd", "blib2to3"],
     post_patch_hooks=[patch_black_sources],
     verification_steps=[

@@ -945,12 +945,6 @@ def build_target_command_prefix(python_exe: Path, *, source_mode: bool) -> list[
     return prefix
 
 
-def build_target_cwd(python_exe: Path, source_root: Path, *, source_mode: bool) -> Path:
-    if source_mode:
-        return source_root
-    return python_exe.parent
-
-
 def build_target_env(source_root: Path, *, source_mode: bool) -> dict[str, str] | None:
     if not source_mode:
         return None
@@ -1037,7 +1031,6 @@ def verify_integration_steps(
     python_cmd_prefix: list[str],
     target_env: dict[str, str] | None,
     repo_root: Path,
-    target_cwd: Path,
     integrations: list,
     skipped_groups: set[str],
 ) -> list[dict]:
@@ -1054,7 +1047,7 @@ def verify_integration_steps(
                 run_command_step(
                     step["name"],
                     [*python_cmd_prefix, "-m", step["module"], *[str(arg) for arg in step.get("args", [])]],
-                    target_cwd,
+                    repo_root,
                     timeout,
                     env=target_env,
                 )
@@ -1065,7 +1058,7 @@ def verify_integration_steps(
                 run_command_step(
                     step["name"],
                     [*python_cmd_prefix, str(repo_root / step["script"]), *[str(arg) for arg in step.get("args", [])]],
-                    target_cwd,
+                    repo_root,
                     timeout,
                     env=target_env,
                 )
@@ -1076,7 +1069,7 @@ def verify_integration_steps(
                 run_command_step(
                     step["name"],
                     [*python_cmd_prefix, "-c", step["code"]],
-                    target_cwd,
+                    repo_root,
                     timeout,
                     env=target_env,
                 )
@@ -1219,15 +1212,12 @@ def main() -> None:
     )
     target_source_mode = args.target_source_mode
     python_cmd_prefix = build_target_command_prefix(python_exe, source_mode=target_source_mode)
-    target_cwd = build_target_cwd(python_exe, source_root, source_mode=target_source_mode)
     target_env = build_target_env(source_root, source_mode=target_source_mode)
     if target_source_mode:
         log(
             "target source mode enabled: running the target python.exe with "
             f"PYTHONHOME={source_root} PYTHONPATH={source_root / 'Lib'} and -X frozen_modules=off"
         )
-    else:
-        log(f"target runtime cwd: {target_cwd}")
     coverage = verification_coverage(integrations)
     missing_steps = coverage["libraries_without_steps"]
     log(
@@ -1267,20 +1257,11 @@ def main() -> None:
             source_root,
             manifest,
             integrations,
-            target_cwd,
+            repo_root,
             run_third_party_smoke,
         )
     )
-    failures.extend(
-        verify_integration_steps(
-            python_cmd_prefix,
-            target_env,
-            repo_root,
-            target_cwd,
-            integrations,
-            skipped_groups,
-        )
-    )
+    failures.extend(verify_integration_steps(python_cmd_prefix, target_env, repo_root, integrations, skipped_groups))
 
     if args.report_json:
         write_report(args.report_json.resolve(), python_exe, failures, coverage)

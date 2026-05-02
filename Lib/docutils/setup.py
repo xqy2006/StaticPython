@@ -4,9 +4,6 @@ from libs import inline_verification_step, simple_library
 LIBRARY_INTEGRATION = simple_library(
     name="docutils",
     overlay_entries=["Lib/docutils"],
-    runtime_resource_paths=[
-        "Lib/docutils/writers/html5_polyglot",
-    ],
     verification_steps=[
         inline_verification_step(
             "docutils-smoke",

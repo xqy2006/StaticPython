@@ -75,10 +75,6 @@ LIBRARY_INTEGRATION = simple_library(
         "nbconvert": "Lib/nbconvert",
         "share/templates": "share/jupyter/nbconvert/templates",
     },
-    runtime_resource_paths=[
-        "Lib/nbconvert/templates",
-        "share/jupyter/nbconvert/templates",
-    ],
     post_patch_hooks=[patch_nbconvert_sources],
     verification_steps=[
         inline_verification_step(

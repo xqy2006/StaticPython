@@ -84,15 +84,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "jupyter-config/jupyter_server_config.d/jupyterlab.json": "etc/jupyter/jupyter_server_config.d/jupyterlab.json",
         "jupyter-config/jupyter_notebook_config.d/jupyterlab.json": "etc/jupyter/jupyter_notebook_config.d/jupyterlab.json",
     },
-    runtime_resource_paths=[
-        "Lib/jupyterlab/static",
-        "Lib/jupyterlab/schemas",
-        "Lib/jupyterlab/staging",
-        "Lib/jupyterlab/themes",
-        "share/jupyter/lab",
-        "etc/jupyter/jupyter_server_config.d/jupyterlab.json",
-        "etc/jupyter/jupyter_notebook_config.d/jupyterlab.json",
-    ],
     cleanup_paths=[
         "etc/jupyter/jupyter_server_config.d/jupyterlab",
         "etc/jupyter/jupyter_notebook_config.d/jupyterlab",

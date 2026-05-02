@@ -8,11 +8,6 @@ LIBRARY_INTEGRATION = pypi_library(
     source_mapping={
         "jupyter_server": "Lib/jupyter_server",
     },
-    runtime_resource_paths=[
-        "Lib/jupyter_server/static",
-        "Lib/jupyter_server/templates",
-        "Lib/jupyter_server/event_schemas",
-    ],
     materialized_paths=[
         "Lib/jupyter_server/templates/404.html",
         "Lib/jupyter_server/templates/browser-open.html",

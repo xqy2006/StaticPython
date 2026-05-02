@@ -76,7 +76,6 @@ class LibraryIntegration:
     auto_resolve_dependencies: bool = False
     overlay_entries: list[str] = field(default_factory=list)
     materialized_paths: list[str] = field(default_factory=list)
-    runtime_resource_paths: list[str] = field(default_factory=list)
     verification_materialized_paths: list[str] = field(default_factory=list)
     cleanup_paths: list[str] = field(default_factory=list)
     python_packages: list[str] = field(default_factory=list)
@@ -107,10 +106,6 @@ def _build_materialized_paths(
     paths.extend(_normalized_relpath(path) for path in overlay_entries)
     paths.extend(_normalized_relpath(path) for path in (extra_paths or []))
     return _unique(paths)
-
-
-def _build_runtime_resource_paths(paths: list[str] | None = None) -> list[str]:
-    return _unique([_normalized_relpath(path) for path in (paths or [])])
 
 
 def _build_cleanup_paths(paths: list[str] | None = None) -> list[str]:
@@ -710,7 +705,6 @@ def pypi_library(
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
     materialized_paths: list[str] | None = None,
-    runtime_resource_paths: list[str] | None = None,
     verification_materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
@@ -739,9 +733,6 @@ def pypi_library(
             resolved_mapping,
             normalized_overlay_entries,
             materialized_paths,
-        ),
-        runtime_resource_paths=_build_runtime_resource_paths(
-            runtime_resource_paths,
         ),
         verification_materialized_paths=_build_materialized_paths(
             resolved_mapping,
@@ -792,7 +783,6 @@ def github_library(
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
     materialized_paths: list[str] | None = None,
-    runtime_resource_paths: list[str] | None = None,
     verification_materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
@@ -821,9 +811,6 @@ def github_library(
             resolved_mapping,
             normalized_overlay_entries,
             materialized_paths,
-        ),
-        runtime_resource_paths=_build_runtime_resource_paths(
-            runtime_resource_paths,
         ),
         verification_materialized_paths=_build_materialized_paths(
             resolved_mapping,
@@ -875,7 +862,6 @@ def simple_library(
     verification_imports: list[str] | None = None,
     verification_steps: list[dict] | None = None,
     materialized_paths: list[str] | None = None,
-    runtime_resource_paths: list[str] | None = None,
     verification_materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
@@ -904,7 +890,6 @@ def simple_library(
         "verification_imports": verification_imports,
         "verification_steps": verification_steps,
         "materialized_paths": materialized_paths,
-        "runtime_resource_paths": runtime_resource_paths,
         "verification_materialized_paths": verification_materialized_paths,
         "cleanup_paths": cleanup_paths,
         "prepare_source_hooks": prepare_source_hooks,
@@ -1213,10 +1198,6 @@ def collect_overlay_entries(integrations: list[LibraryIntegration]) -> list[str]
 
 def collect_python_packages(integrations: list[LibraryIntegration]) -> list[str]:
     return _unique([package for integration in integrations for package in integration.python_packages])
-
-
-def collect_runtime_resource_paths(integrations: list[LibraryIntegration]) -> list[str]:
-    return _unique([path for integration in integrations for path in integration.runtime_resource_paths])
 
 
 def collect_verification_imports(integrations: list[LibraryIntegration]) -> list[str]:

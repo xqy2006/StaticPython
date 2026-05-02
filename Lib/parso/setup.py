@@ -4,9 +4,6 @@ from libs import inline_verification_step, simple_library
 LIBRARY_INTEGRATION = simple_library(
     name="parso",
     overlay_entries=["Lib/parso"],
-    runtime_resource_paths=[
-        "Lib/parso/python",
-    ],
     materialized_paths=[
         "Lib/parso/python/grammar313.txt",
         "Lib/parso/python/grammar314.txt",
