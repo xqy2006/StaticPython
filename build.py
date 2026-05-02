@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
@@ -21,6 +23,7 @@ from libs import (
     collect_builtin_module_registrations,
     collect_native_static_projects,
     collect_overlay_entries,
+    collect_runtime_resource_paths,
     collect_python_link_dependencies,
     collect_python_link_wholearchive,
     collect_staged_static_libraries,
@@ -60,6 +63,95 @@ FROZEN_DATA_SOURCE_PREFIX = "staticpython_frozen_data_"
 FROZEN_DATA_SHARD_BYTES = 2 * 1024 * 1024
 BASELINE_PYTHON_PROJECT_REFERENCES = {"pythoncore.vcxproj"}
 PROFILE_METADATA_RELATIVE_PATH = Path("PCbuild") / "staticpython-profile.json"
+RUNTIME_RESOURCE_MODULE_BASENAME = "_staticpython_runtime_resources"
+RUNTIME_RESOURCE_MODULE_RELATIVE_PATH = Path("Lib") / f"{RUNTIME_RESOURCE_MODULE_BASENAME}.py"
+RUNTIME_RESOURCE_SHARD_TEXT_BYTES = 4 * 1024 * 1024
+RUNTIME_RESOURCE_AUTO_FILE_EXTENSIONS = {
+    ".bin",
+    ".cfg",
+    ".conf",
+    ".crt",
+    ".css",
+    ".csv",
+    ".dat",
+    ".eot",
+    ".gif",
+    ".html",
+    ".ico",
+    ".ini",
+    ".ipynb",
+    ".j2",
+    ".jinja",
+    ".jinja2",
+    ".jpeg",
+    ".jpg",
+    ".js",
+    ".json",
+    ".key",
+    ".map",
+    ".md",
+    ".mo",
+    ".otf",
+    ".pem",
+    ".pickle",
+    ".pkl",
+    ".png",
+    ".po",
+    ".rst",
+    ".scss",
+    ".svg",
+    ".tex",
+    ".toml",
+    ".tpl",
+    ".tsv",
+    ".ttf",
+    ".txt",
+    ".wasm",
+    ".woff",
+    ".woff2",
+    ".xml",
+    ".xsd",
+    ".yaml",
+    ".yml",
+}
+RUNTIME_RESOURCE_AUTO_PY_DIR_NAMES = {
+    "providers",
+    "stubs",
+    "typeshed",
+}
+RUNTIME_RESOURCE_AUTO_SKIP_DIR_NAMES = {
+    "__pycache__",
+    ".git",
+    ".github",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "benchmarks",
+    "build",
+    "dist",
+    "doc",
+    "docs",
+    "example",
+    "examples",
+    "news",
+    "test",
+    "tests",
+    "testing",
+}
+RUNTIME_RESOURCE_AUTO_SKIP_BASENAMES = {
+    "authors",
+    "changelog",
+    "changes",
+    "copying",
+    "license",
+    "license.txt",
+    "notice",
+    "readme",
+    "readme.md",
+    "readme.rst",
+    "readme.txt",
+}
 
 ET.register_namespace("", MSBUILD_NS)
 
@@ -612,6 +704,7 @@ def msbuild_args(
         f"/p:CL_MPCount={build_workers}",
         f"/p:MultiProcMaxCount={build_workers}",
         "/p:EnforceProcessCountAcrossBuilds=true",
+        "/p:UseMultiToolTask=false",
         "/p:VcpkgEnabled=false",
     ]
     args.extend(f"/p:{prop}" for prop in extra_properties)
@@ -891,22 +984,348 @@ def cleanup_integration_legacy_paths(source_root: Path, integrations: list) -> N
             target.unlink()
             log(f"removed stale integration file {relative}")
 
+
+def _chunk_ascii(text: str, width: int = 96) -> list[str]:
+    if not text:
+        return [""]
+    return [text[index : index + width] for index in range(0, len(text), width)]
+
+
+def _runtime_resource_module_paths(source_root: Path) -> list[Path]:
+    return sorted((source_root / "Lib").glob(f"{RUNTIME_RESOURCE_MODULE_BASENAME}*.py"))
+
+
+def _cleanup_runtime_resource_modules(source_root: Path) -> None:
+    for path in _runtime_resource_module_paths(source_root):
+        path.unlink(missing_ok=True)
+
+
+def _skip_runtime_resource_file(relative: str) -> bool:
+    parts = relative.replace("\\", "/").split("/")
+    if "__pycache__" in parts:
+        return True
+    lowered = relative.lower()
+    return lowered.endswith((".pyc", ".pyo"))
+
+
+def _iter_integration_auto_runtime_resource_files(source_root: Path, integration) -> list[str]:
+    candidates: set[str] = set()
+
+    for relative in getattr(integration, "materialized_paths", []):
+        normalized = relative.replace("\\", "/")
+        target = source_root / normalized
+        if not target.exists():
+            continue
+
+        if target.is_dir():
+            for child in target.rglob("*"):
+                if not child.is_file():
+                    continue
+                child_relative = child.relative_to(source_root).as_posix()
+                if _skip_runtime_resource_file(child_relative):
+                    continue
+                child_parts = child_relative.lower().split("/")
+                if any(part in RUNTIME_RESOURCE_AUTO_SKIP_DIR_NAMES for part in child_parts[:-1]):
+                    continue
+                suffix = child.suffix.lower()
+                basename = child.name.lower()
+                if basename in RUNTIME_RESOURCE_AUTO_SKIP_BASENAMES:
+                    continue
+                if suffix in RUNTIME_RESOURCE_AUTO_FILE_EXTENSIONS:
+                    candidates.add(child_relative)
+                    continue
+                if suffix in {".py", ".pyi"} and any(
+                    part in RUNTIME_RESOURCE_AUTO_PY_DIR_NAMES for part in child_parts[:-1]
+                ):
+                    candidates.add(child_relative)
+            continue
+
+        if _skip_runtime_resource_file(normalized):
+            continue
+        parts = normalized.lower().split("/")
+        if any(part in RUNTIME_RESOURCE_AUTO_SKIP_DIR_NAMES for part in parts[:-1]):
+            continue
+        suffix = target.suffix.lower()
+        basename = target.name.lower()
+        if basename in RUNTIME_RESOURCE_AUTO_SKIP_BASENAMES:
+            continue
+        if suffix in RUNTIME_RESOURCE_AUTO_FILE_EXTENSIONS:
+            candidates.add(normalized)
+            continue
+        if suffix in {".py", ".pyi"} and any(part in RUNTIME_RESOURCE_AUTO_PY_DIR_NAMES for part in parts[:-1]):
+            candidates.add(normalized)
+
+    return sorted(candidates)
+
+
+def collect_runtime_resource_files(source_root: Path, integrations: list) -> list[str]:
+    explicit = {
+        path.replace("\\", "/")
+        for path in collect_runtime_resource_paths(integrations)
+    }
+    auto = {
+        path
+        for integration in integrations
+        for path in _iter_integration_auto_runtime_resource_files(source_root, integration)
+    }
+    combined = sorted(explicit | auto)
+    auto_only_count = len(auto - explicit)
+    if auto_only_count:
+        log(
+            "auto-discovered "
+            f"{auto_only_count} runtime resource file(s) from materialized integration trees"
+        )
+    return combined
+
+
+def _collect_runtime_resource_files(source_root: Path, resource_paths: list[str]) -> tuple[dict[str, Path], list[str]]:
+    files: dict[str, Path] = {}
+    missing: list[str] = []
+
+    for relative in resource_paths:
+        base_path = source_root / relative
+        if not base_path.exists():
+            missing.append(relative)
+            continue
+
+        if base_path.is_dir():
+            for child in sorted(base_path.rglob("*")):
+                if not child.is_file():
+                    continue
+                child_relative = child.relative_to(source_root).as_posix()
+                if _skip_runtime_resource_file(child_relative):
+                    continue
+                files.setdefault(child_relative, child)
+            continue
+
+        normalized_relative = relative.replace("\\", "/")
+        if _skip_runtime_resource_file(normalized_relative):
+            continue
+        files.setdefault(normalized_relative, base_path)
+
+    return files, missing
+
+
+def _chunk_runtime_resource_blobs(blob_records: list[dict[str, str]]) -> list[list[dict[str, str]]]:
+    chunks: list[list[dict[str, str]]] = []
+    current_chunk: list[dict[str, str]] = []
+    current_size = 0
+
+    for record in blob_records:
+        record_size = max(len(record["encoded"]), 1)
+        if current_chunk and current_size + record_size > RUNTIME_RESOURCE_SHARD_TEXT_BYTES:
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_size = 0
+        current_chunk.append(record)
+        current_size += record_size
+
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
+
+
+def write_runtime_resource_module(source_root: Path, integrations: list) -> None:
+    resource_paths = collect_runtime_resource_files(source_root, integrations)
+    module_path = source_root / RUNTIME_RESOURCE_MODULE_RELATIVE_PATH
+
+    _cleanup_runtime_resource_modules(source_root)
+
+    if not resource_paths:
+        module_path.write_text(
+            "# Auto-generated by StaticPython. Do not edit.\n"
+            'RESOURCE_MANIFEST_HASH = "0" * 64\n'
+            "RESOURCE_SHARDS = ()\n"
+            "RESOURCE_TARGETS = {}\n\n"
+            "def iter_resource_payloads():\n"
+            "    return ()\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        log(f"wrote empty runtime resource module to {module_path.relative_to(source_root)}")
+        return
+
+    resource_files, missing = _collect_runtime_resource_files(source_root, resource_paths)
+
+    if missing:
+        raise RuntimeError(
+            "runtime resource packaging failed because expected path(s) are missing:\n"
+            + "\n".join(missing)
+        )
+
+    blob_records: list[dict[str, str]] = []
+    blob_ids_by_hash: dict[str, dict[str, str]] = {}
+    target_records: list[tuple[str, str]] = []
+    manifest_hasher = hashlib.sha256()
+
+    for relative, path in resource_files.items():
+        payload = path.read_bytes()
+        payload_hash = hashlib.sha256(payload).hexdigest()
+        blob_id = f"sha256:{payload_hash}"
+        record = blob_ids_by_hash.get(blob_id)
+        if record is None:
+            record = {
+                "blob_id": blob_id,
+                "encoded": base64.b85encode(payload).decode("ascii"),
+            }
+            blob_ids_by_hash[blob_id] = record
+            blob_records.append(record)
+        target_records.append((relative, blob_id))
+        manifest_hasher.update(relative.encode("utf-8"))
+        manifest_hasher.update(b"\0")
+        manifest_hasher.update(blob_id.encode("ascii"))
+        manifest_hasher.update(b"\n")
+
+    blob_to_module: dict[str, str] = {}
+    shard_module_names: list[str] = []
+    for index, chunk in enumerate(_chunk_runtime_resource_blobs(blob_records)):
+        shard_module_name = f"{RUNTIME_RESOURCE_MODULE_BASENAME}_shard_{index:03d}"
+        shard_module_names.append(shard_module_name)
+        shard_path = source_root / "Lib" / f"{shard_module_name}.py"
+
+        blob_lines: list[str] = []
+        for record in chunk:
+            wrapped = "\n".join(f'        "{chunk_text}",' for chunk_text in _chunk_ascii(record["encoded"]))
+            blob_lines.append(
+                "    "
+                + repr(record["blob_id"])
+                + ": (\n"
+                + wrapped
+                + "\n"
+                + "    ),"
+            )
+            blob_to_module[record["blob_id"]] = shard_module_name
+
+        shard_text = (
+            "# Auto-generated by StaticPython. Do not edit.\n"
+            "RESOURCE_BLOBS = {\n"
+            + ("\n".join(blob_lines) if blob_lines else "")
+            + "\n}\n"
+        )
+        shard_path.write_text(shard_text, encoding="utf-8", newline="\n")
+
+    target_lines = [
+        "    " + repr(relative) + f": ({blob_to_module[blob_id]!r}, {blob_id!r}),"
+        for relative, blob_id in target_records
+    ]
+    manifest_hash = manifest_hasher.hexdigest()
+    module_text = (
+        "# Auto-generated by StaticPython. Do not edit.\n"
+        f"RESOURCE_MANIFEST_HASH = {manifest_hash!r}\n"
+        f"RESOURCE_SHARDS = {tuple(shard_module_names)!r}\n"
+        "RESOURCE_TARGETS = {\n"
+        + ("\n".join(target_lines) if target_lines else "")
+        + "\n}\n\n"
+        "def iter_resource_payloads():\n"
+        "    import importlib\n\n"
+        "    shard_cache = {}\n"
+        "    for relative, (module_name, blob_id) in RESOURCE_TARGETS.items():\n"
+        "        shard_module = shard_cache.get(module_name)\n"
+        "        if shard_module is None:\n"
+        "            shard_module = importlib.import_module(module_name)\n"
+        "            shard_cache[module_name] = shard_module\n"
+        "        yield relative, shard_module.RESOURCE_BLOBS[blob_id]\n"
+    )
+    module_path.write_text(module_text, encoding="utf-8", newline="\n")
+    log(
+        "wrote runtime resource module with "
+        f"{len(target_records)} file target(s), "
+        f"{len(blob_records)} unique payload(s), "
+        f"{len(shard_module_names)} shard(s) to {module_path.relative_to(source_root)}"
+    )
+
+
 def patch_site_py(source_root: Path, version_mm: str) -> None:
     path = source_root / "Lib" / "site.py"
     text = path.read_text(encoding="utf-8")
     pattern = r'^(?P<indent>\s*)ver_nodot = .+$'
     desired_line = f'ver_nodot = "{version_mm}".replace(\'.\', \'\')'
-    if desired_line in text:
+    if desired_line not in text:
+        text, count = re.subn(
+            pattern,
+            lambda match: f'{match.group("indent")}{desired_line}',
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if count != 1:
+            raise RuntimeError(f"expected regex not found in {path}: {pattern}")
+
+    runtime_patch = """
+def _staticpython_materialize_runtime_resources():
+    try:
+        import _staticpython_runtime_resources as _staticpython_resources
+    except Exception:
         return
-    text, count = re.subn(
-        pattern,
-        lambda match: f'{match.group("indent")}{desired_line}',
-        text,
-        count=1,
-        flags=re.MULTILINE,
+
+    import base64 as _staticpython_base64
+    import tempfile as _staticpython_tempfile
+
+    prefix = globals().get("PREFIXES", None)
+    candidate_root = None
+    if prefix:
+        candidate_root = prefix[0]
+    if not candidate_root:
+        candidate_root = sys.prefix
+    if not candidate_root:
+        candidate_root = os.path.dirname(sys.executable)
+
+    resource_root = os.path.abspath(candidate_root)
+    ready_marker = os.path.join(
+        _staticpython_tempfile.gettempdir(),
+        "staticpython-runtime-resources-ready.txt",
     )
-    if count != 1:
-        raise RuntimeError(f"expected regex not found in {path}: {pattern}")
+    marker_payload = resource_root + "|" + getattr(_staticpython_resources, "RESOURCE_MANIFEST_HASH", "")
+
+    try:
+        with open(ready_marker, "r", encoding="utf-8") as marker_file:
+            if marker_file.read() == marker_payload:
+                return
+    except OSError:
+        pass
+
+    try:
+        if hasattr(_staticpython_resources, "iter_resource_payloads"):
+            resource_iter = _staticpython_resources.iter_resource_payloads()
+        else:
+            resource_iter = _staticpython_resources.RESOURCE_PAYLOADS.items()
+
+        for relative, encoded_chunks in resource_iter:
+            target = os.path.join(resource_root, *relative.split("/"))
+            parent = os.path.dirname(target)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            payload = _staticpython_base64.b85decode("".join(encoded_chunks).encode("ascii"))
+            try:
+                with open(target, "rb") as existing:
+                    if existing.read() == payload:
+                        continue
+            except OSError:
+                pass
+            with open(target, "wb") as output:
+                output.write(payload)
+        with open(ready_marker, "w", encoding="utf-8", newline="\\n") as marker_file:
+            marker_file.write(marker_payload)
+    except OSError:
+        return
+
+
+_staticpython_materialize_runtime_resources()
+
+"""
+    start_marker = "def _staticpython_materialize_runtime_resources():\n"
+    end_marker = "_staticpython_materialize_runtime_resources()\n"
+    if start_marker in text:
+        start_index = text.index(start_marker)
+        end_index = text.index(end_marker, start_index) + len(end_marker)
+        while end_index < len(text) and text[end_index] == "\n":
+            end_index += 1
+        text = text[:start_index] + runtime_patch + text[end_index:]
+    else:
+        anchor = "PREFIXES = [sys.prefix, sys.exec_prefix]\n"
+        if anchor not in text:
+            raise RuntimeError(f"expected anchor not found in {path}: {anchor!r}")
+        text = text.replace(anchor, anchor + runtime_patch, 1)
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
@@ -926,7 +1345,23 @@ def patch_modules_getpath_py(source_root: Path) -> None:
     )
     if count == 0:
         log("skip getpath.py warning patch because the target warning lines were not found")
-        return
+
+    old_prefix_fallback = (
+        "    if not prefix:\n"
+        "        prefix = abspath('')\n"
+        "        pass  # single-file build suppresses missing <prefix> warning\n"
+    )
+    new_prefix_fallback = (
+        "    if not prefix:\n"
+        "        prefix = executable_dir or real_executable_dir or abspath('')\n"
+        "        if STDLIB_SUBDIR and not stdlib_dir:\n"
+        "            stdlib_dir = joinpath(prefix, STDLIB_SUBDIR)\n"
+        "        pass  # single-file build anchors <prefix> to the executable directory\n"
+    )
+    if old_prefix_fallback in text:
+        text = text.replace(old_prefix_fallback, new_prefix_fallback, 1)
+    elif new_prefix_fallback not in text:
+        raise RuntimeError("failed to patch getpath.py prefix fallback for single-file runtime")
 
     path.write_text(text, encoding="utf-8", newline="\n")
 
@@ -1066,6 +1501,17 @@ def patch_python_sysmodule_c(source_root: Path, version_mm: str) -> None:
             desired_attrs,
             1,
         )
+
+    staticpython_attr = '    SET_SYS("_staticpython", PyBool_FromLong(1));\n'
+    if staticpython_attr not in text:
+        version_anchor = f'    SET_SYS_FROM_STRING("winver", "{version_mm}");\n'
+        dll_anchor = '    SET_SYS_FROM_STRING("winver", PyWin_DLLVersionString);\n'
+        if version_anchor in text:
+            text = text.replace(version_anchor, version_anchor + staticpython_attr, 1)
+        elif dll_anchor in text:
+            text = text.replace(dll_anchor, dll_anchor + staticpython_attr, 1)
+        else:
+            raise RuntimeError("failed to add sys._staticpython marker")
 
     path.write_text(text, encoding="utf-8", newline="\n")
 
@@ -1262,6 +1708,7 @@ def apply_patches(
     patch_static_library_projects(source_root, manifest, integrations)
     patch_pc_config(source_root, manifest, integrations)
     run_post_patch_hooks(integrations, hook_context)
+    write_runtime_resource_module(source_root, integrations)
 
 
 def verify_source_root(source_root: Path) -> None:
@@ -1493,6 +1940,18 @@ def ensure_freeze_module_exe(
 ) -> Path:
     pcbuild = source_root / "PCbuild"
     output_exe = get_pcbuild_output_dir(source_root, platform) / "_freeze_module.exe"
+    override = os.environ.get("FREEZE_MODULE_EXE")
+    if override:
+        override_path = Path(override).expanduser().resolve()
+        if not override_path.exists():
+            raise RuntimeError(f"FREEZE_MODULE_EXE points to a missing file: {override_path}")
+        log(f"reusing override freeze helper from {override_path}")
+        output_exe.parent.mkdir(parents=True, exist_ok=True)
+        if override_path != output_exe:
+            shutil.copy2(override_path, output_exe)
+        return output_exe
+    freeze_build_workers = min(resolve_build_workers(build_workers), 1)
+    log(f"using {freeze_build_workers} worker(s) to build _freeze_module.exe")
     run(
         [
             "msbuild",
@@ -1501,7 +1960,7 @@ def ensure_freeze_module_exe(
                 configuration,
                 platform,
                 "StaticPythonSkipRebuildFrozen=true",
-                workers=build_workers,
+                workers=freeze_build_workers,
             ),
         ],
         cwd=source_root,
@@ -1591,6 +2050,40 @@ def freeze_modules(
         )
     else:
         log("skip standalone _pyrepl freezing for CPython < 3.13")
+
+
+def verify_runtime_resource_modules_frozen(source_root: Path) -> None:
+    module_paths = _runtime_resource_module_paths(source_root)
+    if not module_paths:
+        raise RuntimeError("runtime resource module generation did not produce any Lib/_staticpython_runtime_resources*.py files")
+
+    frozen_dir = source_root / "Python" / "frozen_modules"
+    frozen_c = source_root / "Python" / "frozen.c"
+    frozen_c_text = frozen_c.read_text(encoding="utf-8") if frozen_c.exists() else ""
+
+    missing_headers: list[str] = []
+    missing_registry_entries: list[str] = []
+    for module_path in module_paths:
+        module_name = module_path.stem
+        if not (frozen_dir / f"{module_name}.h").exists():
+            missing_headers.append(f"Python/frozen_modules/{module_name}.h")
+        if f'"{module_name}"' not in frozen_c_text:
+            missing_registry_entries.append(module_name)
+
+    if missing_headers or missing_registry_entries:
+        details: list[str] = []
+        if missing_headers:
+            details.append("missing frozen headers:")
+            details.extend(missing_headers)
+        if missing_registry_entries:
+            details.append("missing frozen registry entries:")
+            details.extend(missing_registry_entries)
+        raise RuntimeError(
+            "runtime resource modules were generated but not frozen into the CPython build:\n"
+            + "\n".join(details)
+        )
+
+    log(f"verified {len(module_paths)} runtime resource module(s) are present in frozen_modules and frozen.c")
 
 
 FROZEN_INCLUDE_RE = re.compile(r'^#include "frozen_modules/([^"\r\n]+\.h)"\r?$', re.MULTILINE)
@@ -2229,6 +2722,7 @@ def main() -> int:
         maybe_get_externals(source_root)
 
     built_exe: Path | None = None
+    exported_exe: Path | None = None
     if not args.skip_build:
         maybe_restore_getpath_header(source_root, version_info)
         if args.skip_freeze:
@@ -2244,6 +2738,7 @@ def main() -> int:
                 build_workers,
             )
             maybe_restore_getpath_header(source_root, version_info)
+            verify_runtime_resource_modules_frozen(source_root)
         log("splitting frozen module bytecode data for MSVC")
         split_frozen_modules(source_root)
         log("building custom static libraries and python.exe")
@@ -2261,12 +2756,20 @@ def main() -> int:
             build_workers,
         )
         built_exe = get_pcbuild_output_dir(source_root, args.platform) / "python.exe"
+        if args.output_dir:
+            exported_exe = export_built_python(
+                built_exe,
+                args.output_dir.resolve(),
+                version_full,
+                args.platform,
+                profile_name,
+            )
 
     if not args.skip_build and not args.skip_verify:
         log("running post-build import verification")
         built_exe = verify_built_python(source_root, args.platform, manifest, args.host_python, profile_name, config_path)
 
-    if not args.skip_build and args.output_dir:
+    if not args.skip_build and args.output_dir and exported_exe is None:
         if built_exe is None:
             built_exe = get_pcbuild_output_dir(source_root, args.platform) / "python.exe"
         export_built_python(built_exe, args.output_dir.resolve(), version_full, args.platform, profile_name)

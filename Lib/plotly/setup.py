@@ -70,6 +70,10 @@ LIBRARY_INTEGRATION = simple_library(
         "plotly": "Lib/plotly",
         "_plotly_utils": "Lib/_plotly_utils",
     },
+    runtime_resource_paths=[
+        "Lib/plotly/validators",
+        "Lib/plotly/package_data/templates",
+    ],
     post_patch_hooks=[patch_plotly_sources],
     verification_steps=[
         inline_verification_step(

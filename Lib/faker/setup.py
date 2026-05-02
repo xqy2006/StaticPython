@@ -5,6 +5,9 @@ LIBRARY_INTEGRATION = simple_library(
     name="faker",
     project_name="Faker",
     overlay_entries=["Lib/faker"],
+    runtime_resource_paths=[
+        "Lib/faker/providers",
+    ],
     verification_steps=[
         inline_verification_step(
             "faker-smoke",

@@ -9,6 +9,13 @@ LIBRARY_INTEGRATION = pypi_library(
         "notebook/labextension": "share/jupyter/labextensions/@jupyter-notebook/lab-extension",
         "jupyter-config/jupyter_server_config.d/notebook.json": "etc/jupyter/jupyter_server_config.d/notebook.json",
     },
+    runtime_resource_paths=[
+        "Lib/notebook/static",
+        "Lib/notebook/templates",
+        "Lib/notebook/schemas",
+        "share/jupyter/labextensions/@jupyter-notebook/lab-extension",
+        "etc/jupyter/jupyter_server_config.d/notebook.json",
+    ],
     cleanup_paths=[
         "etc/jupyter/jupyter_server_config.d/notebook",
     ],

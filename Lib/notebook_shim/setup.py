@@ -8,6 +8,9 @@ LIBRARY_INTEGRATION = simple_library(
         "notebook_shim": "Lib/notebook_shim",
         "jupyter_server_config.d/notebook_shim.json": "etc/jupyter/jupyter_server_config.d/notebook_shim.json",
     },
+    runtime_resource_paths=[
+        "etc/jupyter/jupyter_server_config.d/notebook_shim.json",
+    ],
     cleanup_paths=[
         "etc/jupyter/jupyter_server_config.d/notebook_shim",
     ],

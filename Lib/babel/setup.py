@@ -5,6 +5,9 @@ LIBRARY_INTEGRATION = simple_library(
     name="babel",
     project_name="Babel",
     overlay_entries=["Lib/babel"],
+    runtime_resource_paths=[
+        "Lib/babel/locale-data",
+    ],
     materialized_paths=[
         "Lib/babel/locale-data/root.dat",
         "Lib/babel/locale-data/en.dat",

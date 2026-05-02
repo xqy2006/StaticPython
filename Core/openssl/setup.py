@@ -32,6 +32,17 @@ ARCHIVE_URL_TEMPLATES = [
 STATIC_DIR_NAME = "openssl-static"
 
 
+def find_windows_native_perl(context) -> str | None:
+    candidates = [
+        context.repo_root / ".vendor-stage" / "tools" / "strawberry-perl" / "perl" / "bin" / "perl.exe",
+        Path(r"C:\Strawberry\perl\bin\perl.exe"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which("perl")
+
+
 def detect_cpython_openssl_version(context) -> str:
     files = [
         context.source_root / "PCbuild" / "python.props",
@@ -195,7 +206,7 @@ def ensure_static_openssl(context) -> None:
         context.log(f"using existing static OpenSSL {openssl_version} at {output_dir.relative_to(context.source_root)}")
         return
 
-    perl = shutil.which("perl")
+    perl = find_windows_native_perl(context)
     if perl is None:
         raise RuntimeError(
             "OpenSSL static build requires perl on PATH. Install Strawberry Perl or ActivePerl "
