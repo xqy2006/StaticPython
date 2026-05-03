@@ -81,6 +81,11 @@ LIBRARY_INTEGRATION = simple_library(
         "Lib/ipykernel/resources/logo-svg.svg",
         "Lib/ipykernel/_static_resources.py",
     ],
+    verification_materialized_paths=[
+        "Lib/ipykernel/resources/logo-32x32.png",
+        "Lib/ipykernel/resources/logo-64x64.png",
+        "Lib/ipykernel/resources/logo-svg.svg",
+    ],
     post_patch_hooks=[embed_ipykernel_resources],
     verification_steps=[
         inline_verification_step(

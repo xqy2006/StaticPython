@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
         "import pytest\\n@pytest.fixture()\\ndef answer():\\n    return 42\\n",
         encoding="utf-8",
     )
-    (root / "test_staticpython.py").write_text(
+    (root / "test_sample.py").write_text(
         "import pytest\\n\\n@pytest.mark.parametrize('value', [1, 2, 3])\\ndef test_ok(answer, value):\\n    assert answer + value in {43, 44, 45}\\n",
         encoding="utf-8",
     )

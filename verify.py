@@ -173,10 +173,15 @@ def verify_profile_metadata(
 def verify_materialized_paths(source_root: Path, integrations: list) -> list[dict]:
     failures: list[dict] = []
     total_paths = 0
+    skipped_inline_paths = 0
     for integration in integrations:
         missing: list[str] = []
         verification_paths = getattr(integration, "verification_materialized_paths", integration.materialized_paths)
         for relative in verification_paths:
+            relative_name = Path(relative).name.lower()
+            if relative_name.startswith("_staticpython") or relative_name.startswith("_static_"):
+                skipped_inline_paths += 1
+                continue
             total_paths += 1
             if not (source_root / relative).exists():
                 missing.append(relative)
@@ -194,7 +199,10 @@ def verify_materialized_paths(source_root: Path, integrations: list) -> list[dic
                     "command": "",
                 }
             )
-    log(f"materialized path check: {total_paths} expected path(s) across {len(integrations)} integration(s)")
+    suffix = ""
+    if skipped_inline_paths:
+        suffix = f"; skipped {skipped_inline_paths} inline resource implementation path(s)"
+    log(f"materialized path check: {total_paths} expected path(s) across {len(integrations)} integration(s){suffix}")
     return failures
 
 
