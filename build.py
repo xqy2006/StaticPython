@@ -335,7 +335,7 @@ def set_frozen_data_compile_options(clcompile: ET.Element) -> None:
         "AdditionalOptions",
         condition=MSBUILD_RELEASE_X64_CONDITION,
     )
-    additional_options.text = "/GL- /MP- %(AdditionalOptions)"
+    additional_options.text = "/GL- %(AdditionalOptions)"
     optimization = ensure_direct_child(
         clcompile,
         "Optimization",
