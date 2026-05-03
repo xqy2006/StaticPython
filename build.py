@@ -614,10 +614,10 @@ def parse_version_string(raw_version: str) -> tuple[str, tuple[int, int, int]]:
     version = raw_version.strip()
     if version.startswith("v"):
         version = version[1:]
-    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:(?:a|b|rc)\d+)?", version)
     if not match:
         raise RuntimeError(
-            f"unsupported CPython version string {raw_version!r}; expected format like 3.13.2 or 3.12.10"
+            f"unsupported CPython version string {raw_version!r}; expected format like 3.13.2, 3.12.10, or 3.15.0a8"
         )
     parts = tuple(int(group) for group in match.groups())
     return version, parts
@@ -1477,7 +1477,7 @@ def patch_freeze_module_vcxproj(source_root: Path) -> None:
     ensure_vcpkg_property_group(root)
 
     for target in root.iter(msbuild_tag("Target")):
-        if target.get("Name") not in {"_RebuildFrozen", "_RebuildGetPath"}:
+        if target.get("Name") not in {"_RebuildFrozen", "_RebuildDeepFrozen", "_RebuildGetPath"}:
             continue
         condition = target.get("Condition") or ""
         skip_guard = "'$(StaticPythonSkipRebuildFrozen)' != 'true'"
