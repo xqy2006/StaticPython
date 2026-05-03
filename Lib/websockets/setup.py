@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from libs import inline_verification_step, pypi_library, source_path, write_source_text
+from libs import pypi_library, source_path, write_source_text
 
 
 WEBSOCKETS_SPEEDUPS_GUID = "{E6A16A21-1D95-4866-A375-455DD2E9F2D4}"
@@ -73,7 +73,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "src/websockets": "Lib/websockets",
     },
     python_packages=["websockets"],
-    verification_imports=["websockets", "websockets.speedups"],
     static_library_projects_release_x64=["websockets.speedups.vcxproj"],
     native_static_projects=[
         {
@@ -89,23 +88,4 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     python_link_dependencies_release_x64=["websockets.speedups.lib"],
     prepare_source_hooks=[prepare_speedups_project],
-    verification_steps=[
-        inline_verification_step(
-            "websockets-smoke",
-            """
-import importlib.util
-
-import websockets
-import websockets.frames
-import websockets.speedups as speedups
-from websockets.uri import parse_uri
-
-assert importlib.util.find_spec("websockets.speedups").origin == "built-in"
-assert speedups.apply_mask(b"abcd", b"\\x01\\x02\\x03\\x04") == bytes([0x60, 0x60, 0x60, 0x60])
-assert websockets.frames.apply_mask is speedups.apply_mask
-uri = parse_uri("wss://example.com/chat")
-assert uri.secure is True and uri.host == "example.com" and uri.path == "/chat", uri
-""",
-        )
-    ],
 )

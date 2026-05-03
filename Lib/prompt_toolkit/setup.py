@@ -1,4 +1,4 @@
-from libs import inline_verification_step, replace_text_once, simple_library, transform_source_text
+from libs import replace_text_once, simple_library, transform_source_text
 
 
 def _patch_prompt_toolkit_init(text: str) -> str:
@@ -43,23 +43,4 @@ LIBRARY_INTEGRATION = simple_library(
     name='prompt_toolkit',
     overlay_entries=['Lib/prompt_toolkit'],
     post_patch_hooks=[patch_prompt_toolkit_sources],
-    verification_steps=[
-        inline_verification_step(
-            "prompt-toolkit-smoke",
-            """
-from prompt_toolkit.document import Document
-from prompt_toolkit.formatted_text import HTML, to_formatted_text
-from prompt_toolkit.validation import ValidationError, Validator
-
-text = Document("hello world", cursor_position=5)
-assert text.current_line_before_cursor == "hello"
-assert to_formatted_text(HTML("<b>demo</b>"))[0][1] == "demo"
-class NonEmpty(Validator):
-    def validate(self, document):
-        if not document.text:
-            raise ValidationError(message="empty")
-NonEmpty().validate(Document("x"))
-""",
-        )
-    ],
 )

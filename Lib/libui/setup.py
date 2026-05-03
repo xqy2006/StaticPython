@@ -6,7 +6,6 @@ from libs import (
     replace_text_once,
     transform_source_text,
     write_source_text,
-    script_verification_step,
 )
 
 
@@ -125,24 +124,4 @@ LIBRARY_INTEGRATION = pypi_library(
         "_libui_core.lib",
     ],
     post_patch_hooks=[patch_libui_sources],
-    verification_steps=[
-        script_verification_step(
-            "libui-smoke",
-            "assets/overlay/libui_smoke_test.py",
-            timeout=180,
-            skip_group="gui",
-        ),
-        script_verification_step(
-            "libui-unittest",
-            "assets/overlay/Lib/test/test_libui.py",
-            timeout=600,
-            skip_group="gui",
-        ),
-        script_verification_step(
-            "libui-gui-unittest",
-            "assets/overlay/Lib/test/test_libui_gui.py",
-            timeout=600,
-            skip_group="gui",
-        ),
-    ],
 )

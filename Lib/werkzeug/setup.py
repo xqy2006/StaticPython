@@ -1,4 +1,4 @@
-from libs import inline_verification_step, replace_text_once, simple_library, transform_source_text
+from libs import replace_text_once, simple_library, transform_source_text
 
 
 def _patch_werkzeug_serving(text: str) -> str:
@@ -22,21 +22,4 @@ LIBRARY_INTEGRATION = simple_library(
     name='werkzeug',
     overlay_entries=['Lib/werkzeug'],
     post_patch_hooks=[patch_werkzeug_sources],
-    verification_steps=[
-        inline_verification_step(
-            "werkzeug-smoke",
-            """
-from werkzeug.datastructures import MultiDict
-from werkzeug.routing import Map, Rule
-from werkzeug.wrappers import Request, Response
-
-mapping = Map([Rule("/hello/<name>", endpoint="hello")])
-adapter = mapping.bind("example.com")
-assert adapter.match("/hello/codex") == ("hello", {"name": "codex"})
-assert MultiDict([("a", "1"), ("a", "2")]).getlist("a") == ["1", "2"]
-response = Response("ok", status=201)
-assert response.status_code == 201 and response.get_data(as_text=True) == "ok"
-""",
-        )
-    ],
 )

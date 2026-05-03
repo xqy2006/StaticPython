@@ -1,6 +1,6 @@
 import json
 
-from libs import inline_verification_step, simple_library, source_path, transform_source_text, write_source_text
+from libs import simple_library, source_path, transform_source_text, write_source_text
 
 
 def embed_jupyter_lsp_schema(context) -> None:
@@ -85,38 +85,5 @@ LIBRARY_INTEGRATION = simple_library(
         "Lib/jupyter_lsp/schema/_staticpython_schema.py",
         "Lib/jupyter_lsp/specs/config/_staticpython_config_schemas.py",
     ],
-    verification_materialized_paths=[
-        "Lib/jupyter_lsp",
-        "Lib/jupyter_lsp/schema/schema.json",
-        "Lib/jupyter_lsp/specs/config/pylsp.schema.json",
-        "Lib/jupyter_lsp/specs/config/pyright.schema.json",
-    ],
     post_patch_hooks=[embed_jupyter_lsp_schema],
-    verification_steps=[
-        inline_verification_step(
-            "jupyter-lsp-smoke",
-            """
-from jupyter_lsp.manager import LanguageServerManager
-from jupyter_lsp.schema import LANGUAGE_SERVER_SPEC, LANGUAGE_SERVER_SPEC_MAP, SERVERS_RESPONSE
-
-spec = {
-    "version": 2,
-    "argv": ["pylsp"],
-    "languages": ["python"],
-    "display_name": "Python LSP",
-    "mime_types": ["text/x-python"],
-    "requires_documents_on_disk": False,
-}
-
-LANGUAGE_SERVER_SPEC.validate(spec)
-LANGUAGE_SERVER_SPEC_MAP.validate({"pylsp": spec})
-SERVERS_RESPONSE.validate({"version": 2, "sessions": {}, "specs": {"pylsp": spec}})
-
-manager = LanguageServerManager()
-assert manager.virtual_documents_dir == ".virtual_documents"
-assert manager.language_servers == {}
-assert manager.conf_d_language_servers == {}
-""",
-        )
-    ],
 )

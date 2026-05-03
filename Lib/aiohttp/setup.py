@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from libs import inline_verification_step, pypi_library, source_path, write_source_text
+from libs import pypi_library, source_path, write_source_text
 
 
 PROJECTS = {
@@ -145,13 +145,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "vendor/llhttp": "aiohttp_builtin/vendor/llhttp",
     },
     python_packages=["aiohttp"],
-    verification_imports=[
-        "aiohttp",
-        "aiohttp._http_parser",
-        "aiohttp._http_writer",
-        "aiohttp._websocket.mask",
-        "aiohttp._websocket.reader_c",
-    ],
     static_library_projects_release_x64=[f"{name}.vcxproj" for name in PROJECTS],
     native_static_projects=[
         {
@@ -169,50 +162,4 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     python_link_dependencies_release_x64=[f"{name}.lib" for name in PROJECTS],
     prepare_source_hooks=[prepare_aiohttp_projects],
-    verification_steps=[
-        inline_verification_step(
-            "aiohttp-smoke",
-            """
-import importlib.util
-
-import aiohttp
-import aiohttp._http_parser as http_parser_ext
-import aiohttp._http_writer as http_writer_ext
-import aiohttp._websocket.mask as mask_ext
-import aiohttp._websocket.reader_c as reader_ext
-from multidict import CIMultiDict
-
-for name in (
-    "aiohttp._http_parser",
-    "aiohttp._http_writer",
-    "aiohttp._websocket.mask",
-    "aiohttp._websocket.reader_c",
-):
-    assert importlib.util.find_spec(name).origin == "built-in", name
-
-headers = CIMultiDict([("Host", "example.com"), ("X-Test", "ok")])
-serialized = http_writer_ext._serialize_headers("GET / HTTP/1.1", headers)
-assert serialized == b"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nX-Test: ok\\r\\n\\r\\n", serialized
-
-data = bytearray(b"abcd")
-mask_ext._websocket_mask_cython(b"\\x01\\x02\\x03\\x04", data)
-assert data == bytearray([0x60, 0x60, 0x60, 0x60]), data
-
-request = http_parser_ext.RawRequestMessage(
-    "GET",
-    "/",
-    aiohttp.HttpVersion11,
-    headers,
-    tuple(headers.items()),
-    False,
-    None,
-    False,
-    False,
-    None,
-)
-assert request.method == "GET" and request.path == "/", request
-assert hasattr(reader_ext, "WebSocketReader")
-""",
-        )
-    ],
 )

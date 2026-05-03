@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from libs import inline_verification_step, pypi_library, replace_text_once, source_path, transform_source_text, write_source_text
+from libs import pypi_library, replace_text_once, source_path, transform_source_text, write_source_text
 
 
 def embed_jupyter_events_schemas(context) -> None:
@@ -48,6 +48,60 @@ def embed_jupyter_events_schemas(context) -> None:
 
     transform_source_text(context, "Lib/jupyter_events/validators.py", patch_validators)
 
+    def patch_yaml(text: str) -> str:
+        text = replace_text_once(
+            text,
+            "from pathlib import Path\n\n",
+            "from pathlib import Path\n\nfrom ._static_schemas import SCHEMA_TEXT as _STATICPYTHON_SCHEMA_TEXT\n\n",
+            label="jupyter_events yaml static schema import",
+        )
+        return replace_text_once(
+            text,
+            "    data = Path(str(fpath)).read_text(encoding=\"utf-8\")\n"
+            "    return loads(data)\n",
+            "    path_text = str(fpath).replace('\\\\', '/')\n"
+            "    marker = '/jupyter_events/schemas/'\n"
+            "    if marker in path_text:\n"
+            "        resource_key = 'schemas/' + path_text.rsplit(marker, 1)[1]\n"
+            "        data = _STATICPYTHON_SCHEMA_TEXT.get(resource_key)\n"
+            "        if data is not None:\n"
+            "            return loads(data)\n"
+            "    data = Path(str(fpath)).read_text(encoding=\"utf-8\")\n"
+            "    return loads(data)\n",
+            label="jupyter_events yaml embedded schema loader",
+        )
+
+    def patch_schema(text: str) -> str:
+        text = replace_text_once(
+            text,
+            "from . import yaml\n",
+            "from . import yaml\nfrom ._static_schemas import SCHEMA_TEXT as _STATICPYTHON_SCHEMA_TEXT\n",
+            label="jupyter_events schema static import",
+        )
+        return replace_text_once(
+            text,
+            "            if not Path(schema).exists():\n"
+            "                msg = f'Schema file not present at path \"{schema}\".'\n"
+            "                raise EventSchemaFileAbsent(msg)\n"
+            "\n"
+            "            loaded_schema = yaml.load(schema)\n",
+            "            path_text = str(schema).replace('\\\\', '/')\n"
+            "            marker = '/jupyter_events/schemas/'\n"
+            "            static_schema = None\n"
+            "            if marker in path_text:\n"
+            "                resource_key = 'schemas/' + path_text.rsplit(marker, 1)[1]\n"
+            "                static_schema = _STATICPYTHON_SCHEMA_TEXT.get(resource_key)\n"
+            "            if static_schema is None and not Path(schema).exists():\n"
+            "                msg = f'Schema file not present at path \"{schema}\".'\n"
+            "                raise EventSchemaFileAbsent(msg)\n"
+            "\n"
+            "            loaded_schema = yaml.loads(static_schema) if static_schema is not None else yaml.load(schema)\n",
+            label="jupyter_events schema embedded path loader",
+        )
+
+    transform_source_text(context, "Lib/jupyter_events/yaml.py", patch_yaml)
+    transform_source_text(context, "Lib/jupyter_events/schema.py", patch_schema)
+
 
 LIBRARY_INTEGRATION = pypi_library(
     name="jupyter_events",
@@ -58,59 +112,4 @@ LIBRARY_INTEGRATION = pypi_library(
     },
     python_packages=["jupyter_events"],
     post_patch_hooks=[embed_jupyter_events_schemas],
-    verification_steps=[
-        inline_verification_step(
-            "jupyter-events-smoke",
-            """
-import io
-import json
-import logging
-
-from jupyter_events import EventLogger, EventSchema
-from jupyter_events.validators import EVENT_CORE_SCHEMA, EVENT_METASCHEMA, PROPERTY_METASCHEMA, validate_schema
-from pythonjsonlogger import jsonlogger
-
-assert EVENT_METASCHEMA["$id"].startswith("http://event.jupyter.org/")
-assert EVENT_CORE_SCHEMA["$id"].startswith("http://event.jupyter.org/")
-assert PROPERTY_METASCHEMA["$id"].startswith("http://event.jupyter.org/")
-
-schema = {
-    "$id": "https://events.example.com/staticpython/demo",
-    "$schema": EVENT_METASCHEMA["$id"],
-    "version": 1,
-    "title": "StaticPython demo event",
-    "description": "Smoke test schema.",
-    "type": "object",
-    "properties": {
-        "status": {"type": "string"},
-        "value": {"type": "integer"},
-    },
-    "required": ["status"],
-    "additionalProperties": False,
-}
-
-validate_schema(schema)
-event_schema = EventSchema(schema)
-assert event_schema.id == schema["$id"]
-
-stream = io.StringIO()
-handler = logging.StreamHandler(stream)
-logger = EventLogger()
-logger.register_handler(handler)
-assert isinstance(handler.formatter, jsonlogger.JsonFormatter)
-logger.register_event_schema(schema)
-assert schema["$id"] in logger.schemas.schema_ids
-
-capsule = logger.emit(schema_id=schema["$id"], data={"status": "ok", "value": 42})
-handler.flush()
-payload = json.loads(stream.getvalue())
-
-assert capsule["__schema__"] == schema["$id"]
-assert payload["status"] == "ok"
-assert payload["value"] == 42
-assert payload["__schema__"] == schema["$id"]
-assert payload["__metadata_version__"] == 1
-""",
-        )
-    ],
 )

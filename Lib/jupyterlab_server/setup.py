@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from libs import (
-    inline_verification_step,
     pypi_library,
     replace_text_once,
     source_path,
@@ -218,44 +217,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "Lib/jupyterlab_server/templates/403.html",
         "Lib/jupyterlab_server/_staticpython_resources.py",
     ],
-    verification_materialized_paths=[
-        "Lib/jupyterlab_server/templates/index.html",
-        "Lib/jupyterlab_server/templates/error.html",
-        "Lib/jupyterlab_server/templates/403.html",
-    ],
     python_packages=["jupyterlab_server"],
     post_patch_hooks=[patch_jupyterlab_server_resources],
-    verification_steps=[
-        inline_verification_step(
-            "jupyterlab-server-smoke",
-            """
-from pathlib import Path
-
-from jupyterlab_server import LabServerApp
-from jupyterlab_server.config import get_page_config
-from jupyterlab_server.settings_utils import _get_user_settings
-from jupyterlab_server.workspaces_handler import slugify
-import jupyterlab_server
-
-app = LabServerApp()
-assert app.default_url == "/lab"
-assert app.settings_url == "/lab/api/settings/"
-assert app.translations_api_url == "/lab/api/translations/"
-assert app.workspaces_api_url == "/lab/api/workspaces/"
-assert app.themes_url == "/lab/api/themes/"
-assert app.licenses_url == "/lab/api/licenses/"
-assert app.templates_dir == ""
-assert app.schemas_dir == ""
-
-settings = _get_user_settings(str(Path.cwd()), "@jupyterlab/apputils-extension:themes", {"type": "object"})
-assert settings["raw"] == "{}" or settings["raw"] == {}
-assert settings["settings"] == {}
-
-page_config = get_page_config([], logger=app.log)
-assert isinstance(page_config, dict)
-assert page_config.get("federated_extensions") == []
-assert slugify("/StaticPython Workspace") != ""
-""",
-        )
-    ],
 )

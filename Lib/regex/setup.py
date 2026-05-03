@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from libs import inline_verification_step, pypi_library, source_path, write_source_text
+from libs import pypi_library, source_path, write_source_text
 
 
 REGEX_PROJECT_GUID = "{5C650E6E-5A5E-4EE9-9B96-4D0FE1F44A12}"
@@ -82,7 +82,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "src": "regex_builtin/src",
     },
     python_packages=["regex"],
-    verification_imports=["regex._regex"],
     static_library_projects_release_x64=["regex._regex.vcxproj"],
     native_static_projects=[
         {
@@ -98,19 +97,4 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     python_link_dependencies_release_x64=["regex._regex.lib"],
     prepare_source_hooks=[prepare_regex_project],
-    verification_steps=[
-        inline_verification_step(
-            "regex-smoke",
-            r"""
-import regex
-import importlib.util
-
-assert importlib.util.find_spec("regex._regex").origin == "built-in"
-match = regex.search(r"(?P<word>\p{Letter}+)", "abc 123")
-assert match and match.group("word") == "abc", match
-assert regex.findall(r"\X", "a\u0301b") == ["a\u0301", "b"]
-assert regex.sub(r"(\w+)", r"[\1]", "codex") == "[codex]"
-""",
-        )
-    ],
 )

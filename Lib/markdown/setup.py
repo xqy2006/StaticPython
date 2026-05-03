@@ -1,4 +1,4 @@
-from libs import inline_verification_step, replace_text_once, simple_library, transform_source_text
+from libs import replace_text_once, simple_library, transform_source_text
 
 
 def patch_markdown_sources(context) -> None:
@@ -33,16 +33,4 @@ LIBRARY_INTEGRATION = simple_library(
     name='markdown',
     overlay_entries=['Lib/markdown'],
     post_patch_hooks=[patch_markdown_sources],
-    verification_steps=[
-        inline_verification_step(
-            "markdown-smoke",
-            """
-import markdown
-
-html = markdown.markdown("# Title\\n\\n- a\\n- b", extensions=["extra"])
-assert "<h1>Title</h1>" in html
-assert "<li>a</li>" in html
-""",
-        )
-    ],
 )

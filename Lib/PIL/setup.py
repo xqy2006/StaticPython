@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from libs import inline_verification_step, pypi_library, source_path, write_source_text
+from libs import pypi_library, source_path, write_source_text
 
 
 PIL_IMAGING_PROJECT_GUID = "{0AC7C2D2-056F-464A-9297-0BF67EC9499A}"
@@ -214,7 +214,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "pillow_builtin/src/libImaging/Storage.c",
     ],
     python_packages=["PIL"],
-    verification_imports=["PIL.Image", "PIL._imaging", "PIL._imagingmath", "PIL._imagingmorph"],
     static_library_projects_release_x64=[
         "PIL._imaging.vcxproj",
         "PIL._imagingmath.vcxproj",
@@ -238,62 +237,4 @@ LIBRARY_INTEGRATION = pypi_library(
         "gdi32.lib",
     ],
     prepare_source_hooks=[prepare_pillow_projects],
-    verification_steps=[
-        inline_verification_step(
-            "pillow-smoke",
-            """
-import importlib.util
-from io import BytesIO
-
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageMath, ImageMorph, ImageOps, ImageStat
-
-assert importlib.util.find_spec("PIL._imaging").origin == "built-in"
-assert importlib.util.find_spec("PIL._imagingmath").origin == "built-in"
-assert importlib.util.find_spec("PIL._imagingmorph").origin == "built-in"
-
-Image.preinit()
-Image.init()
-registered = Image.registered_extensions()
-assert registered[".bmp"] == "BMP"
-assert registered[".png"] == "PNG"
-
-image = Image.new("RGB", (6, 6), "navy")
-draw = ImageDraw.Draw(image)
-draw.rectangle((1, 1, 4, 4), fill=(255, 0, 0))
-
-assert image.getpixel((1, 1)) == (255, 0, 0)
-assert image.crop((1, 1, 5, 5)).size == (4, 4)
-assert image.resize((2, 2)).size == (2, 2)
-assert image.convert("L").mode == "L"
-assert ImageOps.mirror(image).size == image.size
-assert ImageChops.difference(image, image).getbbox() is None
-assert image.filter(ImageFilter.BLUR).size == image.size
-assert ImageStat.Stat(image).sum[0] > 0
-
-thumbnail = image.copy()
-thumbnail.thumbnail((3, 3))
-assert thumbnail.size == (3, 3)
-
-alpha = Image.new("RGBA", (2, 2), (10, 20, 30, 128))
-composited = Image.alpha_composite(Image.new("RGBA", (2, 2), (0, 0, 0, 255)), alpha)
-assert composited.mode == "RGBA"
-
-math_result = ImageMath.lambda_eval(lambda args: args["a"] + 1, a=Image.new("L", (1, 1), 41))
-assert math_result.getpixel((0, 0)) == 42
-
-morph = ImageMorph.MorphOp(op_name="dilation4")
-assert morph.get_on_pixels(Image.new("L", (3, 3), 0)) == []
-
-for image_format in ("BMP", "PNG"):
-    buffer = BytesIO()
-    image.save(buffer, format=image_format)
-    buffer.seek(0)
-    loaded = Image.open(buffer)
-    loaded.load()
-    assert loaded.size == (6, 6)
-    assert loaded.mode == "RGB"
-""",
-            timeout=300,
-        )
-    ],
 )

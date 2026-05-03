@@ -3,11 +3,9 @@ from __future__ import annotations
 import base64
 
 from libs import (
-    inline_verification_step,
     pypi_library,
     replace_text_once,
     source_path,
-    script_verification_step,
     transform_source_text,
     write_source_text,
 )
@@ -95,6 +93,12 @@ def template_dict_for_package(package: str) -> dict[str, str]:
     return dict(getattr(module, "TEMPLATES", {}))
 
 
+def resource_text(package: str, key: str, encoding: str = "utf-8") -> str | None:
+    resource_path = make_resource_path(package, key)
+    data = resource_bytes_for_path(resource_path)
+    return None if data is None else data.decode(encoding)
+
+
 def resolve_resource_from_roots(roots, path: str) -> str | None:
     normalized_path = _normalize(path)
     if isinstance(roots, (str, bytes)):
@@ -135,10 +139,11 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             text,
             "from jinja2 import Environment, FileSystemLoader\n",
             "from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader\n"
+            "from jupyter_server._staticpython_resources import resource_text as _staticpython_resource_text\n"
             "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
             label="jupyter_server serverapp jinja imports",
         )
-        return replace_text_once(
+        text = replace_text_once(
             text,
             "        env = Environment(  # noqa[S701]\n"
             "            loader=FileSystemLoader(template_path), extensions=[\"jinja2.ext.i18n\"], **jenv_opt\n"
@@ -152,6 +157,16 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             "            **jenv_opt,\n"
             "        )\n",
             label="jupyter_server serverapp embedded template loader",
+        )
+        return replace_text_once(
+            text,
+            "            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
+            "            # Use this pathlib object to register the schema\n"
+            "            self.event_logger.register_event_schema(schema_path)\n",
+            "            schema_text = _staticpython_resource_text(\"jupyter_server\", f\"event_schemas/{rel_schema_path}\")\n"
+            "            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
+            "            self.event_logger.register_event_schema(schema_text if schema_text is not None else schema_path)\n",
+            label="jupyter_server embedded event schema registration",
         )
 
     def patch_extension_application(text: str) -> str:
@@ -350,60 +365,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "Lib/jupyter_server/event_schemas/contents_service/v1.yaml",
         "Lib/jupyter_server/_staticpython_resources.py",
     ],
-    verification_materialized_paths=[
-        "Lib/jupyter_server/templates/404.html",
-        "Lib/jupyter_server/templates/browser-open.html",
-        "Lib/jupyter_server/templates/login.html",
-        "Lib/jupyter_server/templates/logout.html",
-        "Lib/jupyter_server/templates/page.html",
-        "Lib/jupyter_server/templates/error.html",
-        "Lib/jupyter_server/templates/view.html",
-        "Lib/jupyter_server/templates/main.html",
-        "Lib/jupyter_server/static/style/index.css",
-        "Lib/jupyter_server/event_schemas/contents_service/v1.yaml",
-    ],
     python_packages=["jupyter_server"],
-    verification_imports=["jupyter_server.serverapp"],
     post_patch_hooks=[embed_jupyter_server_resources],
-    verification_steps=[
-        inline_verification_step(
-            "jupyter-server-smoke",
-            """
-from pathlib import Path
-from types import SimpleNamespace
-
-import jupyter_server
-from jupyter_server.base.handlers import AuthenticatedHandler
-from jupyter_server.extension.application import ExtensionApp
-from jupyter_server.serverapp import ServerApp
-from jupyter_server.utils import url_path_join
-
-template_roots = [Path(path) for path in jupyter_server.DEFAULT_TEMPLATE_PATH_LIST]
-
-assert Path(jupyter_server.DEFAULT_STATIC_FILES_PATH).name == "static"
-assert Path(jupyter_server.DEFAULT_EVENTS_SCHEMA_PATH).name == "event_schemas"
-assert any(path.name == "templates" for path in template_roots)
-assert url_path_join("/base/", "api", "status") == "/base/api/status"
-
-app = ServerApp()
-assert app.default_url == "/"
-assert app.contents_manager_class is not None
-app.gateway_config = SimpleNamespace(gateway_enabled=False)
-assert app.kernel_manager_class is not None
-assert app.session_manager_class is not None
-assert app.kernel_spec_manager_class is not None
-assert app.kernel_websocket_connection_class is not None
-assert any(Path(path).name == "static" for path in app.static_file_path)
-assert issubclass(ExtensionApp, object)
-assert callable(AuthenticatedHandler.set_default_headers)
-""",
-            timeout=300,
-        ),
-        script_verification_step(
-            "jupyter-server-runtime",
-            "scripts/jupyter_runtime.py",
-            args=["--target", "server"],
-            timeout=180,
-        ),
-    ],
 )

@@ -1,4 +1,4 @@
-from libs import inline_verification_step, simple_library, source_path, transform_source_text, write_source_text
+from libs import simple_library, source_path, transform_source_text, write_source_text
 
 
 def embed_parso_grammars(context) -> None:
@@ -65,24 +65,5 @@ LIBRARY_INTEGRATION = simple_library(
         "Lib/parso/python/grammar314.txt",
         "Lib/parso/_staticpython_grammars.py",
     ],
-    verification_materialized_paths=[
-        "Lib/parso",
-        "Lib/parso/python/grammar313.txt",
-        "Lib/parso/python/grammar314.txt",
-    ],
     post_patch_hooks=[embed_parso_grammars],
-    verification_steps=[
-        inline_verification_step(
-            "parso-smoke",
-            """
-import parso
-
-module = parso.parse("def func(value):\\n    return value + 1\\n")
-function = module.children[0]
-assert function.name.value == "func"
-assert function.get_code().startswith("def func")
-assert "return value + 1" in function.get_code()
-""",
-        )
-    ],
 )

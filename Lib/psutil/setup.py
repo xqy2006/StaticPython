@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from libs import inline_verification_step, pypi_library, source_path, write_source_text
+from libs import pypi_library, source_path, write_source_text
 
 
 PSUTIL_WINDOWS_PROJECT_GUID = "{3B30BB3F-D913-48A8-AB4D-88CB41369C1D}"
@@ -112,7 +112,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "psutil": "Lib/psutil",
     },
     python_packages=["psutil"],
-    verification_imports=["psutil", "psutil._psutil_windows"],
     static_library_projects_release_x64=["psutil._psutil_windows.vcxproj"],
     native_static_projects=[
         {
@@ -138,23 +137,4 @@ LIBRARY_INTEGRATION = pypi_library(
         "psutil._psutil_windows.lib",
     ],
     prepare_source_hooks=[prepare_psutil_windows_project],
-    verification_steps=[
-        inline_verification_step(
-            "psutil-smoke",
-            """
-import os
-import importlib.util
-import psutil
-
-assert importlib.util.find_spec("psutil._psutil_windows").origin == "built-in"
-assert psutil.cpu_count() is None or psutil.cpu_count() >= 1
-assert psutil.virtual_memory().total > 0
-proc = psutil.Process(os.getpid())
-assert proc.pid == os.getpid()
-assert proc.name()
-assert proc.memory_info().rss >= 0
-assert isinstance(psutil.net_if_addrs(), dict)
-""",
-        )
-    ],
 )

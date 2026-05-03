@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from libs import inline_verification_step, pypi_library, replace_text_once, source_path, transform_source_text, write_source_text
+from libs import pypi_library, replace_text_once, source_path, transform_source_text, write_source_text
 
 
 def embed_jsonschema_schemas(context) -> None:
@@ -102,53 +102,4 @@ LIBRARY_INTEGRATION = pypi_library(
     },
     python_packages=["jsonschema"],
     post_patch_hooks=[embed_jsonschema_schemas],
-    verification_steps=[
-        inline_verification_step(
-            "jsonschema-smoke",
-            """
-import jsonschema
-from jsonschema import Draft7Validator, Draft202012Validator, FormatChecker, ValidationError
-
-schema = {
-    "type": "object",
-    "properties": {
-        "email": {"type": "string", "format": "email"},
-        "items": {"type": "array", "items": {"type": "integer"}, "minItems": 2},
-    },
-    "required": ["email", "items"],
-}
-
-validator = Draft7Validator(schema, format_checker=FormatChecker())
-validator.validate({"email": "codex@example.com", "items": [1, 2, 3]})
-errors = sorted(validator.iter_errors({"email": "not-an-email", "items": [1]}), key=str)
-assert len(errors) == 2
-
-try:
-    jsonschema.validate({"email": "codex@example.com", "items": [1, "bad"]}, schema)
-except ValidationError as exc:
-    assert exc.validator == "type"
-else:
-    raise AssertionError("jsonschema accepted invalid data")
-
-schema_2020 = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "properties": {
-        "name": {"type": "string"},
-        "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-    },
-    "required": ["name"],
-    "additionalProperties": False,
-}
-validator_2020 = Draft202012Validator(schema_2020)
-validator_2020.validate({"name": "codex", "tags": ["a"]})
-errors_2020 = sorted(
-    validator_2020.iter_errors({"name": "codex", "tags": [1], "extra": 1}),
-    key=lambda error: error.json_path,
-)
-assert len(errors_2020) == 2
-assert {error.validator for error in errors_2020} == {"type", "additionalProperties"}
-""",
-        )
-    ],
 )

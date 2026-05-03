@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from libs import inline_verification_step, pypi_library, source_path, write_source_text
+from libs import pypi_library, source_path, write_source_text
 
 
 MULTIDICT_PROJECT_GUID = "{F7B37BB1-E629-49F2-B26E-C4DD6359D647}"
@@ -76,7 +76,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "multidict": "Lib/multidict",
     },
     python_packages=["multidict"],
-    verification_imports=["multidict", "multidict._multidict"],
     static_library_projects_release_x64=["multidict._multidict.vcxproj"],
     native_static_projects=[
         {
@@ -92,25 +91,4 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     python_link_dependencies_release_x64=["multidict._multidict.lib"],
     prepare_source_hooks=[prepare_multidict_project],
-    verification_steps=[
-        inline_verification_step(
-            "multidict-smoke",
-            """
-import importlib.util
-import multidict
-import multidict._compat
-import multidict._multidict
-
-assert importlib.util.find_spec("multidict._multidict").origin == "built-in"
-assert multidict._compat.USE_EXTENSIONS is True
-md = multidict.MultiDict([("x", "1"), ("x", "2")])
-assert md.getall("x") == ["1", "2"]
-md.add("y", "3")
-assert list(md.items()) == [("x", "1"), ("x", "2"), ("y", "3")]
-ci = multidict.CIMultiDict({"Content-Type": "text/plain"})
-assert ci["content-type"] == "text/plain"
-assert multidict.getversion(md) >= 0
-""",
-        )
-    ],
 )

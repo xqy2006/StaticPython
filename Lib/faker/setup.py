@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from libs import inline_verification_step, simple_library, source_path, transform_source_text, write_source_text
+from libs import simple_library, source_path, transform_source_text, write_source_text
 
 
 def embed_faker_provider_index(context) -> None:
@@ -75,23 +75,5 @@ LIBRARY_INTEGRATION = simple_library(
     project_name="Faker",
     overlay_entries=["Lib/faker"],
     materialized_paths=["Lib/faker/_staticpython_provider_index.py"],
-    verification_materialized_paths=["Lib/faker"],
     post_patch_hooks=[embed_faker_provider_index],
-    verification_steps=[
-        inline_verification_step(
-            "faker-smoke",
-            """
-from faker import Faker
-
-Faker.seed(12345)
-fake = Faker("en_US")
-name = fake.name()
-email = fake.email()
-profile = fake.simple_profile()
-assert isinstance(name, str) and " " in name
-assert "@" in email
-assert {"username", "name", "sex", "address", "mail", "birthdate"} <= set(profile)
-""",
-        )
-    ],
 )

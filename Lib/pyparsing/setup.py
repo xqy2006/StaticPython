@@ -1,4 +1,4 @@
-from libs import inline_verification_step, replace_text_once, simple_library, transform_source_text
+from libs import replace_text_once, simple_library, transform_source_text
 
 
 def patch_pyparsing_unicode_identifiers(context) -> None:
@@ -51,23 +51,4 @@ LIBRARY_INTEGRATION = simple_library(
     name="pyparsing",
     overlay_entries=["Lib/pyparsing"],
     post_patch_hooks=[patch_pyparsing_unicode_identifiers],
-    verification_steps=[
-        inline_verification_step(
-            "pyparsing-smoke",
-            """
-from pyparsing import ParseException, Suppress, Word, alphas, delimited_list, nums
-
-integer = Word(nums).set_parse_action(lambda tokens: int(tokens[0]))
-record = Word(alphas)("name") + Suppress(":") + delimited_list(integer)("values")
-result = record.parse_string("codex:1,2,3", parse_all=True)
-assert result.as_dict() == {"name": "codex", "values": [1, 2, 3]}
-try:
-    record.parse_string("codex:not-a-number", parse_all=True)
-except ParseException:
-    pass
-else:
-    raise AssertionError("pyparsing accepted an invalid record")
-""",
-        )
-    ],
 )

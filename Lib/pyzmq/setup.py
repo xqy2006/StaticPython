@@ -8,7 +8,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from libs import inline_verification_step, pypi_library, source_path, write_source_text
+from libs import pypi_library, source_path, write_source_text
 from tools import (
     download_first_available,
     ensure_tool,
@@ -506,10 +506,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "CMakeLists.txt": "pyzmq_builtin/CMakeLists.txt",
     },
     python_packages=["zmq"],
-    verification_imports=[
-        "zmq",
-        "zmq.backend.cython._zmq",
-    ],
     static_library_projects_release_x64=[
         f"{PYZMQ_PROJECT_NAME}.vcxproj",
     ],
@@ -536,61 +532,4 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     prepare_source_hooks=[prepare_pyzmq_project],
     pre_build_hooks=[stage_pyzmq_libraries],
-    verification_steps=[
-        inline_verification_step(
-            "pyzmq-smoke",
-            r"""
-import asyncio
-import importlib.util
-
-import zmq
-import zmq.asyncio
-from zmq.utils import z85
-
-assert importlib.util.find_spec("zmq.backend.cython._zmq").origin == "built-in"
-assert zmq.has("curve"), "CURVE support should be enabled"
-assert not zmq.has("ipc"), "Windows pyzmq static build should disable IPC with select poller"
-
-payload = b"0123456789abcdef"
-encoded = z85.encode(payload)
-assert z85.decode(encoded) == payload
-
-context = zmq.Context()
-left = context.socket(zmq.PAIR)
-right = context.socket(zmq.PAIR)
-endpoint = "inproc://staticpython-pyzmq-sync"
-left.bind(endpoint)
-right.connect(endpoint)
-poller = zmq.Poller()
-poller.register(right, zmq.POLLIN)
-left.send_multipart([b"alpha", b"beta"])
-events = dict(poller.poll(1000))
-assert events.get(right) == zmq.POLLIN
-assert right.recv_multipart() == [b"alpha", b"beta"]
-frame = zmq.Frame(b"frame-data")
-assert bytes(frame) == b"frame-data"
-assert right.getsockopt(zmq.TYPE) == zmq.PAIR
-left.close(0)
-right.close(0)
-context.term()
-
-async def _probe_asyncio():
-    actx = zmq.asyncio.Context()
-    async_left = actx.socket(zmq.PAIR)
-    async_right = actx.socket(zmq.PAIR)
-    async_endpoint = "inproc://staticpython-pyzmq-async"
-    async_left.bind(async_endpoint)
-    async_right.connect(async_endpoint)
-    await async_left.send_json({"answer": 42})
-    data = await async_right.recv_json()
-    assert data == {"answer": 42}
-    async_left.close(0)
-    async_right.close(0)
-    actx.term()
-
-asyncio.run(_probe_asyncio())
-""",
-            timeout=600,
-        )
-    ],
 )

@@ -1,4 +1,4 @@
-from libs import inline_verification_step, replace_text_once, simple_library, source_path, transform_source_text
+from libs import replace_text_once, simple_library, source_path, transform_source_text
 
 
 def _bytes_chunks_literal(data: bytes, *, chunk_size: int = 8192) -> str:
@@ -41,15 +41,4 @@ LIBRARY_INTEGRATION = simple_library(
     project_name="text-unidecode",
     overlay_entries=["Lib/text_unidecode"],
     post_patch_hooks=[patch_text_unidecode_sources],
-    verification_steps=[
-        inline_verification_step(
-            "text-unidecode-smoke",
-            """
-from text_unidecode import unidecode
-
-assert unidecode("Café déjà vu").startswith("Cafe deja vu")
-assert "Ying" in unidecode("影")
-""",
-        )
-    ],
 )

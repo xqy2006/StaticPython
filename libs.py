@@ -76,17 +76,14 @@ class LibraryIntegration:
     auto_resolve_dependencies: bool = False
     overlay_entries: list[str] = field(default_factory=list)
     materialized_paths: list[str] = field(default_factory=list)
-    verification_materialized_paths: list[str] = field(default_factory=list)
     cleanup_paths: list[str] = field(default_factory=list)
     python_packages: list[str] = field(default_factory=list)
-    verification_imports: list[str] = field(default_factory=list)
     static_library_projects_release_x64: list[str] = field(default_factory=list)
     native_static_projects: list[dict] = field(default_factory=list)
     builtin_module_registrations: list[dict] = field(default_factory=list)
     staged_static_libraries_release_x64: list[dict] = field(default_factory=list)
     python_link_dependencies_release_x64: list[str] = field(default_factory=list)
     python_link_wholearchive_release_x64: list[str] = field(default_factory=list)
-    verification_steps: list[dict] = field(default_factory=list)
     prepare_source_hooks: list[Hook] = field(default_factory=list)
     pre_patch_hooks: list[Hook] = field(default_factory=list)
     post_patch_hooks: list[Hook] = field(default_factory=list)
@@ -696,8 +693,6 @@ def pypi_library(
     source_mapping: dict[str, str] | None = None,
     overlay_entries: list[str] | None = None,
     python_packages: list[str] | None = None,
-    verification_imports: list[str] | None = None,
-    verification_steps: list[dict] | None = None,
     static_library_projects_release_x64: list[str] | None = None,
     native_static_projects: list[dict] | None = None,
     builtin_module_registrations: list[dict] | None = None,
@@ -705,7 +700,6 @@ def pypi_library(
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
     materialized_paths: list[str] | None = None,
-    verification_materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
     pre_patch_hooks: list[Hook] | None = None,
@@ -734,21 +728,14 @@ def pypi_library(
             normalized_overlay_entries,
             materialized_paths,
         ),
-        verification_materialized_paths=_build_materialized_paths(
-            resolved_mapping,
-            normalized_overlay_entries,
-            verification_materialized_paths if verification_materialized_paths is not None else materialized_paths,
-        ),
         cleanup_paths=_build_cleanup_paths(cleanup_paths),
         python_packages=list(python_packages or [name]),
-        verification_imports=list(verification_imports or []),
         static_library_projects_release_x64=list(static_library_projects_release_x64 or []),
         native_static_projects=list(native_static_projects or []),
         builtin_module_registrations=list(builtin_module_registrations or []),
         staged_static_libraries_release_x64=list(staged_static_libraries_release_x64 or []),
         python_link_dependencies_release_x64=list(python_link_dependencies_release_x64 or []),
         python_link_wholearchive_release_x64=list(python_link_wholearchive_release_x64 or []),
-        verification_steps=list(verification_steps or []),
         prepare_source_hooks=[],
         pre_patch_hooks=list(pre_patch_hooks or []),
         post_patch_hooks=list(post_patch_hooks or []),
@@ -774,8 +761,6 @@ def github_library(
     source_mapping: dict[str, str] | None = None,
     overlay_entries: list[str] | None = None,
     python_packages: list[str] | None = None,
-    verification_imports: list[str] | None = None,
-    verification_steps: list[dict] | None = None,
     static_library_projects_release_x64: list[str] | None = None,
     native_static_projects: list[dict] | None = None,
     builtin_module_registrations: list[dict] | None = None,
@@ -783,7 +768,6 @@ def github_library(
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
     materialized_paths: list[str] | None = None,
-    verification_materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
     pre_patch_hooks: list[Hook] | None = None,
@@ -812,21 +796,14 @@ def github_library(
             normalized_overlay_entries,
             materialized_paths,
         ),
-        verification_materialized_paths=_build_materialized_paths(
-            resolved_mapping,
-            normalized_overlay_entries,
-            verification_materialized_paths if verification_materialized_paths is not None else materialized_paths,
-        ),
         cleanup_paths=_build_cleanup_paths(cleanup_paths),
         python_packages=list(python_packages or [name]),
-        verification_imports=list(verification_imports or []),
         static_library_projects_release_x64=list(static_library_projects_release_x64 or []),
         native_static_projects=list(native_static_projects or []),
         builtin_module_registrations=list(builtin_module_registrations or []),
         staged_static_libraries_release_x64=list(staged_static_libraries_release_x64 or []),
         python_link_dependencies_release_x64=list(python_link_dependencies_release_x64 or []),
         python_link_wholearchive_release_x64=list(python_link_wholearchive_release_x64 or []),
-        verification_steps=list(verification_steps or []),
         prepare_source_hooks=[
             _build_github_source_hook(repo, ref, ref_kind, resolved_mapping, archive_url_template),
             *(prepare_source_hooks or []),
@@ -853,16 +830,14 @@ def simple_library(
     name: str,
     *,
     project_name: str | None = None,
+    release_version: str | None = None,
     dependencies: list[str] | None = None,
     auto_resolve_dependencies: bool | None = None,
     source_entries: list[str] | None = None,
     source_mapping: dict[str, str] | None = None,
     overlay_entries: list[str] | None = None,
     python_packages: list[str] | None = None,
-    verification_imports: list[str] | None = None,
-    verification_steps: list[dict] | None = None,
     materialized_paths: list[str] | None = None,
-    verification_materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
     pre_patch_hooks: list[Hook] | None = None,
@@ -887,10 +862,7 @@ def simple_library(
         "source_mapping": resolved_mapping,
         "overlay_entries": passthrough_overlay_entries,
         "python_packages": python_packages,
-        "verification_imports": verification_imports,
-        "verification_steps": verification_steps,
         "materialized_paths": materialized_paths,
-        "verification_materialized_paths": verification_materialized_paths,
         "cleanup_paths": cleanup_paths,
         "prepare_source_hooks": prepare_source_hooks,
         "pre_patch_hooks": pre_patch_hooks,
@@ -899,6 +871,7 @@ def simple_library(
     }
     if source_provider == "pypi":
         common_kwargs["auto_resolve_dependencies"] = True if auto_resolve_dependencies is None else auto_resolve_dependencies
+        common_kwargs["release_version"] = release_version
         return pypi_library(project_name=resolved_project_name, **common_kwargs)
     if source_provider == "github":
         if not github_repo:
@@ -928,6 +901,52 @@ def _normalize_integration(path: Path, raw: object) -> LibraryIntegration:
     if isinstance(raw, dict):
         return LibraryIntegration(**raw)
     raise RuntimeError(f"{path} must define LIBRARY_INTEGRATION as LibraryIntegration or dict")
+
+
+def _catalog_entries(library_catalog: object | None) -> list[dict]:
+    if library_catalog is None:
+        return []
+    if isinstance(library_catalog, dict):
+        entries = library_catalog.get("libraries", [])
+    else:
+        entries = library_catalog
+    if not isinstance(entries, list):
+        raise RuntimeError("library catalog must be a list or an object with a 'libraries' list")
+    normalized_entries: list[dict] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"library catalog entry #{index + 1} must be an object")
+        normalized_entries.append(dict(entry))
+    return normalized_entries
+
+
+def _integration_from_catalog_entry(entry: dict) -> LibraryIntegration:
+    allowed_keys = {
+        "name",
+        "project_name",
+        "release_version",
+        "dependencies",
+        "auto_resolve_dependencies",
+        "source_entries",
+        "source_mapping",
+        "overlay_entries",
+        "python_packages",
+        "materialized_paths",
+        "source_provider",
+        "github_repo",
+        "github_ref",
+        "github_ref_kind",
+        "description",
+        "notes",
+    }
+    unknown_keys = sorted(set(entry) - allowed_keys)
+    if unknown_keys:
+        name = entry.get("name", "<unnamed>")
+        raise RuntimeError(f"library catalog entry {name!r} has unsupported keys: {', '.join(unknown_keys)}")
+    kwargs = {key: value for key, value in entry.items() if key not in {"description", "notes"}}
+    if "name" not in kwargs:
+        raise RuntimeError("library catalog entry is missing required key 'name'")
+    return simple_library(**kwargs)
 
 
 def _load_pypi_release_payload(project_name: str, release_version: str | None) -> dict:
@@ -1169,8 +1188,13 @@ def load_integrations(
     *,
     target_version: Version | None = None,
     version_overrides: dict[str, str] | None = None,
+    library_catalog: object | None = None,
 ) -> list[LibraryIntegration]:
-    integrations: list[LibraryIntegration] = []
+    by_name: dict[str, LibraryIntegration] = {}
+    for entry in _catalog_entries(library_catalog):
+        integration = _integration_from_catalog_entry(entry)
+        by_name[integration.name.casefold()] = integration
+
     for library_dir in sorted((path for path in library_root.iterdir() if path.is_dir()), key=lambda item: item.name.casefold()):
         path = library_dir / "setup.py"
         if not path.exists():
@@ -1183,7 +1207,9 @@ def load_integrations(
         raw = getattr(module, "LIBRARY_INTEGRATION", None)
         if raw is None:
             raise RuntimeError(f"{path} does not define LIBRARY_INTEGRATION")
-        integrations.append(_normalize_integration(path, raw))
+        integration = _normalize_integration(path, raw)
+        by_name[integration.name.casefold()] = integration
+    integrations = list(by_name.values())
     _apply_version_overrides(integrations, version_overrides)
     return _resolve_selected_integrations(
         integrations,
@@ -1198,10 +1224,6 @@ def collect_overlay_entries(integrations: list[LibraryIntegration]) -> list[str]
 
 def collect_python_packages(integrations: list[LibraryIntegration]) -> list[str]:
     return _unique([package for integration in integrations for package in integration.python_packages])
-
-
-def collect_verification_imports(integrations: list[LibraryIntegration]) -> list[str]:
-    return _unique([name for integration in integrations for name in integration.verification_imports])
 
 
 def collect_static_library_projects(integrations: list[LibraryIntegration]) -> list[str]:
@@ -1259,19 +1281,6 @@ def collect_python_link_wholearchive(integrations: list[LibraryIntegration]) -> 
     return _unique(
         [library for integration in integrations for library in integration.python_link_wholearchive_release_x64]
     )
-
-
-def collect_verification_steps(integrations: list[LibraryIntegration]) -> list[dict]:
-    steps: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for integration in integrations:
-        for step in integration.verification_steps:
-            key = (step["name"], step["kind"])
-            if key in seen:
-                continue
-            seen.add(key)
-            steps.append(step)
-    return steps
 
 
 def _run_hooks(integrations: list[LibraryIntegration], context: LibraryHookContext, attr: str, label: str) -> None:

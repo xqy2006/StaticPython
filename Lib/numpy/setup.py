@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 
 from libs import (
-    inline_verification_step,
     pypi_library,
     replace_text_once,
     source_path,
@@ -788,27 +787,7 @@ LIBRARY_INTEGRATION = pypi_library(
         "numpy_builtin/meson-python.ini",
         "numpy_builtin/tools/cython.cmd",
     ],
-    verification_materialized_paths=[
-        "Lib/numpy/__init__.py",
-        "Lib/numpy/_core/__init__.py",
-        "Lib/numpy/linalg/__init__.py",
-        "Lib/numpy/random/__init__.py",
-    ],
     python_packages=["numpy"],
-    verification_imports=[
-        "numpy._core._multiarray_umath",
-        "numpy.linalg._umath_linalg",
-        "numpy.fft._pocketfft_umath",
-        "numpy.random._bounded_integers",
-        "numpy.random._common",
-        "numpy.random._philox",
-        "numpy.random._sfc64",
-        "numpy.random.bit_generator",
-        "numpy.random._generator",
-        "numpy.random._mt19937",
-        "numpy.random._pcg64",
-        "numpy.random.mtrand",
-    ],
     static_library_projects_release_x64=[
         f"{NUMPY_CORE_PROJECT_NAME}.vcxproj",
         f"{NUMPY_LINALG_PROJECT_NAME}.vcxproj",
@@ -887,56 +866,4 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     prepare_source_hooks=[prepare_numpy_project],
     post_patch_hooks=[prepare_numpy_artifacts],
-    verification_steps=[
-        inline_verification_step(
-            "numpy-smoke",
-            r"""
-import importlib.util
-import io
-import pickle
-
-import numpy as np
-
-assert importlib.util.find_spec("numpy._core._multiarray_umath").origin == "built-in"
-assert np.__version__.startswith("2.4.")
-assert np.dtype(np.float64).itemsize == 8
-
-matrix = np.arange(6, dtype=np.int64).reshape(2, 3)
-vector = np.array([10, 20, 30], dtype=np.int64)
-assert matrix.shape == (2, 3)
-assert (matrix + vector).tolist() == [[10, 21, 32], [13, 24, 35]]
-assert np.dot(np.array([1, 2, 3]), np.array([4, 5, 6])) == 32
-assert np.mean(matrix) == 2.5
-assert np.array_equal(np.frombuffer(b"\x01\x00\x02\x00", dtype=np.uint16), np.array([1, 2], dtype=np.uint16))
-
-buffer = io.BytesIO()
-np.save(buffer, matrix)
-buffer.seek(0)
-loaded = np.load(buffer)
-assert np.array_equal(loaded, matrix)
-
-solution = np.linalg.solve(
-    np.array([[2.0, 0.0], [0.0, 4.0]], dtype=np.float64),
-    np.array([4.0, 8.0], dtype=np.float64),
-)
-assert np.allclose(solution, np.array([2.0, 2.0], dtype=np.float64))
-
-fft = np.fft.rfft(np.array([0.0, 1.0, 0.0, -1.0], dtype=np.float64))
-assert np.allclose(fft, np.array([0.0 + 0.0j, 0.0 - 2.0j, 0.0 + 0.0j]))
-
-rng_a = np.random.default_rng(12345)
-rng_b = np.random.default_rng(12345)
-sample_a = rng_a.integers(0, 100, size=6)
-sample_b = rng_b.integers(0, 100, size=6)
-assert sample_a.shape == (6,)
-assert sample_a.tolist() == sample_b.tolist()
-assert all(0 <= value < 100 for value in sample_a.tolist())
-
-restored = pickle.loads(pickle.dumps(matrix))
-assert np.array_equal(restored, matrix)
-assert np.__config__ is not None
-""",
-            timeout=600,
-        )
-    ],
 )

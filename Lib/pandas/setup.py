@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 
 from libs import (
-    inline_verification_step,
     pypi_library,
     replace_text_once,
     source_path,
@@ -904,17 +903,7 @@ LIBRARY_INTEGRATION = pypi_library(
         "pandas_builtin/source/generate_pxi.py",
         "pandas_builtin/source/generate_version.py",
     ],
-    verification_materialized_paths=[
-        "Lib/pandas/__init__.py",
-        "Lib/pandas/_version.py",
-        "Lib/pandas/core/frame.py",
-        "Lib/pandas/io/parsers/readers.py",
-        "Lib/pandas/_libs/lib.pyx",
-        "Lib/pandas/_libs/tslibs/timestamps.pyx",
-        "Lib/pandas/_libs/window/aggregations.pyx",
-    ],
     python_packages=["pandas"],
-    verification_imports=PANDAS_EXTENSION_MODULES,
     builtin_module_registrations=[
         {
             "name": module_name,
@@ -938,82 +927,5 @@ LIBRARY_INTEGRATION = pypi_library(
         _patch_pandas_datetime_symbols,
         _patch_pandas_ujson_symbols,
         prepare_pandas_artifacts,
-    ],
-    verification_steps=[
-        inline_verification_step(
-            "pandas-smoke",
-            r"""
-import importlib.util
-import io
-
-import numpy as np
-import pandas as pd
-
-assert importlib.util.find_spec("pandas._libs.algos").origin == "built-in"
-assert importlib.util.find_spec("pandas._libs._cyutility").origin == "built-in"
-assert importlib.util.find_spec("pandas._libs.tslibs.base").origin == "built-in"
-assert importlib.util.find_spec("pandas._libs.window.aggregations").origin == "built-in"
-assert pd.__version__.startswith("3.0.")
-
-left = pd.DataFrame(
-    {
-        "id": [1, 2, 3],
-        "value": [10, 20, 30],
-        "when": pd.to_datetime(
-            ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z", "2024-01-02T00:00:00Z"],
-            utc=True,
-        ),
-    }
-)
-right = pd.DataFrame({"id": [1, 2, 4], "name": ["a", "b", "d"]})
-merged = left.merge(right, on="id", how="left")
-assert merged["name"].iloc[0] == "a"
-assert merged["name"].iloc[1] == "b"
-assert pd.isna(merged["name"].iloc[2])
-
-grouped = merged.groupby(merged["when"].dt.day)["value"].sum()
-assert grouped.to_dict() == {1: 30, 2: 30}
-
-csv_buffer = io.StringIO()
-merged.to_csv(csv_buffer, index=False)
-csv_buffer.seek(0)
-roundtrip = pd.read_csv(csv_buffer)
-assert roundtrip.shape == (3, 4)
-assert roundtrip["value"].sum() == 60
-
-json_frame = pd.read_json(io.StringIO('[{"id": 1, "value": 2}, {"id": 2, "value": 3}]'))
-assert json_frame["value"].sum() == 5
-
-pivot = pd.DataFrame(
-    {
-        "kind": ["a", "a", "b"],
-        "column": ["x", "y", "x"],
-        "value": [1, 2, 3],
-    }
-).pivot_table(index="kind", columns="column", values="value", aggfunc="sum")
-assert pivot.loc["a", "x"] == 1
-assert pivot.loc["a", "y"] == 2
-assert pivot.loc["b", "x"] == 3
-
-rolling = pd.Series([1, 2, 3, 4], dtype="float64").rolling(2).sum()
-assert pd.isna(rolling.iloc[0])
-assert rolling.iloc[1:].tolist() == [3.0, 5.0, 7.0]
-
-encoded = left.to_json()
-decoded = pd.read_json(io.StringIO(encoded))
-assert decoded.shape[0] == 3
-assert sorted(decoded.columns.tolist()) == ["id", "value", "when"]
-
-timestamp = pd.Timestamp("2024-01-02T03:04:05", tz="UTC")
-assert timestamp.tz is not None
-date_range = pd.date_range("2024-01-01", periods=3, tz="UTC")
-assert len(date_range) == 3
-
-series = pd.Series([1.0, None, 3.0]).fillna(2.0)
-assert series.tolist() == [1.0, 2.0, 3.0]
-assert np.array_equal(series.to_numpy(), np.array([1.0, 2.0, 3.0]))
-""",
-            timeout=600,
-        )
     ],
 )

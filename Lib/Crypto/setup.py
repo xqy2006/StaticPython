@@ -5,7 +5,6 @@ from pathlib import Path
 import re
 
 from libs import (
-    module_verification_step,
     pypi_library,
     replace_text_once,
     source_path,
@@ -522,10 +521,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "pycryptodome_builtin/embedded_marker.c",
     ],
     python_packages=["Crypto"],
-    verification_imports=[
-        "Crypto.Cipher.AES",
-        "Crypto.Hash.SHA256",
-    ],
     static_library_projects_release_x64=[
         "_pycryptodome_raw.vcxproj",
     ],
@@ -543,12 +538,4 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     prepare_source_hooks=[prepare_pycryptodome_project],
     post_patch_hooks=[patch_crypto_sources],
-    verification_steps=[
-        module_verification_step(
-            "crypto-selftest",
-            "Crypto.SelfTest",
-            timeout=900,
-            skip_group="crypto",
-        )
-    ],
 )

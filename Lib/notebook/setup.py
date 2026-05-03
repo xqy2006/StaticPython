@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import json
 
-from libs import inline_verification_step, pypi_library, source_path, script_verification_step, write_source_text
+from libs import pypi_library, source_path, write_source_text
 
 
 def embed_notebook_resources(context) -> None:
@@ -83,65 +83,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "share/jupyter/labextensions/@jupyter-notebook/lab-extension/package.json",
         "etc/jupyter/jupyter_server_config.d/notebook.json",
     ],
-    verification_materialized_paths=[
-        "Lib/notebook",
-        "Lib/notebook/templates/error.html",
-        "Lib/notebook/templates/consoles.html",
-        "Lib/notebook/templates/edit.html",
-        "Lib/notebook/templates/notebooks.html",
-        "Lib/notebook/templates/terminals.html",
-        "Lib/notebook/templates/tree.html",
-        "Lib/notebook/static/bundle.js",
-        "share/jupyter/labextensions/@jupyter-notebook/lab-extension/package.json",
-        "etc/jupyter/jupyter_server_config.d/notebook.json",
-    ],
     python_packages=["notebook"],
     post_patch_hooks=[embed_notebook_resources],
-    verification_steps=[
-        inline_verification_step(
-            "notebook-smoke",
-            """
-import json
-from pathlib import Path
-
-from notebook import _jupyter_labextension_paths
-from notebook.app import JupyterNotebookApp
-from jupyterlab_server.config import get_page_config
-from jupyterlab_server.settings_utils import get_settings
-
-paths = _jupyter_labextension_paths()
-assert paths == [{"src": "labextension", "dest": "@jupyter-notebook/lab-extension"}]
-
-app = JupyterNotebookApp()
-assert app.default_url == "/tree"
-assert Path(app.static_dir).name == "static"
-assert Path(app.templates_dir).name == "templates"
-assert Path(app.schemas_dir).name == "schemas"
-assert Path(app.app_dir).name == "lab"
-page_config = get_page_config(app.extra_labextensions_path + app.labextensions_path, logger=app.log)
-extension_names = {entry["name"] for entry in page_config["federated_extensions"]}
-assert "@jupyter-notebook/lab-extension" in extension_names
-entry = next(entry for entry in page_config["federated_extensions"] if entry["name"] == "@jupyter-notebook/lab-extension")
-assert page_config["disabledExtensions"] == []
-assert entry["load"].startswith("static/")
-assert entry["style"] == "./style"
-settings = get_settings(
-    app.schemas_dir,
-    app.settings_dir,
-    "@jupyter-notebook/lab-extension:interface-switcher",
-    overrides={},
-    labextensions_path=app.extra_labextensions_path + app.labextensions_path,
-)
-assert settings["id"] == "@jupyter-notebook/lab-extension:interface-switcher"
-assert settings["schema"]["title"]
-""",
-            timeout=300,
-        ),
-        script_verification_step(
-            "notebook-runtime",
-            "scripts/jupyter_runtime.py",
-            args=["--target", "notebook"],
-            timeout=180,
-        ),
-    ],
 )

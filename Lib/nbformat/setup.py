@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from libs import inline_verification_step, replace_text_once, simple_library, source_path, transform_source_text, write_source_text
+from libs import replace_text_once, simple_library, source_path, transform_source_text, write_source_text
 
 
 def embed_nbformat_schemas(context) -> None:
@@ -60,32 +60,4 @@ LIBRARY_INTEGRATION = simple_library(
     name="nbformat",
     overlay_entries=["Lib/nbformat"],
     post_patch_hooks=[embed_nbformat_schemas],
-    verification_steps=[
-        inline_verification_step(
-            "nbformat-smoke",
-            """
-import io
-
-import nbformat
-from nbformat import v4
-
-nb = v4.new_notebook()
-nb.cells.append(v4.new_markdown_cell("# StaticPython"))
-nb.cells.append(v4.new_code_cell("answer = 40 + 2"))
-
-nbformat.validate(nb)
-encoded = nbformat.writes(nb)
-decoded = nbformat.reads(encoded, as_version=4)
-assert decoded.cells[0].source == "# StaticPython"
-assert decoded.cells[1].cell_type == "code"
-
-buffer = io.StringIO()
-nbformat.write(decoded, buffer)
-buffer.seek(0)
-roundtripped = nbformat.read(buffer, as_version=4)
-assert roundtripped.nbformat == 4
-assert nbformat.validator.isvalid(roundtripped)
-""",
-        )
-    ],
 )

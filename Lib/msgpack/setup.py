@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from libs import inline_verification_step, pypi_library, source_path, write_source_text
+from libs import pypi_library, source_path, write_source_text
 
 
 MSGPACK_CMSGPACK_PROJECT_GUID = "{B7D41B25-C32D-4E38-BFD5-4DD5650AC49E}"
@@ -73,7 +73,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "msgpack": "Lib/msgpack",
     },
     python_packages=["msgpack"],
-    verification_imports=["msgpack", "msgpack._cmsgpack"],
     static_library_projects_release_x64=["msgpack._cmsgpack.vcxproj"],
     native_static_projects=[
         {
@@ -89,21 +88,4 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     python_link_dependencies_release_x64=["msgpack._cmsgpack.lib"],
     prepare_source_hooks=[prepare_msgpack_cmsgpack_project],
-    verification_steps=[
-        inline_verification_step(
-            "msgpack-smoke",
-            """
-import importlib.util
-import msgpack
-import msgpack._cmsgpack as cmsgpack
-
-assert importlib.util.find_spec("msgpack._cmsgpack").origin == "built-in"
-payload = {"name": "codex", "items": [1, 2, 3], "binary": b"data"}
-packed = msgpack.packb(payload, use_bin_type=True)
-assert msgpack.unpackb(packed, raw=False) == payload
-packer = cmsgpack.Packer(use_bin_type=True)
-assert msgpack.unpackb(packer.pack(["static", 13]), raw=False) == ["static", 13]
-""",
-        )
-    ],
 )

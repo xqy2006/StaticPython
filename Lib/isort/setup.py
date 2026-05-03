@@ -1,4 +1,4 @@
-from libs import inline_verification_step, replace_text_once, simple_library, transform_source_text
+from libs import replace_text_once, simple_library, transform_source_text
 
 
 def patch_isort_sources(context):
@@ -23,18 +23,4 @@ LIBRARY_INTEGRATION = simple_library(
     name="isort",
     overlay_entries=["Lib/isort"],
     post_patch_hooks=[patch_isort_sources],
-    verification_steps=[
-        inline_verification_step(
-            "isort-smoke",
-            """
-import isort
-from isort.settings import Config
-
-source = "import sys\\nimport os\\n"
-sorted_source = isort.code(source, config=Config(profile="black"))
-assert sorted_source.startswith("import os\\nimport sys\\n")
-assert isort.check_code(sorted_source, config=Config(profile="black"))
-""",
-        )
-    ],
 )

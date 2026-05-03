@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
@@ -60,6 +62,22 @@ FROZEN_DATA_SOURCE_PREFIX = "staticpython_frozen_data_"
 FROZEN_DATA_SHARD_BYTES = 2 * 1024 * 1024
 BASELINE_PYTHON_PROJECT_REFERENCES = {"pythoncore.vcxproj"}
 PROFILE_METADATA_RELATIVE_PATH = Path("PCbuild") / "staticpython-profile.json"
+RUNTIME_RESOURCE_MODULE_BASENAME = "_staticpython_runtime_resources"
+RUNTIME_RESOURCE_MODULE_RELATIVE_PATH = Path("Lib") / f"{RUNTIME_RESOURCE_MODULE_BASENAME}.py"
+RUNTIME_RESOURCE_SHARD_TEXT_BYTES = 4 * 1024 * 1024
+RUNTIME_RESOURCE_PYTHON_SUFFIXES = {".py", ".pyc", ".pyo"}
+RUNTIME_RESOURCE_SKIP_DIR_NAMES = {
+    "__pycache__",
+    ".git",
+    ".github",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+    "node_modules",
+}
 
 ET.register_namespace("", MSBUILD_NS)
 
@@ -73,7 +91,15 @@ def load_manifest() -> dict:
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+    config = json.loads(path.read_text(encoding="utf-8"))
+    if path.resolve() == CONFIG_PATH.resolve() or not CONFIG_PATH.exists():
+        return config
+
+    base_config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    for key in ("core_library_catalog", "third_party_library_catalog", "verification"):
+        if key in base_config and key not in config:
+            config[key] = base_config[key]
+    return config
 
 
 def profile_metadata_path(source_root: Path) -> Path:
@@ -129,6 +155,26 @@ def resolve_profile(config: dict, profile_name: str | None) -> tuple[str, dict]:
     if not isinstance(profile, dict):
         raise RuntimeError(f"profile {selected_name!r} must be an object")
     return selected_name, profile
+
+
+def profile_library_catalog(config: dict, profile: dict, key: str) -> object | None:
+    return profile.get(key, config.get(key))
+
+
+def profile_verification_config(config: dict, profile: dict) -> dict:
+    root_config = config.get("verification", {})
+    if root_config is None:
+        root_config = {}
+    if not isinstance(root_config, dict):
+        raise RuntimeError("config verification must be an object")
+    profile_config = profile.get("verification")
+    if profile_config is None:
+        return dict(root_config)
+    if not isinstance(profile_config, dict):
+        raise RuntimeError("profile verification must be an object")
+    merged = dict(root_config)
+    merged.update(profile_config)
+    return merged
 
 
 def project_exists(source_root: Path, project_name: str) -> bool:
@@ -891,22 +937,279 @@ def cleanup_integration_legacy_paths(source_root: Path, integrations: list) -> N
             target.unlink()
             log(f"removed stale integration file {relative}")
 
+
+def _runtime_resource_module_paths(source_root: Path) -> list[Path]:
+    return sorted((source_root / "Lib").glob(f"{RUNTIME_RESOURCE_MODULE_BASENAME}*.py"))
+
+
+def _cleanup_runtime_resource_modules(source_root: Path) -> None:
+    for path in _runtime_resource_module_paths(source_root):
+        path.unlink(missing_ok=True)
+
+
+def _skip_runtime_resource_path(relative: str) -> bool:
+    parts = [part for part in relative.replace("\\", "/").split("/") if part]
+    lowered_parts = [part.lower() for part in parts]
+    if not parts:
+        return True
+    if any(part in RUNTIME_RESOURCE_SKIP_DIR_NAMES for part in lowered_parts[:-1]):
+        return True
+    basename = lowered_parts[-1]
+    return any(basename.endswith(suffix) for suffix in RUNTIME_RESOURCE_PYTHON_SUFFIXES)
+
+
+def _is_runtime_resource_file(path: Path, relative: str) -> bool:
+    return not _skip_runtime_resource_path(relative) and path.is_file()
+
+
+def _runtime_resource_candidate_paths(integration) -> list[str]:
+    candidates: list[str] = []
+    for relative in getattr(integration, "materialized_paths", []):
+        candidates.append(relative)
+    for relative in getattr(integration, "source_entries", []):
+        candidates.append(relative)
+    for relative in getattr(integration, "source_mapping", {}).values():
+        candidates.append(relative)
+    for relative in getattr(integration, "overlay_entries", []):
+        candidates.append(relative)
+    return candidates
+
+
+def _iter_runtime_resource_roots(source_root: Path, integrations: list) -> list[Path]:
+    roots: dict[str, Path] = {}
+    for integration in integrations:
+        for relative in _runtime_resource_candidate_paths(integration):
+            normalized = relative.replace("\\", "/")
+            if normalized.startswith("Lib/_staticpython_runtime_resources"):
+                continue
+            target = source_root / normalized
+            if target.exists():
+                roots[target.resolve().as_posix().lower()] = target
+    return sorted(roots.values(), key=lambda path: path.as_posix().lower())
+
+
+def collect_runtime_resource_files(source_root: Path, integrations: list) -> dict[str, Path]:
+    files: dict[str, Path] = {}
+    for root in _iter_runtime_resource_roots(source_root, integrations):
+        candidates = sorted(root.rglob("*")) if root.is_dir() else [root]
+        for path in candidates:
+            if not path.is_file():
+                continue
+            try:
+                relative = path.relative_to(source_root).as_posix()
+            except ValueError:
+                continue
+            if _is_runtime_resource_file(path, relative):
+                files.setdefault(relative, path)
+    return files
+
+
+def _chunk_ascii(text: str, width: int = 96) -> list[str]:
+    if not text:
+        return [""]
+    return [text[index : index + width] for index in range(0, len(text), width)]
+
+
+def _chunk_runtime_resource_blobs(blob_records: list[dict[str, str]]) -> list[list[dict[str, str]]]:
+    chunks: list[list[dict[str, str]]] = []
+    current_chunk: list[dict[str, str]] = []
+    current_size = 0
+
+    for record in blob_records:
+        record_size = max(len(record["encoded"]), 1)
+        if current_chunk and current_size + record_size > RUNTIME_RESOURCE_SHARD_TEXT_BYTES:
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_size = 0
+        current_chunk.append(record)
+        current_size += record_size
+
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
+
+
+def write_runtime_resource_module(source_root: Path, integrations: list) -> None:
+    module_path = source_root / RUNTIME_RESOURCE_MODULE_RELATIVE_PATH
+    module_path.parent.mkdir(parents=True, exist_ok=True)
+    _cleanup_runtime_resource_modules(source_root)
+
+    resource_files = collect_runtime_resource_files(source_root, integrations)
+    if not resource_files:
+        module_path.write_text(
+            "# Auto-generated by StaticPython. Do not edit.\n"
+            'RESOURCE_MANIFEST_HASH = "0" * 64\n'
+            "RESOURCE_SHARDS = ()\n"
+            "RESOURCE_TARGETS = {}\n"
+            "RESOURCE_CHILDREN = {}\n\n"
+            "RESOURCE_BASENAME_INDEX = {}\n\n"
+            "RESOURCE_DIR_BASENAME_INDEX = {}\n\n"
+            "def iter_resource_payloads():\n"
+            "    return ()\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        log(f"wrote empty runtime resource module to {module_path.relative_to(source_root)}")
+        return
+
+    blob_records: list[dict[str, str]] = []
+    blob_ids_by_hash: dict[str, dict[str, str]] = {}
+    target_records: list[tuple[str, str]] = []
+    child_index: dict[str, set[str]] = {"": set()}
+    basename_index: dict[str, set[str]] = {}
+    dir_basename_index: dict[str, set[str]] = {}
+    manifest_hasher = hashlib.sha256()
+
+    for relative, path in resource_files.items():
+        payload = path.read_bytes()
+        payload_hash = hashlib.sha256(payload).hexdigest()
+        blob_id = f"sha256:{payload_hash}"
+        record = blob_ids_by_hash.get(blob_id)
+        if record is None:
+            record = {
+                "blob_id": blob_id,
+                "encoded": base64.b85encode(payload).decode("ascii"),
+            }
+            blob_ids_by_hash[blob_id] = record
+            blob_records.append(record)
+
+        target_records.append((relative, blob_id))
+        parts = relative.split("/")
+        basename_index.setdefault(parts[-1].lower(), set()).add(relative)
+        for index in range(len(parts)):
+            parent = "/".join(parts[:index])
+            child_index.setdefault(parent, set()).add(parts[index])
+            if parent:
+                dir_basename_index.setdefault(parts[index - 1].lower(), set()).add(parent)
+
+        manifest_hasher.update(relative.encode("utf-8"))
+        manifest_hasher.update(b"\0")
+        manifest_hasher.update(blob_id.encode("ascii"))
+        manifest_hasher.update(b"\n")
+
+    blob_to_module: dict[str, str] = {}
+    shard_module_names: list[str] = []
+    for index, chunk in enumerate(_chunk_runtime_resource_blobs(blob_records)):
+        shard_module_name = f"{RUNTIME_RESOURCE_MODULE_BASENAME}_shard_{index:03d}"
+        shard_module_names.append(shard_module_name)
+        shard_path = source_root / "Lib" / f"{shard_module_name}.py"
+
+        blob_lines: list[str] = []
+        for record in chunk:
+            wrapped = "\n".join(f'        "{chunk_text}",' for chunk_text in _chunk_ascii(record["encoded"]))
+            blob_lines.append(
+                "    "
+                + repr(record["blob_id"])
+                + ": (\n"
+                + wrapped
+                + "\n"
+                + "    ),"
+            )
+            blob_to_module[record["blob_id"]] = shard_module_name
+
+        shard_path.write_text(
+            "# Auto-generated by StaticPython. Do not edit.\n"
+            "RESOURCE_BLOBS = {\n"
+            + ("\n".join(blob_lines) if blob_lines else "")
+            + "\n}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    target_lines = [
+        "    " + repr(relative) + f": ({blob_to_module[blob_id]!r}, {blob_id!r}),"
+        for relative, blob_id in target_records
+    ]
+    child_lines = [
+        "    " + repr(parent) + ": " + repr(tuple(sorted(children))) + ","
+        for parent, children in sorted(child_index.items())
+    ]
+    basename_lines = [
+        "    " + repr(basename) + ": " + repr(tuple(sorted(paths))) + ","
+        for basename, paths in sorted(basename_index.items())
+    ]
+    dir_basename_lines = [
+        "    " + repr(basename) + ": " + repr(tuple(sorted(paths))) + ","
+        for basename, paths in sorted(dir_basename_index.items())
+    ]
+    manifest_hash = manifest_hasher.hexdigest()
+    module_path.write_text(
+        "# Auto-generated by StaticPython. Do not edit.\n"
+        f"RESOURCE_MANIFEST_HASH = {manifest_hash!r}\n"
+        f"RESOURCE_SHARDS = {tuple(shard_module_names)!r}\n"
+        "RESOURCE_TARGETS = {\n"
+        + ("\n".join(target_lines) if target_lines else "")
+        + "\n}\n"
+        "RESOURCE_CHILDREN = {\n"
+        + ("\n".join(child_lines) if child_lines else "")
+        + "\n}\n\n"
+        "RESOURCE_BASENAME_INDEX = {\n"
+        + ("\n".join(basename_lines) if basename_lines else "")
+        + "\n}\n\n"
+        "RESOURCE_DIR_BASENAME_INDEX = {\n"
+        + ("\n".join(dir_basename_lines) if dir_basename_lines else "")
+        + "\n}\n\n"
+        "def iter_resource_payloads():\n"
+        "    import importlib\n\n"
+        "    shard_cache = {}\n"
+        "    for relative, (module_name, blob_id) in RESOURCE_TARGETS.items():\n"
+        "        shard_module = shard_cache.get(module_name)\n"
+        "        if shard_module is None:\n"
+        "            shard_module = importlib.import_module(module_name)\n"
+        "            shard_cache[module_name] = shard_module\n"
+        "        yield relative, shard_module.RESOURCE_BLOBS[blob_id]\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    total_bytes = sum(path.stat().st_size for path in resource_files.values())
+    log(
+        "wrote runtime resource module with "
+        f"{len(target_records)} file target(s), "
+        f"{len(blob_records)} unique payload(s), "
+        f"{len(shard_module_names)} shard(s), "
+        f"{total_bytes // 1024} KiB total to {module_path.relative_to(source_root)}"
+    )
+
+
 def patch_site_py(source_root: Path, version_mm: str) -> None:
     path = source_root / "Lib" / "site.py"
     text = path.read_text(encoding="utf-8")
     pattern = r'^(?P<indent>\s*)ver_nodot = .+$'
     desired_line = f'ver_nodot = "{version_mm}".replace(\'.\', \'\')'
-    if desired_line in text:
-        return
-    text, count = re.subn(
-        pattern,
-        lambda match: f'{match.group("indent")}{desired_line}',
-        text,
-        count=1,
-        flags=re.MULTILINE,
+    if desired_line not in text:
+        text, count = re.subn(
+            pattern,
+            lambda match: f'{match.group("indent")}{desired_line}',
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if count != 1:
+            raise RuntimeError(f"expected regex not found in {path}: {pattern}")
+
+    runtime_patch = (
+        "\n"
+        "def _staticpython_install_runtime_resources():\n"
+        "    try:\n"
+        "        import _staticpython_runtime as _staticpython_runtime\n"
+        "    except Exception:\n"
+        "        return\n"
+        "    _staticpython_runtime.install()\n\n"
+        "_staticpython_install_runtime_resources()\n\n"
     )
-    if count != 1:
-        raise RuntimeError(f"expected regex not found in {path}: {pattern}")
+    start_marker = "def _staticpython_install_runtime_resources():\n"
+    end_marker = "_staticpython_install_runtime_resources()\n"
+    if start_marker in text:
+        start_index = text.index(start_marker)
+        end_index = text.index(end_marker, start_index) + len(end_marker)
+        while end_index < len(text) and text[end_index] == "\n":
+            end_index += 1
+        text = text[:start_index] + runtime_patch.lstrip("\n") + text[end_index:]
+    else:
+        anchor = "PREFIXES = [sys.prefix, sys.exec_prefix]\n"
+        if anchor not in text:
+            raise RuntimeError(f"expected anchor not found in {path}: {anchor!r}")
+        text = text.replace(anchor, anchor + runtime_patch, 1)
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
@@ -1262,6 +1565,7 @@ def apply_patches(
     patch_static_library_projects(source_root, manifest, integrations)
     patch_pc_config(source_root, manifest, integrations)
     run_post_patch_hooks(integrations, hook_context)
+    write_runtime_resource_module(source_root, integrations)
 
 
 def verify_source_root(source_root: Path) -> None:
@@ -1591,6 +1895,42 @@ def freeze_modules(
         )
     else:
         log("skip standalone _pyrepl freezing for CPython < 3.13")
+
+
+def verify_runtime_resource_modules_frozen(source_root: Path) -> None:
+    module_paths = _runtime_resource_module_paths(source_root)
+    if not module_paths:
+        raise RuntimeError(
+            "runtime resource module generation did not produce any Lib/_staticpython_runtime_resources*.py files"
+        )
+
+    frozen_dir = source_root / "Python" / "frozen_modules"
+    frozen_c = source_root / "Python" / "frozen.c"
+    frozen_c_text = frozen_c.read_text(encoding="utf-8") if frozen_c.exists() else ""
+    missing_headers: list[str] = []
+    missing_registry: list[str] = []
+    module_names = ["_staticpython_runtime", *[path.stem for path in module_paths]]
+
+    for module_name in module_names:
+        if not (frozen_dir / f"{module_name}.h").exists():
+            missing_headers.append(f"Python/frozen_modules/{module_name}.h")
+        if f'"{module_name}"' not in frozen_c_text:
+            missing_registry.append(module_name)
+
+    if missing_headers or missing_registry:
+        details = []
+        if missing_headers:
+            details.append("missing frozen headers:")
+            details.extend(missing_headers)
+        if missing_registry:
+            details.append("missing frozen registry entries:")
+            details.extend(missing_registry)
+        raise RuntimeError(
+            "runtime resource modules were generated but not frozen into the CPython build:\n"
+            + "\n".join(details)
+        )
+
+    log(f"verified {len(module_names)} runtime resource module(s) are present in frozen_modules and frozen.c")
 
 
 FROZEN_INCLUDE_RE = re.compile(r'^#include "frozen_modules/([^"\r\n]+\.h)"\r?$', re.MULTILINE)
@@ -2011,6 +2351,13 @@ def verify_built_python(
     exe = get_pcbuild_output_dir(source_root, platform) / "python.exe"
     if not exe.exists():
         raise RuntimeError(f"build did not produce {exe}")
+    config = load_config(config_path)
+    _, selected_profile = resolve_profile(config, profile)
+    verification_config = profile_verification_config(config, selected_profile)
+    script_config = verification_config.get("script") if isinstance(verification_config, dict) else None
+    verify_timeout = 60 * 20
+    if isinstance(script_config, dict):
+        verify_timeout = max(verify_timeout, int(float(script_config.get("timeout", 600))) + 300)
     run(
         [
             host_python,
@@ -2029,7 +2376,7 @@ def verify_built_python(
             str(config_path),
         ],
         cwd=REPO_ROOT,
-        timeout=60 * 20,
+        timeout=verify_timeout,
     )
     return exe
 
@@ -2152,17 +2499,21 @@ def main() -> int:
     target_version = Version(version_full)
     core_version_overrides = profile.get("core_library_version_overrides")
     third_party_version_overrides = profile.get("third_party_library_version_overrides")
+    core_library_catalog = profile_library_catalog(config, profile, "core_library_catalog")
+    third_party_library_catalog = profile_library_catalog(config, profile, "third_party_library_catalog")
     core_integrations = load_integrations(
         CORE_PATCH_ROOT,
         profile.get("core_libraries", "all"),
         target_version=target_version,
         version_overrides=core_version_overrides,
+        library_catalog=core_library_catalog,
     )
     third_party_integrations = load_integrations(
         LIB_PATCH_ROOT,
         profile.get("third_party_libraries", "all"),
         target_version=target_version,
         version_overrides=third_party_version_overrides,
+        library_catalog=third_party_library_catalog,
     )
     if profile.get("third_party_libraries") == "all":
         all_third_party_integrations = third_party_integrations
@@ -2172,6 +2523,7 @@ def main() -> int:
             "all",
             target_version=target_version,
             version_overrides=third_party_version_overrides,
+            library_catalog=third_party_library_catalog,
         )
     integrations = [*core_integrations, *third_party_integrations]
     if requested_version_info is not None and requested_version_info != version_info:
@@ -2244,6 +2596,7 @@ def main() -> int:
                 build_workers,
             )
             maybe_restore_getpath_header(source_root, version_info)
+            verify_runtime_resource_modules_frozen(source_root)
         log("splitting frozen module bytecode data for MSVC")
         split_frozen_modules(source_root)
         log("building custom static libraries and python.exe")
@@ -2263,7 +2616,7 @@ def main() -> int:
         built_exe = get_pcbuild_output_dir(source_root, args.platform) / "python.exe"
 
     if not args.skip_build and not args.skip_verify:
-        log("running post-build import verification")
+        log("running post-build profile verification")
         built_exe = verify_built_python(source_root, args.platform, manifest, args.host_python, profile_name, config_path)
 
     if not args.skip_build and args.output_dir:

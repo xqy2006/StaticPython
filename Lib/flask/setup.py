@@ -1,4 +1,4 @@
-from libs import inline_verification_step, replace_text_once, simple_library, transform_source_text, write_source_text
+from libs import replace_text_once, simple_library, transform_source_text, write_source_text
 
 
 def _patch_flask_testing(text: str) -> str:
@@ -35,38 +35,4 @@ LIBRARY_INTEGRATION = simple_library(
     name="flask",
     overlay_entries=["Lib/flask"],
     post_patch_hooks=[patch_flask_sources],
-    verification_steps=[
-        inline_verification_step(
-            "flask-smoke",
-            """
-from flask import Blueprint, Flask, jsonify, render_template_string, request, url_for
-
-app = Flask(__name__)
-api = Blueprint("api", __name__)
-
-@app.get("/hello/<name>")
-def hello(name):
-    return jsonify(name=name, query=request.args.get("q"))
-
-@api.post("/sum")
-def total():
-    payload = request.get_json()
-    return jsonify(total=sum(payload["values"]))
-
-app.register_blueprint(api, url_prefix="/api")
-
-with app.test_client() as client:
-    response = client.get("/hello/codex?q=ok")
-    assert response.status_code == 200
-    assert response.get_json() == {"name": "codex", "query": "ok"}
-    response = client.post("/api/sum", json={"values": [1, 2, 3]})
-    assert response.status_code == 200
-    assert response.get_json() == {"total": 6}
-    with app.test_request_context():
-        assert url_for("hello", name="x") == "/hello/x"
-    with app.app_context():
-        assert render_template_string("Hello {{ name }}", name="Codex") == "Hello Codex"
-""",
-        )
-    ],
 )

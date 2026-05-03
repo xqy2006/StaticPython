@@ -1,5 +1,6 @@
 {
   "overlay_entries": [
+    "Lib/_staticpython_runtime.py",
     "Lib/_pyrepl/__main__.py",
     "Tools/build/freeze_modules.py"
   ],

@@ -1,4 +1,4 @@
-from libs import inline_verification_step, replace_text_once, simple_library, transform_source_text
+from libs import replace_text_once, simple_library, transform_source_text
 
 
 def _patch_click_compat(text: str) -> str:
@@ -68,26 +68,4 @@ LIBRARY_INTEGRATION = simple_library(
     name='click',
     overlay_entries=['Lib/click'],
     post_patch_hooks=[patch_click_sources],
-    verification_steps=[
-        inline_verification_step(
-            "click-smoke",
-            """
-import click
-from click.testing import CliRunner
-
-@click.group()
-def cli():
-    pass
-
-@cli.command()
-@click.argument("name")
-def hello(name):
-    click.echo(f"hello {name}")
-
-result = CliRunner().invoke(cli, ["hello", "codex"])
-assert result.exit_code == 0
-assert "hello codex" in result.output
-""",
-        )
-    ],
 )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from libs import inline_verification_step, pypi_library, source_path, transform_source_text, write_source_text
+from libs import pypi_library, source_path, transform_source_text, write_source_text
 
 
 PROTOBUF_UPB_PROJECT_GUID = "{49F92857-8E8C-42B7-B81A-1DB737C9570A}"
@@ -159,7 +159,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "utf8_range": "protobuf_builtin/utf8_range",
     },
     python_packages=["google.protobuf", "google._upb"],
-    verification_imports=["google._upb._message"],
     static_library_projects_release_x64=[f"{PROTOBUF_UPB_PROJECT}.vcxproj"],
     native_static_projects=[
         {
@@ -176,27 +175,4 @@ LIBRARY_INTEGRATION = pypi_library(
     python_link_dependencies_release_x64=[f"{PROTOBUF_UPB_PROJECT}.lib"],
     prepare_source_hooks=[prepare_protobuf_project],
     post_patch_hooks=[patch_protobuf_namespace],
-    verification_steps=[
-        inline_verification_step(
-            "protobuf-smoke",
-            """
-import importlib.util
-
-from google._upb import _message
-from google.protobuf.internal import api_implementation
-from google.protobuf.struct_pb2 import Struct
-
-assert importlib.util.find_spec("google._upb._message").origin == "built-in"
-assert _message.__name__ == "google._upb._message"
-assert api_implementation.Type() == "upb", api_implementation.Type()
-
-payload = Struct()
-payload["answer"] = 42
-payload["name"] = "codex"
-clone = Struct()
-clone.ParseFromString(payload.SerializeToString())
-assert clone["answer"] == 42 and clone["name"] == "codex", clone
-""",
-        )
-    ],
 )

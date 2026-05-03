@@ -80,6 +80,10 @@ jobs:
         with:
           arch: amd64
 
+      - name: Run runtime resource unit tests
+        shell: pwsh
+        run: python .\scripts\test_runtime_resources.py
+
       - name: Build StaticPython
         shell: pwsh
         run: |

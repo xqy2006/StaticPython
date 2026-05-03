@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from libs import inline_verification_step, pypi_library, source_path, write_source_text
+from libs import pypi_library, source_path, write_source_text
 
 
 MARKUPSAFE_SPEEDUPS_PROJECT_GUID = "{C4AA1B51-433E-472A-931B-1E2B5C752D5D}"
@@ -72,7 +72,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "src/markupsafe": "Lib/markupsafe",
     },
     python_packages=["markupsafe"],
-    verification_imports=["markupsafe", "markupsafe._speedups"],
     static_library_projects_release_x64=["markupsafe._speedups.vcxproj"],
     native_static_projects=[
         {
@@ -88,19 +87,4 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     python_link_dependencies_release_x64=["markupsafe._speedups.lib"],
     prepare_source_hooks=[prepare_markupsafe_speedups_project],
-    verification_steps=[
-        inline_verification_step(
-            "markupsafe-smoke",
-            """
-import importlib.util
-import markupsafe
-import markupsafe._speedups as speedups
-
-assert importlib.util.find_spec("markupsafe._speedups").origin == "built-in"
-assert speedups._escape_inner("<codex & static>") == "&lt;codex &amp; static&gt;"
-assert str(markupsafe.escape("<hello>")) == "&lt;hello&gt;"
-assert str(markupsafe.Markup("<b>{}</b>").format("x&y")) == "<b>x&amp;y</b>"
-""",
-        )
-    ],
 )

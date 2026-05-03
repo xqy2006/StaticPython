@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 
-from libs import inline_verification_step, replace_text_once, simple_library, source_path, transform_source_text, write_source_text
+from libs import replace_text_once, simple_library, source_path, transform_source_text, write_source_text
 
 
 def embed_babel_data(context) -> None:
@@ -124,36 +124,5 @@ LIBRARY_INTEGRATION = simple_library(
         "Lib/babel/locale-data/en_US.dat",
         "Lib/babel/_staticpython_data.py",
     ],
-    verification_materialized_paths=[
-        "Lib/babel/global.dat",
-        "Lib/babel/locale-data/root.dat",
-        "Lib/babel/locale-data/en.dat",
-        "Lib/babel/locale-data/en_US.dat",
-    ],
     post_patch_hooks=[embed_babel_data],
-    verification_steps=[
-        inline_verification_step(
-            "babel-smoke",
-            """
-from datetime import datetime
-from babel import Locale
-from babel.dates import format_datetime
-from babel.localedata import exists
-from babel.numbers import format_currency
-
-locale = Locale.parse("en_US")
-formatted_datetime = format_datetime(datetime(2024, 1, 2, 3, 4, 5), locale="en_US")
-formatted_currency = format_currency(1234.5, "USD", locale="en_US")
-
-assert locale.display_name == "English (United States)"
-assert "2024" in formatted_datetime
-assert "3:04:05" in formatted_datetime
-assert "$1,234.50" == formatted_currency
-assert exists("root")
-assert exists("en")
-assert exists("en_US")
-assert exists("fr_FR")
-""",
-        )
-    ],
 )

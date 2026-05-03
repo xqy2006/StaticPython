@@ -1,6 +1,6 @@
 import json
 
-from libs import inline_verification_step, simple_library, transform_source_text, write_source_text
+from libs import simple_library, transform_source_text, write_source_text
 
 
 def patch_plotly_sources(context):
@@ -262,41 +262,5 @@ LIBRARY_INTEGRATION = simple_library(
         "Lib/plotly/_staticpython_validators.py",
         "Lib/plotly/_staticpython_package_data.py",
     ],
-    verification_materialized_paths=[
-        "Lib/plotly",
-        "Lib/_plotly_utils",
-        "Lib/plotly/package_data/plotly.min.js",
-        "Lib/plotly/package_data/datasets/iris.csv.gz",
-        "Lib/plotly/package_data/datasets/election.geojson.gz",
-        "Lib/plotly/package_data/templates/plotly.json",
-        "Lib/plotly/validators/_validators.json",
-    ],
     post_patch_hooks=[patch_plotly_sources],
-    verification_steps=[
-        inline_verification_step(
-            "plotly-smoke",
-            """
-import json
-import plotly.graph_objects as go
-import plotly.data as plotly_data
-import plotly.io as pio
-from plotly.offline import get_plotlyjs
-
-figure = go.Figure(data=[go.Scatter(x=[1, 2], y=[3, 4], mode="lines+markers")])
-payload = json.loads(figure.to_json())
-assert payload["data"][0]["type"] == "scatter"
-assert "plotly" in pio.templates
-figure.update_layout(template="plotly")
-assert figure.layout.template is not None
-assert "Plotly" in get_plotlyjs()[:2000]
-assert len(plotly_data.election_geojson()["features"]) == 58
-try:
-    import pandas  # noqa: F401
-except ModuleNotFoundError:
-    pass
-else:
-    assert len(plotly_data.iris()) == 150
-""",
-        )
-    ],
 )

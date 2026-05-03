@@ -1,15 +1,1353 @@
 {
   "default_profile": "full",
+  "verification": {
+    "enabled": false
+  },
+  "third_party_library_catalog": {
+    "description": "Pure/simple third-party integrations that are downloaded, materialized, resource-scanned, and frozen from configuration without per-library setup.py files.",
+    "libraries": [
+      {
+        "name": "aiohappyeyeballs",
+        "overlay_entries": [
+          "Lib/aiohappyeyeballs"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "aiosignal",
+        "overlay_entries": [
+          "Lib/aiosignal"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "alembic",
+        "overlay_entries": [
+          "Lib/alembic"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "annotated_doc",
+        "overlay_entries": [
+          "Lib/annotated_doc"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "annotated_types",
+        "project_name": "annotated-types",
+        "overlay_entries": [
+          "Lib/annotated_types"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "anyio",
+        "overlay_entries": [
+          "Lib/anyio"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "asgiref",
+        "overlay_entries": [
+          "Lib/asgiref"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "asttokens",
+        "overlay_entries": [
+          "Lib/asttokens"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "async_lru",
+        "project_name": "async-lru",
+        "overlay_entries": [
+          "Lib/async_lru"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "attr",
+        "overlay_entries": [
+          "Lib/attr"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "attrs",
+        "overlay_entries": [
+          "Lib/attrs",
+          "Lib/attr"
+        ],
+        "python_packages": [
+          "attrs",
+          "attr"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "bleach",
+        "overlay_entries": [
+          "Lib/bleach"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "blinker",
+        "overlay_entries": [
+          "Lib/blinker"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "bs4",
+        "overlay_entries": [
+          "Lib/bs4"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "cachetools",
+        "overlay_entries": [
+          "Lib/cachetools"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "cattr",
+        "overlay_entries": [
+          "Lib/cattr"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "cattrs",
+        "overlay_entries": [
+          "Lib/cattrs"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "charset_normalizer",
+        "overlay_entries": [
+          "Lib/charset_normalizer"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "cloudpickle",
+        "overlay_entries": [
+          "Lib/cloudpickle"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "colorama",
+        "overlay_entries": [
+          "Lib/colorama"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "comm",
+        "overlay_entries": [
+          "Lib/comm"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "cycler",
+        "overlay_entries": [
+          "Lib/cycler"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "dateutil",
+        "overlay_entries": [
+          "Lib/dateutil"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "decorator",
+        "overlay_entries": [
+          "Lib/decorator.py"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "defusedxml",
+        "overlay_entries": [
+          "Lib/defusedxml"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "dill",
+        "overlay_entries": [
+          "Lib/dill"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "django",
+        "overlay_entries": [
+          "Lib/django"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "dns",
+        "project_name": "dnspython",
+        "overlay_entries": [
+          "Lib/dns"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "dotenv",
+        "overlay_entries": [
+          "Lib/dotenv"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "email_validator",
+        "project_name": "email-validator",
+        "overlay_entries": [
+          "Lib/email_validator"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "et_xmlfile",
+        "overlay_entries": [
+          "Lib/et_xmlfile"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "executing",
+        "overlay_entries": [
+          "Lib/executing"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "fastjsonschema",
+        "overlay_entries": [
+          "Lib/fastjsonschema"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "filelock",
+        "overlay_entries": [
+          "Lib/filelock"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "fontTools",
+        "project_name": "fonttools",
+        "source_mapping": {
+          "Lib/fontTools": "Lib/fontTools"
+        },
+        "source_provider": "pypi"
+      },
+      {
+        "name": "freezegun",
+        "overlay_entries": [
+          "Lib/freezegun"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "frozenlist",
+        "overlay_entries": [
+          "Lib/frozenlist"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "fsspec",
+        "overlay_entries": [
+          "Lib/fsspec"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "h11",
+        "overlay_entries": [
+          "Lib/h11"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "h2",
+        "overlay_entries": [
+          "Lib/h2"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "hpack",
+        "overlay_entries": [
+          "Lib/hpack"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "html5lib",
+        "overlay_entries": [
+          "Lib/html5lib"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "httpcore",
+        "overlay_entries": [
+          "Lib/httpcore"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "httpx",
+        "overlay_entries": [
+          "Lib/httpx"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "humanize",
+        "overlay_entries": [
+          "Lib/humanize"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "hyperframe",
+        "overlay_entries": [
+          "Lib/hyperframe"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "hypothesis",
+        "source_mapping": {
+          "_hypothesis_globals.py": "Lib/_hypothesis_globals.py",
+          "hypothesis": "Lib/hypothesis"
+        },
+        "source_provider": "pypi"
+      },
+      {
+        "name": "idna",
+        "overlay_entries": [
+          "Lib/idna"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "importlib_metadata",
+        "project_name": "importlib-metadata",
+        "overlay_entries": [
+          "Lib/importlib_metadata"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "iniconfig",
+        "overlay_entries": [
+          "Lib/iniconfig"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "ipython_pygments_lexers",
+        "project_name": "ipython-pygments-lexers",
+        "source_mapping": {
+          "ipython_pygments_lexers.py": "Lib/ipython_pygments_lexers.py"
+        },
+        "source_provider": "pypi"
+      },
+      {
+        "name": "itsdangerous",
+        "overlay_entries": [
+          "Lib/itsdangerous"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "jedi",
+        "overlay_entries": [
+          "Lib/jedi"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "jinja2",
+        "overlay_entries": [
+          "Lib/jinja2"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "jmespath",
+        "overlay_entries": [
+          "Lib/jmespath"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "joblib",
+        "overlay_entries": [
+          "Lib/joblib"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "json5",
+        "overlay_entries": [
+          "Lib/json5"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "jsonpickle",
+        "overlay_entries": [
+          "Lib/jsonpickle"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "jupyter_core",
+        "project_name": "jupyter-core",
+        "overlay_entries": [
+          "Lib/jupyter_core"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "jupyterlab_pygments",
+        "project_name": "jupyterlab-pygments",
+        "overlay_entries": [
+          "Lib/jupyterlab_pygments"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "loguru",
+        "overlay_entries": [
+          "Lib/loguru"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "mako",
+        "project_name": "Mako",
+        "overlay_entries": [
+          "Lib/mako"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "markdown_it",
+        "overlay_entries": [
+          "Lib/markdown_it"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "marshmallow",
+        "overlay_entries": [
+          "Lib/marshmallow"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "mdurl",
+        "overlay_entries": [
+          "Lib/mdurl"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "mistune",
+        "overlay_entries": [
+          "Lib/mistune"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "more_itertools",
+        "project_name": "more-itertools",
+        "overlay_entries": [
+          "Lib/more_itertools"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "mpmath",
+        "overlay_entries": [
+          "Lib/mpmath"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "mypy_extensions",
+        "project_name": "mypy-extensions",
+        "overlay_entries": [
+          "Lib/mypy_extensions.py"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "narwhals",
+        "overlay_entries": [
+          "Lib/narwhals"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "nbclient",
+        "overlay_entries": [
+          "Lib/nbclient"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "nest_asyncio",
+        "project_name": "nest-asyncio",
+        "source_mapping": {
+          "nest_asyncio.py": "Lib/nest_asyncio.py"
+        },
+        "python_packages": [
+          "nest_asyncio"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "networkx",
+        "overlay_entries": [
+          "Lib/networkx"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "notebook_shim",
+        "project_name": "notebook-shim",
+        "source_mapping": {
+          "notebook_shim": "Lib/notebook_shim",
+          "jupyter_server_config.d/notebook_shim.json": "etc/jupyter/jupyter_server_config.d/notebook_shim.json"
+        },
+        "source_provider": "pypi"
+      },
+      {
+        "name": "oauthlib",
+        "overlay_entries": [
+          "Lib/oauthlib"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "openpyxl",
+        "overlay_entries": [
+          "Lib/openpyxl"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "outcome",
+        "overlay_entries": [
+          "Lib/outcome"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "overrides",
+        "overlay_entries": [
+          "Lib/overrides"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "packaging",
+        "overlay_entries": [
+          "Lib/packaging"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pandocfilters",
+        "overlay_entries": [
+          "Lib/pandocfilters.py"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pathspec",
+        "overlay_entries": [
+          "Lib/pathspec"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "platformdirs",
+        "overlay_entries": [
+          "Lib/platformdirs"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pluggy",
+        "overlay_entries": [
+          "Lib/pluggy"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "prometheus_client",
+        "project_name": "prometheus-client",
+        "overlay_entries": [
+          "Lib/prometheus_client"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "propcache",
+        "overlay_entries": [
+          "Lib/propcache"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pure_eval",
+        "project_name": "pure-eval",
+        "overlay_entries": [
+          "Lib/pure_eval"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "py",
+        "overlay_entries": [
+          "Lib/py"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pyasn1",
+        "overlay_entries": [
+          "Lib/pyasn1"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pyasn1_modules",
+        "project_name": "pyasn1-modules",
+        "overlay_entries": [
+          "Lib/pyasn1_modules"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pycparser",
+        "overlay_entries": [
+          "Lib/pycparser"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pygments",
+        "overlay_entries": [
+          "Lib/pygments"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pymongo",
+        "source_mapping": {
+          "pymongo": "Lib/pymongo",
+          "bson": "Lib/bson",
+          "gridfs": "Lib/gridfs"
+        },
+        "python_packages": [
+          "pymongo",
+          "bson",
+          "gridfs"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pymysql",
+        "overlay_entries": [
+          "Lib/pymysql"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pypdf",
+        "overlay_entries": [
+          "Lib/pypdf"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pyperclip",
+        "overlay_entries": [
+          "Lib/pyperclip"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pyrsistent",
+        "source_mapping": {
+          "pyrsistent": "Lib/pyrsistent"
+        },
+        "python_packages": [
+          "pyrsistent"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pytest",
+        "source_mapping": {
+          "pytest": "Lib/pytest",
+          "_pytest": "Lib/_pytest"
+        },
+        "source_provider": "pypi"
+      },
+      {
+        "name": "python_multipart",
+        "project_name": "python-multipart",
+        "source_mapping": {
+          "python_multipart": "Lib/python_multipart",
+          "multipart": "Lib/multipart"
+        },
+        "python_packages": [
+          "python_multipart",
+          "multipart"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pythonjsonlogger",
+        "project_name": "python-json-logger",
+        "source_mapping": {
+          "src/pythonjsonlogger": "Lib/pythonjsonlogger"
+        },
+        "python_packages": [
+          "pythonjsonlogger"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pytokens",
+        "overlay_entries": [
+          "Lib/pytokens"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pytz",
+        "overlay_entries": [
+          "Lib/pytz"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "rapidfuzz",
+        "project_name": "RapidFuzz",
+        "source_mapping": {
+          "src/rapidfuzz": "Lib/rapidfuzz"
+        },
+        "source_provider": "pypi"
+      },
+      {
+        "name": "redis",
+        "overlay_entries": [
+          "Lib/redis"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "requests",
+        "overlay_entries": [
+          "Lib/requests"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "requests_oauthlib",
+        "project_name": "requests-oauthlib",
+        "overlay_entries": [
+          "Lib/requests_oauthlib"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "requests_toolbelt",
+        "project_name": "requests-toolbelt",
+        "overlay_entries": [
+          "Lib/requests_toolbelt"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "responses",
+        "overlay_entries": [
+          "Lib/responses"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "rfc3339_validator",
+        "project_name": "rfc3339-validator",
+        "source_mapping": {
+          "rfc3339_validator.py": "Lib/rfc3339_validator.py"
+        },
+        "python_packages": [
+          "rfc3339_validator"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "rfc3986_validator",
+        "project_name": "rfc3986-validator",
+        "source_mapping": {
+          "rfc3986_validator.py": "Lib/rfc3986_validator.py"
+        },
+        "python_packages": [
+          "rfc3986_validator"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "rich",
+        "overlay_entries": [
+          "Lib/rich"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "rsa",
+        "overlay_entries": [
+          "Lib/rsa"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "selenium",
+        "overlay_entries": [
+          "Lib/selenium"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "send2trash",
+        "project_name": "send2trash",
+        "overlay_entries": [
+          "Lib/send2trash"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "shellingham",
+        "overlay_entries": [
+          "Lib/shellingham"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "six",
+        "overlay_entries": [
+          "Lib/six.py"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "slugify",
+        "project_name": "python-slugify",
+        "overlay_entries": [
+          "Lib/slugify"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "sniffio",
+        "overlay_entries": [
+          "Lib/sniffio"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "socks",
+        "project_name": "PySocks",
+        "source_mapping": {
+          "socks.py": "Lib/socks.py",
+          "sockshandler.py": "Lib/sockshandler.py"
+        },
+        "python_packages": [
+          "socks",
+          "sockshandler"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "sortedcontainers",
+        "overlay_entries": [
+          "Lib/sortedcontainers"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "soupsieve",
+        "overlay_entries": [
+          "Lib/soupsieve"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "sqlalchemy",
+        "project_name": "SQLAlchemy",
+        "overlay_entries": [
+          "Lib/sqlalchemy"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "sqlparse",
+        "overlay_entries": [
+          "Lib/sqlparse"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "stack_data",
+        "project_name": "stack-data",
+        "overlay_entries": [
+          "Lib/stack_data"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "starlette",
+        "overlay_entries": [
+          "Lib/starlette"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "sympy",
+        "overlay_entries": [
+          "Lib/sympy"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "tabulate",
+        "overlay_entries": [
+          "Lib/tabulate"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "tenacity",
+        "overlay_entries": [
+          "Lib/tenacity"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "terminado",
+        "overlay_entries": [
+          "Lib/terminado"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "threadpoolctl",
+        "overlay_entries": [
+          "Lib/threadpoolctl.py"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "tomlkit",
+        "overlay_entries": [
+          "Lib/tomlkit"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "tornado",
+        "overlay_entries": [
+          "Lib/tornado"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "tqdm",
+        "overlay_entries": [
+          "Lib/tqdm"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "traitlets",
+        "overlay_entries": [
+          "Lib/traitlets"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "typer",
+        "overlay_entries": [
+          "Lib/typer"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "typing_extensions",
+        "overlay_entries": [
+          "Lib/typing_extensions.py"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "typing_inspect",
+        "project_name": "typing-inspect",
+        "overlay_entries": [
+          "Lib/typing_inspect.py"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "typing_inspection",
+        "project_name": "typing-inspection",
+        "overlay_entries": [
+          "Lib/typing_inspection"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "urllib3",
+        "overlay_entries": [
+          "Lib/urllib3"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "uvicorn",
+        "overlay_entries": [
+          "Lib/uvicorn"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "wcwidth",
+        "overlay_entries": [
+          "Lib/wcwidth"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "webencodings",
+        "overlay_entries": [
+          "Lib/webencodings"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "websocket",
+        "project_name": "websocket-client",
+        "overlay_entries": [
+          "Lib/websocket"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "win32_setctime",
+        "overlay_entries": [
+          "Lib/win32_setctime"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "wsproto",
+        "overlay_entries": [
+          "Lib/wsproto"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "xlsxwriter",
+        "overlay_entries": [
+          "Lib/xlsxwriter"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "xmltodict",
+        "source_mapping": {
+          "xmltodict.py": "Lib/xmltodict.py"
+        },
+        "python_packages": [
+          "xmltodict"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "yaml",
+        "project_name": "PyYAML",
+        "source_mapping": {
+          "lib/yaml": "Lib/yaml"
+        },
+        "source_provider": "pypi"
+      },
+      {
+        "name": "yarl",
+        "overlay_entries": [
+          "Lib/yarl"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "zipp",
+        "overlay_entries": [
+          "Lib/zipp"
+        ],
+        "source_provider": "pypi"
+      }
+    ]
+  },
   "profiles": {
     "stdlib": {
       "description": "Build only CPython and statically linked standard-library extension modules.",
       "core_libraries": "all",
-      "third_party_libraries": []
+      "third_party_libraries": [],
+      "verification": {
+        "enabled": false
+      }
     },
     "full": {
-      "description": "Build CPython plus every third-party library integration under Lib/.",
+      "description": "Build CPython plus every configured third-party library integration. Pure libraries come from third_party_library_catalog; native or patched libraries remain under Lib/<name>/setup.py.",
       "core_libraries": "all",
-      "third_party_libraries": "all"
+      "third_party_libraries": [
+        "aiohappyeyeballs",
+        "aiohttp",
+        "aiosignal",
+        "alembic",
+        "annotated_doc",
+        "annotated_types",
+        "anyio",
+        "asgiref",
+        "asttokens",
+        "async_lru",
+        "attr",
+        "attrs",
+        "babel",
+        "black",
+        "bleach",
+        "blinker",
+        "bs4",
+        "cachetools",
+        "cattr",
+        "cattrs",
+        "certifi",
+        "chardet",
+        "charset_normalizer",
+        "click",
+        "cloudpickle",
+        "colorama",
+        "comm",
+        "comtypes",
+        "Crypto",
+        "cycler",
+        "dateutil",
+        "decorator",
+        "defusedxml",
+        "dill",
+        "django",
+        "dns",
+        "docutils",
+        "dotenv",
+        "email_validator",
+        "et_xmlfile",
+        "executing",
+        "faker",
+        "fastjsonschema",
+        "filelock",
+        "flask",
+        "fontTools",
+        "freezegun",
+        "frozenlist",
+        "fsspec",
+        "h11",
+        "h2",
+        "hpack",
+        "html5lib",
+        "httpcore",
+        "httpx",
+        "humanize",
+        "hyperframe",
+        "hypothesis",
+        "idna",
+        "importlib_metadata",
+        "iniconfig",
+        "ipykernel",
+        "IPython",
+        "ipython_pygments_lexers",
+        "isort",
+        "itsdangerous",
+        "jedi",
+        "jinja2",
+        "jmespath",
+        "joblib",
+        "json5",
+        "jsonpickle",
+        "jsonschema",
+        "jupyter_client",
+        "jupyter_core",
+        "jupyter_events",
+        "jupyter_lsp",
+        "jupyter_server",
+        "jupyterlab",
+        "jupyterlab_pygments",
+        "jupyterlab_server",
+        "lark",
+        "libui",
+        "loguru",
+        "mako",
+        "markdown",
+        "markdown_it",
+        "markupsafe",
+        "marshmallow",
+        "matplotlib_inline",
+        "mdurl",
+        "mistune",
+        "more_itertools",
+        "mpmath",
+        "msgpack",
+        "multidict",
+        "mypy_extensions",
+        "narwhals",
+        "nbclient",
+        "nbconvert",
+        "nbformat",
+        "nest_asyncio",
+        "networkx",
+        "notebook",
+        "notebook_shim",
+        "numpy",
+        "oauthlib",
+        "openpyxl",
+        "outcome",
+        "overrides",
+        "packaging",
+        "pandas",
+        "pandocfilters",
+        "parso",
+        "pathspec",
+        "PIL",
+        "platformdirs",
+        "plotly",
+        "pluggy",
+        "portalocker",
+        "prometheus_client",
+        "prompt_toolkit",
+        "propcache",
+        "protobuf",
+        "psutil",
+        "pure_eval",
+        "py",
+        "pyasn1",
+        "pyasn1_modules",
+        "pycparser",
+        "pygments",
+        "pymongo",
+        "pymysql",
+        "pyparsing",
+        "pypdf",
+        "pyperclip",
+        "pyrsistent",
+        "pytest",
+        "python_multipart",
+        "pythonjsonlogger",
+        "pytokens",
+        "pytz",
+        "pyzmq",
+        "rapidfuzz",
+        "redis",
+        "regex",
+        "requests",
+        "requests_oauthlib",
+        "requests_toolbelt",
+        "responses",
+        "rfc3339_validator",
+        "rfc3986_validator",
+        "rich",
+        "rsa",
+        "selenium",
+        "send2trash",
+        "shellingham",
+        "six",
+        "slugify",
+        "sniffio",
+        "socks",
+        "sortedcontainers",
+        "soupsieve",
+        "sqlalchemy",
+        "sqlparse",
+        "stack_data",
+        "starlette",
+        "sympy",
+        "tabulate",
+        "tenacity",
+        "terminado",
+        "text_unidecode",
+        "threadpoolctl",
+        "tinycss2",
+        "tomlkit",
+        "tornado",
+        "tqdm",
+        "traitlets",
+        "typer",
+        "typing_extensions",
+        "typing_inspect",
+        "typing_inspection",
+        "tzdata",
+        "ujson",
+        "urllib3",
+        "uvicorn",
+        "wcwidth",
+        "webencodings",
+        "websocket",
+        "websockets",
+        "werkzeug",
+        "win32_setctime",
+        "wsproto",
+        "xlsxwriter",
+        "xmltodict",
+        "yaml",
+        "yarl",
+        "zipp"
+      ],
+      "verification": {
+        "enabled": true,
+        "script": {
+          "name": "full-profile-verify",
+          "kind": "script",
+          "script": "scripts/full_profile_verify.py",
+          "timeout": 3600
+        }
+      }
     }
   }
 }

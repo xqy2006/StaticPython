@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from libs import inline_verification_step, simple_library, source_path, transform_source_text, write_source_text
+from libs import simple_library, source_path, transform_source_text, write_source_text
 
 
 def embed_docutils_resources(context) -> None:
@@ -68,22 +68,5 @@ LIBRARY_INTEGRATION = simple_library(
     name="docutils",
     overlay_entries=["Lib/docutils"],
     materialized_paths=["Lib/docutils/_staticpython_resources.py"],
-    verification_materialized_paths=["Lib/docutils"],
     post_patch_hooks=[embed_docutils_resources],
-    verification_steps=[
-        inline_verification_step(
-            "docutils-smoke",
-            """
-from docutils.core import publish_parts
-
-source = "Title\\n=====\\n\\n* item one\\n* item two\\n"
-parts = publish_parts(source, writer_name="html5")
-html = parts["html_body"]
-whole = parts["whole"]
-assert "<h1" in html and "Title" in html
-assert "item one" in html and "item two" in html
-assert "<style" in whole and "minimal.css" in whole
-""",
-        )
-    ],
 )

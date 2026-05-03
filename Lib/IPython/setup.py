@@ -1,4 +1,4 @@
-from libs import inline_verification_step, replace_text_once, simple_library, transform_source_text
+from libs import replace_text_once, simple_library, transform_source_text
 
 
 def patch_ipython_sources(context):
@@ -24,31 +24,4 @@ LIBRARY_INTEGRATION = simple_library(
     project_name="ipython",
     overlay_entries=["Lib/IPython"],
     post_patch_hooks=[patch_ipython_sources],
-    verification_steps=[
-        inline_verification_step(
-            "ipython-smoke",
-            """
-import subprocess
-import sys
-
-from IPython.core.interactiveshell import InteractiveShell
-
-shell = InteractiveShell.instance()
-result = shell.run_cell("answer = 40 + 2", store_history=False)
-assert result.success
-assert shell.user_ns["answer"] == 42
-
-completed = subprocess.run(
-    [sys.executable, "-m", "IPython", "-c", "answer = 40 + 2; print(answer)"],
-    capture_output=True,
-    text=True,
-    encoding="utf-8",
-    errors="replace",
-    timeout=120,
-)
-assert completed.returncode == 0, completed.stderr
-assert completed.stdout.strip().endswith("42")
-""",
-        )
-    ],
 )

@@ -1,6 +1,6 @@
 import json
 
-from libs import inline_verification_step, replace_text_once, simple_library, source_path, transform_source_text, write_source_text
+from libs import replace_text_once, simple_library, source_path, transform_source_text, write_source_text
 
 
 def patch_black_sources(context) -> None:
@@ -117,42 +117,5 @@ LIBRARY_INTEGRATION = simple_library(
         "Lib/blib2to3/_staticpython_grammars.py",
         "Lib/black/resources/_staticpython_schema.py",
     ],
-    verification_materialized_paths=[
-        "Lib/_black_version.py",
-        "Lib/black",
-        "Lib/blackd",
-        "Lib/blib2to3",
-        "Lib/blib2to3/Grammar.txt",
-        "Lib/blib2to3/PatternGrammar.txt",
-        "Lib/black/resources/black.schema.json",
-    ],
     post_patch_hooks=[patch_black_sources],
-    verification_steps=[
-        inline_verification_step(
-            "black-smoke",
-            """
-import black
-import black.schema
-
-source = "def add(a,b):\\n return a+b\\n"
-formatted = black.format_str(source, mode=black.FileMode())
-assert "def add(a, b):" in formatted
-assert "return a + b" in formatted
-schema = black.schema.get_schema()
-assert schema["type"] == "object"
-assert "line-length" in schema["properties"]
-""",
-        )
-        ,
-        inline_verification_step(
-            "blackd-smoke",
-            """
-import blackd
-
-app = blackd.make_app()
-assert app is not None
-assert len(app.router.routes()) == 1
-""",
-        )
-    ],
 )

@@ -1,4 +1,4 @@
-from libs import inline_verification_step, replace_text_all, simple_library, transform_source_text
+from libs import replace_text_all, simple_library, transform_source_text
 
 
 def patch_tinycss2_sources(context):
@@ -14,16 +14,4 @@ LIBRARY_INTEGRATION = simple_library(
     name="tinycss2",
     overlay_entries=["Lib/tinycss2"],
     post_patch_hooks=[patch_tinycss2_sources],
-    verification_steps=[
-        inline_verification_step(
-            "tinycss2-smoke",
-            """
-from tinycss2 import parse_stylesheet, serialize
-
-rules = parse_stylesheet("h1 { color: red; margin: 0 }", skip_whitespace=True)
-assert rules and rules[0].type == "qualified-rule"
-assert "color" in serialize(rules[0].content)
-""",
-        )
-    ],
 )

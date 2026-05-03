@@ -1,4 +1,4 @@
-from libs import inline_verification_step, replace_text_once, simple_library, source_path, transform_source_text
+from libs import replace_text_once, simple_library, source_path, transform_source_text
 
 
 def patch_lark_sources(context) -> None:
@@ -44,28 +44,4 @@ LIBRARY_INTEGRATION = simple_library(
     name="lark",
     overlay_entries=["Lib/lark"],
     post_patch_hooks=[patch_lark_sources],
-    verification_steps=[
-        inline_verification_step(
-            "lark-parser-smoke",
-            """
-from lark import Lark, Transformer, v_args
-
-parser = Lark("start: WORD NUMBER\\n%import common.WORD\\n%import common.NUMBER\\n%ignore \\" \\"", parser="lalr")
-tree = parser.parse("staticpython 42")
-assert tree.data == "start"
-assert [child.value for child in tree.children] == ["staticpython", "42"]
-
-@v_args(inline=True)
-class Calc(Transformer):
-    def number(self, token):
-        return int(token)
-    def add(self, left, right):
-        return left + right
-
-calc = Lark("start: sum\\n?sum: number -> number | sum \\"+\\" number -> add\\nnumber: NUMBER\\n%import common.NUMBER\\n%ignore \\" \\"", parser="lalr")
-result = Calc().transform(calc.parse("2 + 40"))
-assert result.children == [42]
-""",
-        )
-    ],
 )

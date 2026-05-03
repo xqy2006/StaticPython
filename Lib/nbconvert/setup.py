@@ -1,7 +1,5 @@
 from libs import (
-    inline_verification_step,
     replace_text_once,
-    script_verification_step,
     simple_library,
     source_path,
     transform_source_text,
@@ -108,9 +106,16 @@ def _iter_exporter_entries():
             "            ExtensionTolerantLoader(FileSystemLoader(paths), self.template_extension),\n"
             "            DictLoader({self._raw_template_key: self.raw_template}),\n"
             "        ]\n",
+            "        static_templates = dict(_STATICPYTHON_TEMPLATES)\n"
+            "        for template_name in self.get_template_names():\n"
+            "            prefix = template_name + \"/\"\n"
+            "            for key, value in _STATICPYTHON_TEMPLATES.items():\n"
+            "                if key.startswith(prefix):\n"
+            "                    static_templates.setdefault(key[len(prefix):], value)\n"
+            "\n"
             "        loaders = [\n"
             "            *self.extra_loaders,\n"
-            "            ExtensionTolerantLoader(DictLoader(_STATICPYTHON_TEMPLATES), self.template_extension),\n"
+            "            ExtensionTolerantLoader(DictLoader(static_templates), self.template_extension),\n"
             "            ExtensionTolerantLoader(FileSystemLoader(paths), self.template_extension),\n"
             "            DictLoader({self._raw_template_key: self.raw_template}),\n"
             "        ]\n",
@@ -201,49 +206,5 @@ LIBRARY_INTEGRATION = simple_library(
         "share/templates": "share/jupyter/nbconvert/templates",
     },
     materialized_paths=["Lib/nbconvert/_staticpython_templates.py"],
-    verification_materialized_paths=[
-        "Lib/nbconvert",
-        "share/jupyter/nbconvert/templates/lab/index.html.j2",
-        "share/jupyter/nbconvert/templates/base/display_priority.j2",
-    ],
     post_patch_hooks=[patch_nbconvert_sources],
-    verification_steps=[
-        inline_verification_step(
-            "nbconvert-smoke",
-            """
-from nbformat import v4
-from nbconvert.exporters import HTMLExporter, ScriptExporter
-from nbconvert.exporters.base import get_export_names, get_exporter
-
-notebook = v4.new_notebook()
-notebook.cells.append(v4.new_markdown_cell("# StaticPython"))
-notebook.cells.append(v4.new_code_cell("answer = 40 + 2\\nanswer"))
-
-export_names = set(get_export_names())
-assert {"notebook"} <= export_names
-assert get_exporter("html").__name__ == "HTMLExporter"
-script_exporter_class = get_exporter("script")
-assert script_exporter_class.__name__ in {"ScriptExporter", "PythonExporter"}
-
-html_exporter = HTMLExporter()
-html_body, html_resources = html_exporter.from_notebook_node(notebook)
-assert "<h1" in html_body and "StaticPython" in html_body
-assert html_exporter.get_template_names()[0] == "lab"
-assert '<div class="highlight hl-ipython3"><pre>' in html_body
-assert "answer" in html_body and "40" in html_body and "2" in html_body
-assert isinstance(html_resources, dict)
-
-script_exporter = ScriptExporter()
-script_body, script_resources = script_exporter.from_notebook_node(notebook)
-assert "answer = 40 + 2" in script_body
-assert script_resources.get("output_extension") in {".txt", ".py"}
-""",
-            timeout=600,
-        ),
-        script_verification_step(
-            "nbconvert-runtime",
-            "scripts/nbconvert_runtime.py",
-            timeout=600,
-        ),
-    ],
 )

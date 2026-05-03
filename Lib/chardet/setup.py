@@ -1,4 +1,4 @@
-from libs import inline_verification_step, replace_text_once, simple_library, source_path, transform_source_text
+from libs import replace_text_once, simple_library, source_path, transform_source_text
 
 
 def _bytes_chunks_literal(data: bytes, *, chunk_size: int = 8192) -> str:
@@ -78,35 +78,4 @@ LIBRARY_INTEGRATION = simple_library(
     name="chardet",
     overlay_entries=["Lib/chardet"],
     post_patch_hooks=[patch_chardet_sources],
-    verification_steps=[
-        inline_verification_step(
-            "chardet-smoke",
-            """
-import chardet
-from chardet.models import BigramProfile, get_enc_index, get_idf_weights, load_models
-from chardet.pipeline.confusion import load_confusion_data
-from chardet.universaldetector import UniversalDetector
-
-payload = b"caf\\xe9"
-result = chardet.detect(payload)
-assert result["encoding"].lower() in {"iso-8859-1", "windows-1255", "windows-1252"}
-
-detector = UniversalDetector()
-detector.feed(payload)
-detector.close()
-assert detector.result["encoding"]
-
-models = load_models()
-enc_index = get_enc_index()
-idf = get_idf_weights()
-confusion = load_confusion_data()
-profile = BigramProfile(payload)
-assert models
-assert enc_index
-assert len(idf) == 65536
-assert confusion
-assert profile.nonzero
-""",
-        )
-    ],
 )

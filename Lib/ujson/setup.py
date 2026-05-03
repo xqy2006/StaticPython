@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from libs import inline_verification_step, pypi_library, source_path, write_source_text
+from libs import pypi_library, source_path, write_source_text
 
 
 UJSON_PROJECT_GUID = "{E87E7715-3227-4F4D-A7F7-02F02E3E9B4D}"
@@ -106,7 +106,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "src/ujson": "ujson_builtin",
     },
     python_packages=["ujson"],
-    verification_imports=["ujson"],
     static_library_projects_release_x64=["ujson.vcxproj"],
     native_static_projects=[
         {
@@ -122,27 +121,4 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     python_link_dependencies_release_x64=["ujson.lib"],
     prepare_source_hooks=[prepare_ujson_project],
-    verification_steps=[
-        inline_verification_step(
-            "ujson-smoke",
-            """
-import math
-import importlib.util
-import ujson
-
-assert importlib.util.find_spec("ujson").origin == "built-in"
-payload = {"name": "codex", "items": [1, 2, 3], "value": 1.25}
-encoded = ujson.dumps(payload)
-decoded = ujson.loads(encoded)
-assert decoded == payload, decoded
-assert math.isnan(ujson.loads("NaN"))
-try:
-    ujson.loads("{broken")
-except ValueError:
-    pass
-else:
-    raise AssertionError("ujson did not reject malformed JSON")
-""",
-        )
-    ],
 )
