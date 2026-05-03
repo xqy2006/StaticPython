@@ -53,6 +53,17 @@ def _resources_module():
     return resources
 
 
+def _decode_resource_payload(encoded: bytes, payload_encoding: str) -> bytes:
+    payload = base64.b85decode(encoded)
+    if payload_encoding == "b85":
+        return payload
+    if payload_encoding == "zlib+b85":
+        import zlib as _zlib
+
+        return _zlib.decompress(payload)
+    raise ValueError(f"unsupported StaticPython resource payload encoding: {payload_encoding!r}")
+
+
 def _load_resource_bytes() -> dict[str, bytes]:
     global _RESOURCE_BYTES
     if _RESOURCE_BYTES is not None:
@@ -61,10 +72,11 @@ def _load_resource_bytes() -> dict[str, bytes]:
     resources = _resources_module()
     loaded: dict[str, bytes] = {}
     if resources is not None:
+        payload_encoding = getattr(resources, "RESOURCE_PAYLOAD_ENCODING", "b85")
         for relative, encoded_chunks in resources.iter_resource_payloads():
             try:
                 encoded = "".join(encoded_chunks).encode("ascii")
-                loaded[_normalize_resource_key(relative)] = base64.b85decode(encoded)
+                loaded[_normalize_resource_key(relative)] = _decode_resource_payload(encoded, payload_encoding)
             except Exception:
                 continue
     _RESOURCE_BYTES = loaded

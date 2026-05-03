@@ -35,6 +35,7 @@ env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: "utf-8"
   STATICPYTHON_BUILD_WORKERS: "2"
+  STATICPYTHON_FULL_BUILD_WORKERS: "1"
   DEFAULT_CPYTHON_VERSION: "3.13.2"
 
 jobs:
@@ -89,11 +90,15 @@ jobs:
         run: |
           $dist = "$env:GITHUB_WORKSPACE\dist\${{ matrix.profile }}"
           New-Item -ItemType Directory -Force $dist | Out-Null
+          $buildWorkers = "$env:STATICPYTHON_BUILD_WORKERS"
+          if ("${{ matrix.profile }}" -eq "full") {
+            $buildWorkers = "$env:STATICPYTHON_FULL_BUILD_WORKERS"
+          }
           python .\build.py `
             --cpython-version "${{ steps.cpython.outputs.version }}" `
             --download-root "$env:RUNNER_TEMP\cpython-${{ matrix.profile }}" `
             --profile "${{ matrix.profile }}" `
-            --build-workers "$env:STATICPYTHON_BUILD_WORKERS" `
+            --build-workers "$buildWorkers" `
             --skip-verify `
             --output-dir $dist
 

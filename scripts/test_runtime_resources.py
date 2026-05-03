@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.resources
+import base64
 import json
 import os
 import pkgutil
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,7 +22,7 @@ SOURCE_ROOT = REPO_ROOT
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from build import collect_runtime_resource_files, verify_runtime_resource_modules_frozen, write_runtime_resource_module
+from build import collect_runtime_resource_files, split_frozen_modules, verify_runtime_resource_modules_frozen, write_runtime_resource_module
 
 
 def _write(path: Path, data: str | bytes) -> None:
@@ -158,9 +160,16 @@ class RuntimeResourceTests(unittest.TestCase):
         self.assertIn("Lib/demo_pkg/data", resources.RESOURCE_CHILDREN)
         self.assertIn("config.yaml", resources.RESOURCE_BASENAME_INDEX)
         self.assertIn("data", resources.RESOURCE_DIR_BASENAME_INDEX)
+        self.assertEqual(resources.RESOURCE_PAYLOAD_ENCODING, "zlib+b85")
         payloads = dict(resources.iter_resource_payloads())
         self.assertEqual(len(payloads), len(resources.RESOURCE_TARGETS))
-        self.assertEqual(payloads["Lib/demo_pkg/data/empty.bin"], ("",))
+        encoded_empty = "".join(payloads["Lib/demo_pkg/data/empty.bin"]).encode("ascii")
+        self.assertEqual(self.runtime._decode_resource_payload(encoded_empty, resources.RESOURCE_PAYLOAD_ENCODING), b"")
+        encoded_config = "".join(payloads["Lib/demo_pkg/data/config.yaml"]).encode("ascii")
+        self.assertEqual(
+            self.runtime._decode_resource_payload(encoded_config, resources.RESOURCE_PAYLOAD_ENCODING),
+            b"status: ok\n",
+        )
 
     def test_open_pathlib_and_stat_use_virtual_resource_for_absolute_paths(self) -> None:
         config_path = self.root / "Lib" / "demo_pkg" / "data" / "config.yaml"
@@ -365,6 +374,14 @@ class RuntimeResourceTests(unittest.TestCase):
             shutil.rmtree(fresh_root)
             self.runtime.install()
 
+    def test_runtime_decoder_accepts_current_and_legacy_payload_encodings(self) -> None:
+        current_encoded = base64.b85encode(zlib.compress(b"payload", level=9))
+        legacy_encoded = base64.b85encode(b"payload")
+        self.assertEqual(self.runtime._decode_resource_payload(current_encoded, "zlib+b85"), b"payload")
+        self.assertEqual(self.runtime._decode_resource_payload(legacy_encoded, "b85"), b"payload")
+        with self.assertRaises(ValueError):
+            self.runtime._decode_resource_payload(legacy_encoded, "unknown")
+
     def test_generated_resources_are_sharded_and_deduplicate_identical_payloads(self) -> None:
         self.runtime.uninstall()
         old_limit = __import__("build").RUNTIME_RESOURCE_SHARD_TEXT_BYTES
@@ -382,9 +399,15 @@ class RuntimeResourceTests(unittest.TestCase):
                 if name.startswith("_staticpython_runtime_resources"):
                     sys.modules.pop(name, None)
             resources = importlib.import_module("_staticpython_runtime_resources")
+            self.assertEqual(resources.RESOURCE_PAYLOAD_ENCODING, "zlib+b85")
             self.assertGreaterEqual(len(resources.RESOURCE_SHARDS), 2)
+            self.assertTrue(
+                all(name.rsplit("_", 1)[-1].isdigit() and len(name.rsplit("_", 1)[-1]) == 6 for name in resources.RESOURCE_SHARDS)
+            )
             payloads = dict(resources.iter_resource_payloads())
             self.assertEqual(payloads["Lib/pkg/one.dat"], payloads["Lib/pkg/copy.dat"])
+            encoded_one = "".join(payloads["Lib/pkg/one.dat"]).encode("ascii")
+            self.assertEqual(zlib.decompress(base64.b85decode(encoded_one)), b"alpha")
             one_module, one_blob = resources.RESOURCE_TARGETS["Lib/pkg/one.dat"]
             copy_module, copy_blob = resources.RESOURCE_TARGETS["Lib/pkg/copy.dat"]
             self.assertEqual((one_module, one_blob), (copy_module, copy_blob))
@@ -402,7 +425,7 @@ class RuntimeResourceTests(unittest.TestCase):
         fresh_root = Path(tempfile.mkdtemp())
         try:
             _write(fresh_root / "Lib" / "_staticpython_runtime_resources.py", "# generated\n")
-            _write(fresh_root / "Lib" / "_staticpython_runtime_resources_shard_000.py", "# shard\n")
+            _write(fresh_root / "Lib" / "_staticpython_runtime_resources_shard_000000.py", "# shard\n")
             _write(
                 fresh_root / "Python" / "frozen.c",
                 '{"_staticpython_runtime", NULL},\n',
@@ -412,7 +435,7 @@ class RuntimeResourceTests(unittest.TestCase):
 
             _write(fresh_root / "Python" / "frozen_modules" / "_staticpython_runtime.h", b"header")
             _write(fresh_root / "Python" / "frozen_modules" / "_staticpython_runtime_resources.h", b"header")
-            _write(fresh_root / "Python" / "frozen_modules" / "_staticpython_runtime_resources_shard_000.h", b"header")
+            _write(fresh_root / "Python" / "frozen_modules" / "_staticpython_runtime_resources_shard_000000.h", b"header")
             with self.assertRaisesRegex(RuntimeError, "missing frozen registry entries"):
                 verify_runtime_resource_modules_frozen(fresh_root)
 
@@ -422,11 +445,65 @@ class RuntimeResourceTests(unittest.TestCase):
                     [
                         '{"_staticpython_runtime", NULL},',
                         '{"_staticpython_runtime_resources", NULL},',
-                        '{"_staticpython_runtime_resources_shard_000", NULL},',
+                        '{"_staticpython_runtime_resources_shard_000000", NULL},',
                     ]
                 ),
             )
             verify_runtime_resource_modules_frozen(fresh_root)
+        finally:
+            shutil.rmtree(fresh_root)
+            self.runtime.install()
+
+    def test_split_frozen_modules_uses_wide_shard_names(self) -> None:
+        self.runtime.uninstall()
+        fresh_root = Path(tempfile.mkdtemp())
+        try:
+            _write(
+                fresh_root / "PCbuild" / "pythoncore.vcxproj",
+                textwrap.dedent(
+                    """\
+                    <?xml version="1.0" encoding="utf-8"?>
+                    <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+                      <ItemGroup>
+                        <ClCompile Include="..\\Python\\frozen.c" />
+                      </ItemGroup>
+                    </Project>
+                    """
+                ),
+            )
+            _write(
+                fresh_root / "Python" / "frozen.c",
+                textwrap.dedent(
+                    """\
+                    #include "frozen_modules/pkg_one.h"
+                    #include "frozen_modules/pkg_two.h"
+                    static const struct _frozen bootstrap_modules[] = {
+                        {"pkg.one", _Py_M__pkg_one, (int)sizeof(_Py_M__pkg_one), false},
+                        {"pkg.two", _Py_M__pkg_two, (int)sizeof(_Py_M__pkg_two), false},
+                    };
+                    """
+                ),
+            )
+            _write(
+                fresh_root / "Python" / "frozen_modules" / "pkg_one.h",
+                "const unsigned char _Py_M__pkg_one[] = {\n1,\n2,\n};\n",
+            )
+            _write(
+                fresh_root / "Python" / "frozen_modules" / "pkg_two.h",
+                "const unsigned char _Py_M__pkg_two[] = {\n3,\n};\n",
+            )
+
+            split_frozen_modules(fresh_root)
+
+            shard = fresh_root / "Python" / "staticpython_frozen_data_000000.c"
+            self.assertTrue(shard.exists())
+            self.assertFalse((fresh_root / "Python" / "staticpython_frozen_data_000.c").exists())
+            project_text = (fresh_root / "PCbuild" / "pythoncore.vcxproj").read_text(encoding="utf-8")
+            self.assertIn("..\\Python\\staticpython_frozen_data_000000.c", project_text)
+            self.assertIn("<AdditionalOptions Condition=\"'$(Configuration)|$(Platform)'=='Release|x64'\">/GL- /MP- %(AdditionalOptions)</AdditionalOptions>", project_text)
+            frozen_text = (fresh_root / "Python" / "frozen.c").read_text(encoding="utf-8")
+            self.assertIn("extern const unsigned char _Py_M__pkg_one[];", frozen_text)
+            self.assertIn('{"pkg.one", _Py_M__pkg_one, 2, false}', frozen_text)
         finally:
             shutil.rmtree(fresh_root)
             self.runtime.install()
