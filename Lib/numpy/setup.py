@@ -446,7 +446,9 @@ def _ensure_generated_pyconfig_header(context) -> None:
     candidates = [
         generated,
         include_target,
+        context.source_root / "PC" / "pyconfig.h",
         context.source_root / "PC" / "pyconfig.h.in",
+        context.source_root / "pyconfig.h.in",
     ]
     source = next(
         (

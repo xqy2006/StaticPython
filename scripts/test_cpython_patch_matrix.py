@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 import build
 
 
-DEFAULT_TAGS = ("v3.11.9", "v3.12.9", "v3.14.4", "v3.15.0a8")
+DEFAULT_TAGS = ("v3.11.15", "v3.12.13", "v3.13.13", "v3.14.4", "v3.15.0a8")
 
 
 @dataclass
@@ -265,6 +265,7 @@ def validate_split_frozen_modules(source_root: Path) -> list[PhaseResult]:
 
     pythoncore = source_root / "PCbuild" / "pythoncore.vcxproj"
     assert_contains(pythoncore, f"..\\Python\\{shards[0].name}")
+    assert_not_contains(pythoncore, "..\\Python\\deepfreeze\\deepfreeze.c")
     assert_not_contains(pythoncore, "<MultiProcessorCompilation")
     results.append(PhaseResult("split_frozen_modules:assertions", "OK", f"{len(shards)} shard(s), {include_count} header(s)"))
     return results

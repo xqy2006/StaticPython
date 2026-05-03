@@ -2057,6 +2057,9 @@ def patch_pythoncore_frozen_data_sources(source_root: Path, shard_names: list[st
             if normalized.startswith(f"..\\Python\\{FROZEN_DATA_SOURCE_PREFIX}") and normalized.endswith(".c"):
                 item_group.remove(child)
                 continue
+            if normalized == "..\\Python\\deepfreeze\\deepfreeze.c":
+                item_group.remove(child)
+                continue
             if normalized == "..\\Python\\frozen.c":
                 frozen_item_group = item_group
                 frozen_index = list(item_group).index(child) + 1
