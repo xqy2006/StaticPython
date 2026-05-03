@@ -4,6 +4,7 @@ import base64
 import builtins
 import hashlib
 import io
+import locale
 import os
 import posixpath
 import stat as _stat
@@ -57,10 +58,6 @@ def _decode_resource_payload(encoded: bytes, payload_encoding: str) -> bytes:
     payload = base64.b85decode(encoded)
     if payload_encoding == "b85":
         return payload
-    if payload_encoding == "zlib+b85":
-        import zlib as _zlib
-
-        return _zlib.decompress(payload)
     raise ValueError(f"unsupported StaticPython resource payload encoding: {payload_encoding!r}")
 
 
@@ -312,7 +309,20 @@ def _resource_stat(path: object, *, follow_symlinks: bool = True):
         raise FileNotFoundError(os.fspath(path))
     inode = int.from_bytes(hashlib.blake2s(key.encode("utf-8"), digest_size=8).digest(), "little")
     inode &= (1 << 63) - 1
-    return os.stat_result((mode, inode or 1, 0, 1, 0, 0, size, _START_TIME, _START_TIME, _START_TIME))
+    ns = _START_TIME * 1_000_000_000
+    return os.stat_result(
+        (mode, inode or 1, 0, 1, 0, 0, size, _START_TIME, _START_TIME, _START_TIME),
+        {
+            "st_atime": float(_START_TIME),
+            "st_mtime": float(_START_TIME),
+            "st_ctime": float(_START_TIME),
+            "st_atime_ns": ns,
+            "st_mtime_ns": ns,
+            "st_ctime_ns": ns,
+            "st_file_attributes": 0,
+            "st_reparse_tag": 0,
+        },
+    )
 
 
 def _open_resource(path: object, mode: str = "r", buffering: int = -1, encoding=None, errors=None, newline=None):
@@ -325,6 +335,8 @@ def _open_resource(path: object, mode: str = "r", buffering: int = -1, encoding=
         handle = io.BytesIO(data)
     else:
         text_encoding = encoding or "utf-8"
+        if text_encoding == "locale":
+            text_encoding = locale.getencoding()
         handle = io.StringIO(data.decode(text_encoding, errors or "strict"), newline=newline)
     try:
         handle.name = os.fspath(path)

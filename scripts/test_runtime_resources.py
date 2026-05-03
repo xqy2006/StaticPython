@@ -12,7 +12,6 @@ import sys
 import tempfile
 import textwrap
 import unittest
-import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -160,7 +159,7 @@ class RuntimeResourceTests(unittest.TestCase):
         self.assertIn("Lib/demo_pkg/data", resources.RESOURCE_CHILDREN)
         self.assertIn("config.yaml", resources.RESOURCE_BASENAME_INDEX)
         self.assertIn("data", resources.RESOURCE_DIR_BASENAME_INDEX)
-        self.assertEqual(resources.RESOURCE_PAYLOAD_ENCODING, "zlib+b85")
+        self.assertEqual(resources.RESOURCE_PAYLOAD_ENCODING, "b85")
         payloads = dict(resources.iter_resource_payloads())
         self.assertEqual(len(payloads), len(resources.RESOURCE_TARGETS))
         encoded_empty = "".join(payloads["Lib/demo_pkg/data/empty.bin"]).encode("ascii")
@@ -187,6 +186,8 @@ class RuntimeResourceTests(unittest.TestCase):
         result = os.stat(config_path)
         self.assertTrue(stat.S_ISREG(result.st_mode))
         self.assertEqual(result.st_size, len(b"status: ok\n"))
+        self.assertIsInstance(result.st_mtime_ns, int)
+        self.assertEqual(result.st_mtime_ns, int(result.st_mtime) * 1_000_000_000)
         other_result = os.stat(self.root / "Lib" / "demo_pkg" / "data" / "config.schema")
         self.assertNotEqual(result.st_ino, other_result.st_ino)
         self.assertFalse(
@@ -233,6 +234,11 @@ class RuntimeResourceTests(unittest.TestCase):
         )
         self.assertEqual((data_dir / "real-only.txt").read_text(encoding="utf-8"), "real\n")
         self.assertEqual((data_dir / "config.yaml").read_text(encoding="utf-8"), "status: ok\n")
+
+    def test_virtual_files_can_be_copied_with_metadata(self) -> None:
+        destination = self.root / "copied-config.yaml"
+        shutil.copy2(self.root / "Lib" / "demo_pkg" / "data" / "config.yaml", destination)
+        self.assertEqual(destination.read_text(encoding="utf-8"), "status: ok\n")
 
     def test_share_and_etc_paths_are_available_after_disk_files_are_removed(self) -> None:
         index_path = self.root / "share" / "jupyter" / "lab" / "static" / "index.html"
@@ -320,6 +326,8 @@ class RuntimeResourceTests(unittest.TestCase):
             self.assertEqual(handle.read(), "status: ok\n")
             self.assertTrue(str(handle.name).endswith("config.yaml"))
             self.assertEqual(handle.mode, "r")
+        with open(path, "r", encoding="locale") as handle:
+            self.assertEqual(handle.read(), "status: ok\n")
         with open(path, "rb") as handle:
             self.assertEqual(handle.read(), b"status: ok\n")
             self.assertEqual(handle.mode, "rb")
@@ -375,12 +383,10 @@ class RuntimeResourceTests(unittest.TestCase):
             self.runtime.install()
 
     def test_runtime_decoder_accepts_current_and_legacy_payload_encodings(self) -> None:
-        current_encoded = base64.b85encode(zlib.compress(b"payload", level=9))
-        legacy_encoded = base64.b85encode(b"payload")
-        self.assertEqual(self.runtime._decode_resource_payload(current_encoded, "zlib+b85"), b"payload")
-        self.assertEqual(self.runtime._decode_resource_payload(legacy_encoded, "b85"), b"payload")
+        encoded = base64.b85encode(b"payload")
+        self.assertEqual(self.runtime._decode_resource_payload(encoded, "b85"), b"payload")
         with self.assertRaises(ValueError):
-            self.runtime._decode_resource_payload(legacy_encoded, "unknown")
+            self.runtime._decode_resource_payload(encoded, "unknown")
 
     def test_generated_resources_are_sharded_and_deduplicate_identical_payloads(self) -> None:
         self.runtime.uninstall()
@@ -399,7 +405,7 @@ class RuntimeResourceTests(unittest.TestCase):
                 if name.startswith("_staticpython_runtime_resources"):
                     sys.modules.pop(name, None)
             resources = importlib.import_module("_staticpython_runtime_resources")
-            self.assertEqual(resources.RESOURCE_PAYLOAD_ENCODING, "zlib+b85")
+            self.assertEqual(resources.RESOURCE_PAYLOAD_ENCODING, "b85")
             self.assertGreaterEqual(len(resources.RESOURCE_SHARDS), 2)
             self.assertTrue(
                 all(name.rsplit("_", 1)[-1].isdigit() and len(name.rsplit("_", 1)[-1]) == 6 for name in resources.RESOURCE_SHARDS)
@@ -407,7 +413,7 @@ class RuntimeResourceTests(unittest.TestCase):
             payloads = dict(resources.iter_resource_payloads())
             self.assertEqual(payloads["Lib/pkg/one.dat"], payloads["Lib/pkg/copy.dat"])
             encoded_one = "".join(payloads["Lib/pkg/one.dat"]).encode("ascii")
-            self.assertEqual(zlib.decompress(base64.b85decode(encoded_one)), b"alpha")
+            self.assertEqual(base64.b85decode(encoded_one), b"alpha")
             one_module, one_blob = resources.RESOURCE_TARGETS["Lib/pkg/one.dat"]
             copy_module, copy_blob = resources.RESOURCE_TARGETS["Lib/pkg/copy.dat"]
             self.assertEqual((one_module, one_blob), (copy_module, copy_blob))

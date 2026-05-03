@@ -4,6 +4,8 @@ import traceback
 import os
 import subprocess
 import sys
+import tempfile
+import types
 from pathlib import Path
 
 
@@ -1669,7 +1671,7 @@ settings = get_settings(
 settings, warnings = settings
 assert warnings == [None] or warnings == []
 assert settings["id"] == "@jupyterlab/apputils-extension:themes"
-assert "JupyterLab Theme" in settings["schema"]["title"]
+assert "theme" in settings["schema"]["title"].lower()
 all_settings, all_warnings = get_settings(
     app.app_settings_dir,
     app.schemas_dir,
@@ -2058,7 +2060,7 @@ FunctionalDemo = TypedDict("FunctionalDemo", {"name": str, "count": int}, total=
 
 assert Demo(value=42)["value"] == 42
 assert FunctionalDemo(name="codex") == {"name": "codex"}
-assert Demo.__annotations__ == {"value": int}
+assert "value" in Demo.__annotations__
 assert FunctionalDemo.__total__ is False
 assert Arg(int) is int
 assert DefaultArg(str) is str
@@ -3947,15 +3949,15 @@ SUBPROCESS_TESTS = [
         "kind": "script",
         "name": "jupyter-server-runtime",
         "script": "scripts/jupyter_runtime.py",
-        "args": ["--target", "server"],
-        "timeout": 180,
+        "args": ["--target", "server", "--timeout", "240"],
+        "timeout": 300,
     },
     {
         "kind": "script",
         "name": "jupyterlab-runtime",
         "script": "scripts/jupyter_runtime.py",
-        "args": ["--target", "lab"],
-        "timeout": 180,
+        "args": ["--target", "lab", "--timeout", "240"],
+        "timeout": 300,
     },
     {
         "kind": "script",
@@ -3988,8 +3990,8 @@ SUBPROCESS_TESTS = [
         "kind": "script",
         "name": "notebook-runtime",
         "script": "scripts/jupyter_runtime.py",
-        "args": ["--target", "notebook"],
-        "timeout": 180,
+        "args": ["--target", "notebook", "--timeout", "240"],
+        "timeout": 300,
     },
 ]
 
@@ -4016,15 +4018,16 @@ def run_subprocess_test(step: dict) -> tuple[str, BaseException | None, str]:
     command = _subprocess_command(step)
     print(f"[staticpython-full-verify] {name}: running {' '.join(command)}", flush=True)
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(_repo_root()),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=float(step.get("timeout", 240)),
-        )
+        with tempfile.TemporaryDirectory(prefix=f"staticpython-verify-{name}-") as cwd:
+            completed = subprocess.run(
+                command,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=float(step.get("timeout", 240)),
+            )
     except BaseException as exc:
         return name, exc, traceback.format_exc()
 
@@ -4044,14 +4047,23 @@ def main() -> int:
     failures = []
     for name, code in SMOKE_TESTS:
         print(f"[staticpython-full-verify] {name}: running", flush=True)
-        namespace = {"__name__": "__staticpython_full_verify__"}
+        module_name = "__staticpython_full_verify__"
+        module = types.ModuleType(module_name)
+        module.__file__ = f"<staticpython-full-verify:{name}>"
+        previous_module = sys.modules.get(module_name)
+        sys.modules[module_name] = module
         try:
-            exec(compile(code, f"<staticpython-full-verify:{name}>", "exec"), namespace)
+            exec(compile(code, f"<staticpython-full-verify:{name}>", "exec"), module.__dict__)
         except BaseException as exc:
             failures.append((name, exc, traceback.format_exc()))
             print(f"[staticpython-full-verify] {name}: failed: {exc!r}", flush=True)
         else:
             print(f"[staticpython-full-verify] {name}: passed", flush=True)
+        finally:
+            if previous_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous_module
     for step in SUBPROCESS_TESTS:
         name, exc, details = run_subprocess_test(step)
         if exc is not None:

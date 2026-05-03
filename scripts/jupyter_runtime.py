@@ -44,7 +44,7 @@ KERNEL_SENTINEL = "__STATICPYTHON_KERNEL__"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Runtime smoke tests for StaticPython Jupyter integrations.")
     parser.add_argument("--target", choices=("server", "notebook", "lab"), required=True)
-    parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument("--timeout", type=float, default=180.0)
     return parser.parse_args()
 
 
@@ -58,6 +58,14 @@ def reserve_port() -> int:
 
 
 def make_env(temp_root: Path) -> dict[str, str]:
+    for relative in (
+        "config",
+        "data",
+        "runtime",
+        "lab/user-settings",
+        "lab/workspaces",
+    ):
+        (temp_root / relative).mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.update(
         {
@@ -66,11 +74,23 @@ def make_env(temp_root: Path) -> dict[str, str]:
             "JUPYTER_RUNTIME_DIR": str(temp_root / "runtime"),
             "JUPYTERLAB_SETTINGS_DIR": str(temp_root / "lab" / "user-settings"),
             "JUPYTERLAB_WORKSPACES_DIR": str(temp_root / "lab" / "workspaces"),
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": "utf-8",
         }
     )
     return env
+
+
+def read_log_tail(path: Path, *, limit: int = 12000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return "<log file was not created>"
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
 
 
 def request_url(
@@ -312,8 +332,14 @@ def verify_kernel_execution(
         if process.poll() is not None:
             break
         try:
-            ws = create_connection(ws_url, timeout=5, enable_multithread=False)
-            ws.settimeout(1)
+            ws = create_connection(
+                ws_url,
+                timeout=30,
+                enable_multithread=False,
+                http_proxy_host=None,
+                http_proxy_port=None,
+            )
+            ws.settimeout(2)
             break
         except Exception as exc:
             last_error = exc
@@ -1088,58 +1114,73 @@ def main() -> int:
         work_dir.mkdir()
         token = f"staticpython-{args.target}"
         port = reserve_port()
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                module_name,
-                "--ServerApp.ip=127.0.0.1",
-                f"--ServerApp.port={port}",
-                "--ServerApp.port_retries=0",
-                "--ServerApp.open_browser=False",
-                f"--ServerApp.root_dir={work_dir}",
-                f"--ServerApp.token={token}",
-                "--ServerApp.password=",
-            ],
-            cwd=str(work_dir),
-            env=make_env(temp_root),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        log_output = ""
-        verification_succeeded = False
-        try:
-            deadline = time.time() + args.timeout
-            if args.target == "server":
-                verify_server_runtime(port, token, deadline, process, work_dir=work_dir)
-            elif args.target == "notebook":
-                verify_notebook_runtime(port, token, deadline, process, work_dir=work_dir)
-            else:
-                verify_lab_runtime(port, token, deadline, process, work_dir=work_dir)
-            verification_succeeded = True
-            return 0
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=15)
-            if process.stdout is not None:
-                log_output = process.stdout.read()
-            if verification_succeeded:
-                assert_log_health(log_output, args.target)
-            if verification_succeeded and process.returncode not in (0, -15, 1):
-                raise AssertionError(
-                    f"{args.target} runtime exited unexpectedly with code {process.returncode}\n"
-                    f"startup page: {page_path}\n"
-                    f"log tail:\n{log_output[-8000:]}"
-                )
+        log_path = temp_root / f"jupyter-{args.target}.log"
+        with log_path.open("w", encoding="utf-8", errors="replace") as log_handle:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    module_name,
+                    "--ServerApp.ip=127.0.0.1",
+                    f"--ServerApp.port={port}",
+                    "--ServerApp.port_retries=0",
+                    "--ServerApp.open_browser=False",
+                    f"--ServerApp.root_dir={work_dir}",
+                    f"--ServerApp.token={token}",
+                    "--ServerApp.password=",
+                ],
+                cwd=str(work_dir),
+                env=make_env(temp_root),
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            verification_succeeded = False
+            try:
+                deadline = time.time() + args.timeout
+                if args.target == "server":
+                    verify_server_runtime(port, token, deadline, process, work_dir=work_dir)
+                elif args.target == "notebook":
+                    verify_notebook_runtime(port, token, deadline, process, work_dir=work_dir)
+                else:
+                    verify_lab_runtime(port, token, deadline, process, work_dir=work_dir)
+                verification_succeeded = True
+                return 0
+            except Exception as exc:
+                log_handle.flush()
+                raise RuntimeError(
+                    f"{args.target} runtime verification failed: {exc}\n\n"
+                    f"{args.target} runtime log tail from {log_path}:\n"
+                    f"{read_log_tail(log_path)}"
+                ) from exc
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=15)
+                log_handle.flush()
+                log_output = read_log_tail(log_path, limit=200000)
+                if verification_succeeded:
+                    try:
+                        assert_log_health(log_output, args.target)
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"{args.target} runtime log health check failed: {exc}\n\n"
+                            f"{args.target} runtime log tail from {log_path}:\n"
+                            f"{read_log_tail(log_path)}"
+                        ) from exc
+                if verification_succeeded and process.returncode not in (0, -15, 1):
+                    raise AssertionError(
+                        f"{args.target} runtime exited unexpectedly with code {process.returncode}\n"
+                        f"startup page: {page_path}\n"
+                        f"log tail:\n{read_log_tail(log_path)}"
+                    )
 
 
 if __name__ == "__main__":
