@@ -265,7 +265,18 @@ def validate_split_frozen_modules(source_root: Path) -> list[PhaseResult]:
 
     pythoncore = source_root / "PCbuild" / "pythoncore.vcxproj"
     assert_contains(pythoncore, f"..\\Python\\{shards[0].name}")
-    assert_not_contains(pythoncore, "..\\Python\\deepfreeze\\deepfreeze.c")
+    legacy_deepfreeze = source_root / "Python" / "deepfreeze" / "deepfreeze.c"
+    if frozen_struct_has_get_code(source_root):
+        assert_contains(pythoncore, "..\\Python\\deepfreeze\\deepfreeze.c")
+        assert_file(legacy_deepfreeze)
+        stub_text = legacy_deepfreeze.read_text(encoding="utf-8")
+        for symbol in ("_Py_Deepfreeze_Init", "_Py_Deepfreeze_Fini", "_Py_next_func_version"):
+            if symbol not in stub_text:
+                raise AssertionError(f"legacy deepfreeze stub does not define {symbol}")
+    else:
+        assert_not_contains(pythoncore, "..\\Python\\deepfreeze\\deepfreeze.c")
+        if legacy_deepfreeze.exists():
+            raise AssertionError("legacy deepfreeze stub was created for a non-legacy CPython tree")
     assert_not_contains(pythoncore, "<MultiProcessorCompilation")
     results.append(PhaseResult("split_frozen_modules:assertions", "OK", f"{len(shards)} shard(s), {include_count} header(s)"))
     return results
