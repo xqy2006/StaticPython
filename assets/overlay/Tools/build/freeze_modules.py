@@ -11,6 +11,7 @@ import io
 import ntpath
 import os
 import posixpath
+import re
 import shutil
 import subprocess
 import tempfile
@@ -188,6 +189,23 @@ PCBUILD_FILTERS = os.path.join(ROOT_DIR, 'PCbuild', '_freeze_module.vcxproj.filt
 PCBUILD_PYTHONCORE = os.path.join(ROOT_DIR, 'PCbuild', 'pythoncore.vcxproj')
 
 OS_PATH = 'ntpath' if os.name == 'nt' else 'posixpath'
+_FROZEN_STRUCT_HAS_GET_CODE = None
+
+
+def frozen_struct_has_get_code():
+    global _FROZEN_STRUCT_HAS_GET_CODE
+    if _FROZEN_STRUCT_HAS_GET_CODE is not None:
+        return _FROZEN_STRUCT_HAS_GET_CODE
+    import_h = os.path.join(ROOT_DIR, 'Include', 'cpython', 'import.h')
+    try:
+        with open(import_h, encoding='utf-8') as infile:
+            text = infile.read()
+    except OSError:
+        _FROZEN_STRUCT_HAS_GET_CODE = False
+        return _FROZEN_STRUCT_HAS_GET_CODE
+    match = re.search(r'struct\s+_frozen\s*\{(?P<body>.*?)\};', text, flags=re.DOTALL)
+    _FROZEN_STRUCT_HAS_GET_CODE = match is not None and 'get_code' in match.group('body')
+    return _FROZEN_STRUCT_HAS_GET_CODE
 
 # These are modules that get frozen.
 # If you're debugging new bytecode instructions,
@@ -1037,7 +1055,10 @@ def regen_frozen(modules):
 
         pkg = 'true' if mod.ispkg else 'false'
         size = f"(int)sizeof({mod.symbol})"
-        line = f'{{"{mod.name}", {mod.symbol}, {size}, {pkg}}},'
+        if frozen_struct_has_get_code():
+            line = f'{{"{mod.name}", {mod.symbol}, {size}, {pkg}, NULL}},'
+        else:
+            line = f'{{"{mod.name}", {mod.symbol}, {size}, {pkg}}},'
         lines.append(line)
 
         if mod.isalias:

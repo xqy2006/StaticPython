@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       cpython_version:
-        description: CPython version, for example 3.13.2 or 3.11.9
+        description: CPython version, for example 3.13.13 or 3.15.0a8
         required: true
-        default: 3.13.2
+        default: 3.13.13
       release_tag:
         description: Optional release tag; defaults to staticpython-v<version>
         required: false
@@ -36,31 +36,86 @@ env:
   PYTHONIOENCODING: "utf-8"
   STATICPYTHON_BUILD_WORKERS: "2"
   STATICPYTHON_FULL_BUILD_WORKERS: "1"
-  DEFAULT_CPYTHON_VERSION: "3.13.2"
+  DEFAULT_CPYTHON_VERSION: "3.13.13"
 
 jobs:
-  build:
+  resolve-cpython-matrix:
     runs-on: windows-2022
+    outputs:
+      versions: ${{ steps.resolve.outputs.versions }}
+
+    steps:
+      - name: Resolve CPython version matrix
+        id: resolve
+        shell: pwsh
+        run: |
+          $manualVersion = "${{ inputs.cpython_version }}".Trim()
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            if ([string]::IsNullOrWhiteSpace($manualVersion)) {
+              $manualVersion = $env:DEFAULT_CPYTHON_VERSION
+            }
+            $versionsJson = ConvertTo-Json -InputObject @($manualVersion) -Compress
+            "versions=$versionsJson" >> $env:GITHUB_OUTPUT
+            Write-Host "Using manually requested CPython version: $manualVersion"
+            exit 0
+          }
+
+          $tags = @(git ls-remote --tags --refs https://github.com/python/cpython.git "v3.*" |
+            ForEach-Object {
+              if ($_ -match "refs/tags/v((3)\.(11|12|13|14|15)\.([0-9]+)(?:(a|b|rc)([0-9]+))?)$") {
+                $phase = $matches[6]
+                $phaseRank = 4
+                if ($phase -eq "a") {
+                  $phaseRank = 1
+                }
+                elseif ($phase -eq "b") {
+                  $phaseRank = 2
+                }
+                elseif ($phase -eq "rc") {
+                  $phaseRank = 3
+                }
+                [PSCustomObject]@{
+                  Version = $matches[1]
+                  Series = "3.$($matches[3])"
+                  Major = [int]$matches[2]
+                  Minor = [int]$matches[3]
+                  Micro = [int]$matches[4]
+                  PhaseRank = $phaseRank
+                  PhaseSerial = if ($matches[7]) { [int]$matches[7] } else { 0 }
+                }
+              }
+            })
+          if (-not $tags) {
+            throw "Could not resolve CPython tags from python/cpython"
+          }
+
+          $versions = foreach ($series in @("3.11", "3.12", "3.13", "3.14", "3.15")) {
+            $latest = $tags |
+              Where-Object { $_.Series -eq $series } |
+              Sort-Object Major, Minor, Micro, PhaseRank, PhaseSerial |
+              Select-Object -Last 1
+            if (-not $latest) {
+              throw "Could not resolve latest CPython $series version"
+            }
+            $latest.Version
+          }
+
+          $versionsJson = ConvertTo-Json -InputObject @($versions) -Compress
+          "versions=$versionsJson" >> $env:GITHUB_OUTPUT
+          Write-Host "Resolved CPython versions: $($versions -join ', ')"
+
+  build:
+    name: Build CPython ${{ matrix.cpython_version }}
+    runs-on: windows-2022
+    needs: resolve-cpython-matrix
     strategy:
       fail-fast: false
       matrix:
-        profile:
-          - stdlib
-          - full
+        cpython_version: ${{ fromJSON(needs.resolve-cpython-matrix.outputs.versions) }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Resolve CPython version
-        id: cpython
-        shell: pwsh
-        run: |
-          $version = "${{ inputs.cpython_version }}".Trim()
-          if ([string]::IsNullOrWhiteSpace($version)) {
-            $version = $env:DEFAULT_CPYTHON_VERSION
-          }
-          "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -85,68 +140,122 @@ jobs:
         shell: pwsh
         run: python .\scripts\test_runtime_resources.py
 
-      - name: Build StaticPython
+      - name: Build stdlib StaticPython
         shell: pwsh
         run: |
-          $dist = "$env:GITHUB_WORKSPACE\dist\${{ matrix.profile }}"
+          $dist = "$env:GITHUB_WORKSPACE\dist\${{ matrix.cpython_version }}\stdlib"
           New-Item -ItemType Directory -Force $dist | Out-Null
-          $buildWorkers = "$env:STATICPYTHON_BUILD_WORKERS"
-          if ("${{ matrix.profile }}" -eq "full") {
-            $buildWorkers = "$env:STATICPYTHON_FULL_BUILD_WORKERS"
-          }
           python .\build.py `
-            --cpython-version "${{ steps.cpython.outputs.version }}" `
-            --download-root "$env:RUNNER_TEMP\cpython-${{ matrix.profile }}" `
-            --profile "${{ matrix.profile }}" `
-            --build-workers "$buildWorkers" `
+            --cpython-version "${{ matrix.cpython_version }}" `
+            --download-root "$env:RUNNER_TEMP\cpython-${{ matrix.cpython_version }}-stdlib" `
+            --profile stdlib `
+            --build-workers "$env:STATICPYTHON_BUILD_WORKERS" `
             --skip-verify `
-            --output-dir $dist
+            --output-dir "$dist"
 
-      - name: Find artifact
-        id: artifact
+      - name: Find stdlib artifact
+        id: stdlib_artifact
         shell: pwsh
         run: |
-          $asset = Get-ChildItem "$env:GITHUB_WORKSPACE\dist\${{ matrix.profile }}\*.exe" | Select-Object -First 1
+          $asset = Get-ChildItem "$env:GITHUB_WORKSPACE\dist\${{ matrix.cpython_version }}\stdlib\*.exe" | Select-Object -First 1
           if ($null -eq $asset) {
             throw "No built .exe found in dist"
           }
           "path=$($asset.FullName)" >> $env:GITHUB_OUTPUT
 
-      - name: Upload workflow artifact
+      - name: Upload stdlib workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: staticpython-${{ steps.cpython.outputs.version }}-${{ matrix.profile }}
-          path: ${{ steps.artifact.outputs.path }}
+          name: staticpython-${{ matrix.cpython_version }}-stdlib
+          path: ${{ steps.stdlib_artifact.outputs.path }}
 
-      - name: Verify built executable
+      - name: Build full StaticPython
         shell: pwsh
         run: |
-          $sourceRoot = Join-Path "$env:RUNNER_TEMP\cpython-${{ matrix.profile }}" "cpython-${{ steps.cpython.outputs.version }}"
+          $dist = "$env:GITHUB_WORKSPACE\dist\${{ matrix.cpython_version }}\full"
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          python .\build.py `
+            --cpython-version "${{ matrix.cpython_version }}" `
+            --download-root "$env:RUNNER_TEMP\cpython-${{ matrix.cpython_version }}-full" `
+            --profile full `
+            --build-workers "$env:STATICPYTHON_FULL_BUILD_WORKERS" `
+            --skip-verify `
+            --output-dir "$dist"
+
+      - name: Find full artifact
+        id: full_artifact
+        shell: pwsh
+        run: |
+          $asset = Get-ChildItem "$env:GITHUB_WORKSPACE\dist\${{ matrix.cpython_version }}\full\*.exe" | Select-Object -First 1
+          if ($null -eq $asset) {
+            throw "No built .exe found in dist"
+          }
+          "path=$($asset.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload full workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: staticpython-${{ matrix.cpython_version }}-full
+          path: ${{ steps.full_artifact.outputs.path }}
+
+      - name: Verify stdlib executable
+        if: ${{ always() && steps.stdlib_artifact.outputs.path != '' }}
+        shell: pwsh
+        run: |
+          $sourceRoot = Join-Path "$env:RUNNER_TEMP\cpython-${{ matrix.cpython_version }}-stdlib" "cpython-${{ matrix.cpython_version }}"
           if (-not (Test-Path $sourceRoot)) {
             throw "Expected extracted source root not found: $sourceRoot"
           }
-          $report = Join-Path "$env:GITHUB_WORKSPACE\dist\${{ matrix.profile }}" "verify-report-${{ matrix.profile }}.json"
+          $report = Join-Path "$env:GITHUB_WORKSPACE\dist\${{ matrix.cpython_version }}\stdlib" "verify-report-stdlib.json"
           python .\verify.py `
-            --python-exe "${{ steps.artifact.outputs.path }}" `
+            --python-exe "${{ steps.stdlib_artifact.outputs.path }}" `
             --manifest "$env:GITHUB_WORKSPACE\manifest.json" `
             --repo-root "$env:GITHUB_WORKSPACE" `
             --source-root $sourceRoot `
-            --profile "${{ matrix.profile }}" `
+            --profile stdlib `
             --config "$env:GITHUB_WORKSPACE\config.json" `
             --report-json $report
 
-      - name: Upload verification report
+      - name: Upload stdlib verification report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: staticpython-${{ steps.cpython.outputs.version }}-${{ matrix.profile }}-verify-report
-          path: ${{ github.workspace }}\dist\${{ matrix.profile }}\verify-report-${{ matrix.profile }}.json
+          name: staticpython-${{ matrix.cpython_version }}-stdlib-verify-report
+          path: ${{ github.workspace }}\dist\${{ matrix.cpython_version }}\stdlib\verify-report-stdlib.json
+          if-no-files-found: warn
+
+      - name: Verify full executable
+        if: ${{ always() && steps.full_artifact.outputs.path != '' }}
+        shell: pwsh
+        run: |
+          $sourceRoot = Join-Path "$env:RUNNER_TEMP\cpython-${{ matrix.cpython_version }}-full" "cpython-${{ matrix.cpython_version }}"
+          if (-not (Test-Path $sourceRoot)) {
+            throw "Expected extracted source root not found: $sourceRoot"
+          }
+          $report = Join-Path "$env:GITHUB_WORKSPACE\dist\${{ matrix.cpython_version }}\full" "verify-report-full.json"
+          python .\verify.py `
+            --python-exe "${{ steps.full_artifact.outputs.path }}" `
+            --manifest "$env:GITHUB_WORKSPACE\manifest.json" `
+            --repo-root "$env:GITHUB_WORKSPACE" `
+            --source-root $sourceRoot `
+            --profile full `
+            --config "$env:GITHUB_WORKSPACE\config.json" `
+            --report-json $report
+
+      - name: Upload full verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staticpython-${{ matrix.cpython_version }}-full-verify-report
+          path: ${{ github.workspace }}\dist\${{ matrix.cpython_version }}\full\verify-report-full.json
           if-no-files-found: warn
 
   release:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
     runs-on: windows-2022
-    needs: build
+    needs:
+      - resolve-cpython-matrix
+      - build
 
     steps:
       - name: Download built executables
@@ -179,7 +288,7 @@ jobs:
           }
           $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.txt"
           @"
-          Automated StaticPython build for CPython ${{ inputs.cpython_version }}.
+          Automated StaticPython build for CPython $version.
 
           Assets:
           $($assets.Name | ForEach-Object { "- $_" } | Out-String)

@@ -353,12 +353,6 @@ def set_frozen_data_compile_options(clcompile: ET.Element) -> None:
         condition=MSBUILD_RELEASE_X64_CONDITION,
     )
     whole_program_optimization.text = "false"
-    multiprocessor = ensure_direct_child(
-        clcompile,
-        "MultiProcessorCompilation",
-        condition=MSBUILD_RELEASE_X64_CONDITION,
-    )
-    multiprocessor.text = "false"
     debug_information = ensure_direct_child(
         clcompile,
         "DebugInformationFormat",

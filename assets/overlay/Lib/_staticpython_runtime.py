@@ -7,6 +7,7 @@ import io
 import locale
 import os
 import posixpath
+import shutil
 import stat as _stat
 import sys
 import time
@@ -30,6 +31,8 @@ _ORIGINAL_OS_ACCESS = os.access
 _ORIGINAL_EXISTS = os.path.exists
 _ORIGINAL_ISFILE = os.path.isfile
 _ORIGINAL_ISDIR = os.path.isdir
+_ORIGINAL_SHUTIL_COPYFILE = shutil.copyfile
+_ORIGINAL_SHUTIL_COPY2 = shutil.copy2
 _ORIGINAL_SYS_EXCEPTHOOK = sys.excepthook
 _ORIGINAL_PKGUTIL_GET_DATA = None
 _ORIGINAL_IMPORTLIB_RESOURCES_FROM_PACKAGE = None
@@ -480,6 +483,26 @@ def _staticpython_scandir(path="."):
     return _StaticPythonScandir(path)
 
 
+def _staticpython_shutil_copyfile(src, dst, *, follow_symlinks=True):
+    data = _resource_data(src)
+    if data is None:
+        return _ORIGINAL_SHUTIL_COPYFILE(src, dst, follow_symlinks=follow_symlinks)
+    with _ORIGINAL_OPEN(dst, "wb") as handle:
+        handle.write(data)
+    return dst
+
+
+def _staticpython_shutil_copy2(src, dst, *, follow_symlinks=True):
+    data = _resource_data(src)
+    if data is None:
+        return _ORIGINAL_SHUTIL_COPY2(src, dst, follow_symlinks=follow_symlinks)
+    if _staticpython_isdir(dst):
+        dst = os.path.join(dst, os.path.basename(os.fspath(src)))
+    _staticpython_shutil_copyfile(src, dst, follow_symlinks=follow_symlinks)
+    shutil.copystat(src, dst, follow_symlinks=follow_symlinks)
+    return dst
+
+
 def _patch_importlib_resources() -> None:
     global _ORIGINAL_IMPORTLIB_RESOURCES_FROM_PACKAGE
     try:
@@ -622,6 +645,8 @@ def install() -> None:
     os.path.exists = _staticpython_exists
     os.path.isfile = _staticpython_isfile
     os.path.isdir = _staticpython_isdir
+    shutil.copyfile = _staticpython_shutil_copyfile
+    shutil.copy2 = _staticpython_shutil_copy2
     _patch_importlib_resources()
     _patch_pkgutil()
     _INSTALLED = True
@@ -640,6 +665,8 @@ def uninstall() -> None:
     os.path.exists = _ORIGINAL_EXISTS
     os.path.isfile = _ORIGINAL_ISFILE
     os.path.isdir = _ORIGINAL_ISDIR
+    shutil.copyfile = _ORIGINAL_SHUTIL_COPYFILE
+    shutil.copy2 = _ORIGINAL_SHUTIL_COPY2
     if _ORIGINAL_PKGUTIL_GET_DATA is not None:
         try:
             import pkgutil

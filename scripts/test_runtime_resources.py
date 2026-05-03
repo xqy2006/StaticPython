@@ -341,12 +341,16 @@ class RuntimeResourceTests(unittest.TestCase):
 
         patched_get_data = pkgutil.get_data
         patched_from_package = common.from_package
+        patched_copyfile = shutil.copyfile
+        patched_copy2 = shutil.copy2
         path = self.root / "Lib" / "demo_pkg" / "data" / "config.yaml"
         self.assertEqual(path.read_text(encoding="utf-8"), "status: ok\n")
         self.runtime.uninstall()
         try:
             self.assertIsNot(pkgutil.get_data, patched_get_data)
             self.assertIsNot(common.from_package, patched_from_package)
+            self.assertIsNot(shutil.copyfile, patched_copyfile)
+            self.assertIsNot(shutil.copy2, patched_copy2)
             self.assertFalse(path.exists())
             with self.assertRaises(FileNotFoundError):
                 path.read_text(encoding="utf-8")
@@ -507,7 +511,7 @@ class RuntimeResourceTests(unittest.TestCase):
             project_text = (fresh_root / "PCbuild" / "pythoncore.vcxproj").read_text(encoding="utf-8")
             self.assertIn("..\\Python\\staticpython_frozen_data_000000.c", project_text)
             self.assertIn("<AdditionalOptions Condition=\"'$(Configuration)|$(Platform)'=='Release|x64'\">/GL- %(AdditionalOptions)</AdditionalOptions>", project_text)
-            self.assertIn("<MultiProcessorCompilation Condition=\"'$(Configuration)|$(Platform)'=='Release|x64'\">false</MultiProcessorCompilation>", project_text)
+            self.assertNotIn("<MultiProcessorCompilation", project_text)
             frozen_text = (fresh_root / "Python" / "frozen.c").read_text(encoding="utf-8")
             self.assertIn("extern const unsigned char _Py_M__pkg_one[];", frozen_text)
             self.assertIn('{"pkg.one", _Py_M__pkg_one, 2, false}', frozen_text)
