@@ -278,6 +278,22 @@ class RuntimeResourceTests(unittest.TestCase):
         shutil.copy2(self.root / "Lib" / "demo_pkg" / "data" / "config.yaml", destination)
         self.assertEqual(destination.read_text(encoding="utf-8"), "status: ok\n")
 
+    def test_virtual_directories_can_be_copied_with_copytree(self) -> None:
+        destination = self.root / "copied-data"
+        result = shutil.copytree(self.root / "Lib" / "demo_pkg" / "data", destination)
+        self.assertEqual(Path(result), destination)
+        self.assertEqual((destination / "config.yaml").read_text(encoding="utf-8"), "status: ok\n")
+        self.assertEqual((destination / "shared.txt").read_text(encoding="utf-8"), "demo shared\n")
+        self.assertEqual((destination / "empty.bin").read_bytes(), b"")
+
+    def test_virtual_directories_can_be_copied_from_unknown_absolute_prefix(self) -> None:
+        destination = self.root / "copied-unknown-prefix-data"
+        source = Path("Z:/unknown/install/root/demo_pkg/data")
+        result = shutil.copytree(source, destination)
+        self.assertEqual(Path(result), destination)
+        self.assertEqual((destination / "config.yaml").read_text(encoding="utf-8"), "status: ok\n")
+        self.assertEqual((destination / "shared.txt").read_text(encoding="utf-8"), "demo shared\n")
+
     def test_makedirs_uses_real_disk_state_when_virtual_share_suffix_matches(self) -> None:
         target = self.root / "prefix" / "share" / "jupyter" / "kernels" / "python3"
         self.assertTrue((self.root / "share" / "jupyter").exists())
@@ -388,6 +404,7 @@ class RuntimeResourceTests(unittest.TestCase):
         patched_from_package = common.from_package
         patched_copyfile = shutil.copyfile
         patched_copy2 = shutil.copy2
+        patched_copytree = shutil.copytree
         path = self.root / "Lib" / "demo_pkg" / "data" / "config.yaml"
         self.assertEqual(path.read_text(encoding="utf-8"), "status: ok\n")
         self.runtime.uninstall()
@@ -396,6 +413,7 @@ class RuntimeResourceTests(unittest.TestCase):
             self.assertIsNot(common.from_package, patched_from_package)
             self.assertIsNot(shutil.copyfile, patched_copyfile)
             self.assertIsNot(shutil.copy2, patched_copy2)
+            self.assertIsNot(shutil.copytree, patched_copytree)
             self.assertFalse(path.exists())
             with self.assertRaises(FileNotFoundError):
                 path.read_text(encoding="utf-8")

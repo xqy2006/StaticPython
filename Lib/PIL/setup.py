@@ -9,6 +9,7 @@ from libs import pypi_library, source_path, write_source_text
 PIL_IMAGING_PROJECT_GUID = "{0AC7C2D2-056F-464A-9297-0BF67EC9499A}"
 PIL_IMAGINGMATH_PROJECT_GUID = "{B7A8FF28-707A-4F50-A0C1-D50E30E6BC6B}"
 PIL_IMAGINGMORPH_PROJECT_GUID = "{E2259EA5-4DA5-4128-A2E6-2649577C51A9}"
+CPYTHON_ZLIB_NG_PROJECT_GUID = "{FB91C8B2-6FBC-3A01-B644-1637111F902D}"
 
 PIL_TOP_LEVEL_IMAGING_SOURCES = [
     "_imaging.c",
@@ -67,9 +68,25 @@ def _render_pil_project(
         r"..\pillow_builtin\src\libImaging",
     ]
     if include_zlib:
-        include_dirs.append(r"$(zlibDir)")
+        include_dirs.extend(
+            [
+                r"$(GeneratedZlibNgDir)",
+                r"$(zlibNgDir)",
+                r"..\PC",
+                r"$(zlibDir)",
+            ]
+        )
     include_text = ";".join([*include_dirs, "%(AdditionalIncludeDirectories)"])
     definitions = ";".join([*extra_definitions, "Py_NO_ENABLE_SHARED", "_CRT_SECURE_NO_WARNINGS", "%(PreprocessorDefinitions)"])
+    project_references = ""
+    if include_zlib:
+        project_references = f"""
+  <ItemGroup>
+    <ProjectReference Include="zlib-ng.vcxproj" Condition="Exists('zlib-ng.vcxproj')">
+      <Project>{CPYTHON_ZLIB_NG_PROJECT_GUID}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+    </ProjectReference>
+  </ItemGroup>"""
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
 {_project_configurations()}  <PropertyGroup Label="Globals">
@@ -108,6 +125,7 @@ def _render_pil_project(
   <ItemGroup>
 {_compile_items(source_files)}
   </ItemGroup>
+{project_references}
   <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />
 </Project>
 """

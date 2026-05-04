@@ -572,6 +572,8 @@ def build_python_link_dependencies(source_root: Path, manifest: dict, integratio
     combined = list(
         dict.fromkeys([*manifest["python_link_dependencies_release_x64"], *collect_python_link_dependencies(integrations)])
     )
+    if (source_root / "PCbuild" / "zlib-ng.vcxproj").exists():
+        combined.append("zlib-ng$(PyDebugExt).lib")
     for dependency in combined:
         stem = Path(dependency).stem
         if dependency.lower().endswith(".lib") and stem in all_project_stems and stem not in available_project_stems:

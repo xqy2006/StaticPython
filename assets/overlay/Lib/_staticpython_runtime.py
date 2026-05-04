@@ -38,6 +38,7 @@ _ORIGINAL_ISFILE = os.path.isfile
 _ORIGINAL_ISDIR = os.path.isdir
 _ORIGINAL_SHUTIL_COPYFILE = shutil.copyfile
 _ORIGINAL_SHUTIL_COPY2 = shutil.copy2
+_ORIGINAL_SHUTIL_COPYTREE = shutil.copytree
 _ORIGINAL_SYS_EXCEPTHOOK = sys.excepthook
 _ORIGINAL_PKGUTIL_GET_DATA = None
 _ORIGINAL_IMPORTLIB_RESOURCES_FROM_PACKAGE = None
@@ -827,6 +828,65 @@ def _staticpython_shutil_copy2(src, dst, *, follow_symlinks=True):
     return dst
 
 
+def _staticpython_shutil_copytree(
+    src,
+    dst,
+    symlinks=False,
+    ignore=None,
+    copy_function=None,
+    ignore_dangling_symlinks=False,
+    dirs_exist_ok=False,
+):
+    resource_key = _resource_key(src)
+    if resource_key is None or not _resource_key_is_dir(resource_key):
+        return _ORIGINAL_SHUTIL_COPYTREE(
+            src,
+            dst,
+            symlinks=symlinks,
+            ignore=ignore,
+            copy_function=_staticpython_shutil_copy2 if copy_function is None else copy_function,
+            ignore_dangling_symlinks=ignore_dangling_symlinks,
+            dirs_exist_ok=dirs_exist_ok,
+        )
+
+    names = _staticpython_listdir(src)
+    ignored_names = set(ignore(os.fspath(src), names)) if ignore is not None else set()
+    errors = []
+    _ORIGINAL_OS_MAKEDIRS(dst, exist_ok=dirs_exist_ok)
+    copy_function = _staticpython_shutil_copy2 if copy_function is None else copy_function
+
+    for name in names:
+        if name in ignored_names:
+            continue
+        src_name = os.path.join(os.fspath(src), name)
+        dst_name = os.path.join(os.fspath(dst), name)
+        try:
+            if _staticpython_isdir(src_name):
+                _staticpython_shutil_copytree(
+                    src_name,
+                    dst_name,
+                    symlinks=symlinks,
+                    ignore=ignore,
+                    copy_function=copy_function,
+                    ignore_dangling_symlinks=ignore_dangling_symlinks,
+                    dirs_exist_ok=dirs_exist_ok,
+                )
+            else:
+                copy_function(src_name, dst_name)
+        except shutil.Error as exc:
+            errors.extend(exc.args[0])
+        except OSError as exc:
+            errors.append((src_name, dst_name, str(exc)))
+
+    try:
+        shutil.copystat(src, dst)
+    except OSError as exc:
+        errors.append((src, dst, str(exc)))
+    if errors:
+        raise shutil.Error(errors)
+    return dst
+
+
 def _patch_importlib_resources() -> None:
     global _ORIGINAL_IMPORTLIB_RESOURCES_FROM_PACKAGE
     try:
@@ -975,6 +1035,7 @@ def install() -> None:
     os.path.isdir = _staticpython_isdir
     shutil.copyfile = _staticpython_shutil_copyfile
     shutil.copy2 = _staticpython_shutil_copy2
+    shutil.copytree = _staticpython_shutil_copytree
     _patch_importlib_resources()
     _patch_pkgutil()
     _INSTALLED = True
@@ -996,6 +1057,7 @@ def uninstall() -> None:
     os.path.isdir = _ORIGINAL_ISDIR
     shutil.copyfile = _ORIGINAL_SHUTIL_COPYFILE
     shutil.copy2 = _ORIGINAL_SHUTIL_COPY2
+    shutil.copytree = _ORIGINAL_SHUTIL_COPYTREE
     if _ORIGINAL_PKGUTIL_GET_DATA is not None:
         try:
             import pkgutil

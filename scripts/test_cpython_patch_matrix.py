@@ -182,6 +182,10 @@ def validate_patched_tree(source_root: Path, version_info: tuple[int, int, int],
     assert_contains(python_project, "Py_NO_ENABLE_SHARED")
     assert_contains(python_project, "%(AdditionalDependencies)")
     assert_contains(python_project, "%(AdditionalOptions)")
+    if (source_root / "PCbuild" / "zlib-ng.vcxproj").exists():
+        assert_contains(python_project, "zlib-ng$(PyDebugExt).lib")
+    else:
+        assert_not_contains(python_project, "zlib-ng$(PyDebugExt).lib")
 
     pc_config = source_root / "PC" / "config.c"
     assert_contains(pc_config, "PyInit__staticpython_resource_store")
