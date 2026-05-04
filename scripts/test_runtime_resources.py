@@ -12,6 +12,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -154,21 +155,49 @@ class RuntimeResourceTests(unittest.TestCase):
 
     def test_generated_manifest_contains_targets_children_and_suffix_indexes(self) -> None:
         resources = importlib.import_module("_staticpython_runtime_resources")
-        self.assertIn("Lib/demo_pkg/data/config.yaml", resources.RESOURCE_TARGETS)
-        self.assertIn("Lib/demo_pkg/data/empty.bin", resources.RESOURCE_TARGETS)
-        self.assertIn("Lib/demo_pkg/data", resources.RESOURCE_CHILDREN)
-        self.assertIn("config.yaml", resources.RESOURCE_BASENAME_INDEX)
-        self.assertIn("data", resources.RESOURCE_DIR_BASENAME_INDEX)
-        self.assertEqual(resources.RESOURCE_PAYLOAD_ENCODING, "b85")
+        self.assertEqual(resources.RESOURCE_PAYLOAD_ENCODING, "zlib+b85")
+        self.assertIn("Lib/demo_pkg", resources.RESOURCE_GROUPS)
+        self.assertIn("Lib/other_pkg", resources.RESOURCE_GROUPS)
+        self.assertIn("share/jupyter", resources.RESOURCE_GROUPS)
+        self.assertIn("etc/jupyter", resources.RESOURCE_GROUPS)
+        self.assertEqual(resources.RESOURCE_TARGETS, {})
+
+        group = importlib.import_module(resources.RESOURCE_GROUPS["Lib/demo_pkg"])
+        self.assertIn("Lib/demo_pkg/data/config.yaml", group.RESOURCE_TARGETS)
+        self.assertIn("Lib/demo_pkg/data/empty.bin", group.RESOURCE_TARGETS)
+        self.assertIn("Lib/demo_pkg/data", group.RESOURCE_CHILDREN)
+        self.assertIn("config.yaml", group.RESOURCE_BASENAME_INDEX)
+        self.assertIn("data", group.RESOURCE_DIR_BASENAME_INDEX)
+        self.assertEqual(group.RESOURCE_PAYLOAD_ENCODING, "zlib+b85")
         payloads = dict(resources.iter_resource_payloads())
-        self.assertEqual(len(payloads), len(resources.RESOURCE_TARGETS))
+        self.assertGreater(len(payloads), len(group.RESOURCE_TARGETS))
         encoded_empty = "".join(payloads["Lib/demo_pkg/data/empty.bin"]).encode("ascii")
-        self.assertEqual(self.runtime._decode_resource_payload(encoded_empty, resources.RESOURCE_PAYLOAD_ENCODING), b"")
+        self.assertEqual(self.runtime._decode_resource_payload(encoded_empty, group.RESOURCE_PAYLOAD_ENCODING), b"")
         encoded_config = "".join(payloads["Lib/demo_pkg/data/config.yaml"]).encode("ascii")
         self.assertEqual(
-            self.runtime._decode_resource_payload(encoded_config, resources.RESOURCE_PAYLOAD_ENCODING),
+            self.runtime._decode_resource_payload(encoded_config, group.RESOURCE_PAYLOAD_ENCODING),
             b"status: ok\n",
         )
+
+    def test_runtime_installs_without_loading_resource_groups_or_payloads(self) -> None:
+        resources = importlib.import_module("_staticpython_runtime_resources")
+        group_modules = set(resources.RESOURCE_GROUPS.values())
+        self.assertFalse(group_modules.intersection(sys.modules))
+        self.assertEqual(self.runtime._RESOURCE_DATA_CACHE, {})
+
+        self.assertTrue((self.root / "definitely-real.txt").write_text("real\n", encoding="utf-8"))
+        self.assertTrue((self.root / "definitely-real.txt").exists())
+        self.assertFalse(group_modules.intersection(sys.modules))
+        self.assertEqual(self.runtime._RESOURCE_DATA_CACHE, {})
+
+        self.assertTrue((self.root / "Lib" / "demo_pkg" / "data").exists())
+        self.assertIn(resources.RESOURCE_GROUPS["Lib/demo_pkg"], sys.modules)
+        self.assertNotIn(resources.RESOURCE_GROUPS["Lib/other_pkg"], sys.modules)
+        self.assertEqual(self.runtime._RESOURCE_DATA_CACHE, {})
+
+        self.assertEqual((self.root / "Lib" / "demo_pkg" / "data" / "config.yaml").read_text(encoding="utf-8"), "status: ok\n")
+        self.assertIn("Lib/demo_pkg/data/config.yaml", self.runtime._RESOURCE_DATA_CACHE)
+        self.assertNotIn(resources.RESOURCE_GROUPS["Lib/other_pkg"], sys.modules)
 
     def test_open_pathlib_and_stat_use_virtual_resource_for_absolute_paths(self) -> None:
         config_path = self.root / "Lib" / "demo_pkg" / "data" / "config.yaml"
@@ -389,6 +418,8 @@ class RuntimeResourceTests(unittest.TestCase):
     def test_runtime_decoder_accepts_current_and_legacy_payload_encodings(self) -> None:
         encoded = base64.b85encode(b"payload")
         self.assertEqual(self.runtime._decode_resource_payload(encoded, "b85"), b"payload")
+        encoded_compressed = base64.b85encode(zlib.compress(b"payload"))
+        self.assertEqual(self.runtime._decode_resource_payload(encoded_compressed, "zlib+b85"), b"payload")
         with self.assertRaises(ValueError):
             self.runtime._decode_resource_payload(encoded, "unknown")
 
@@ -409,17 +440,20 @@ class RuntimeResourceTests(unittest.TestCase):
                 if name.startswith("_staticpython_runtime_resources"):
                     sys.modules.pop(name, None)
             resources = importlib.import_module("_staticpython_runtime_resources")
-            self.assertEqual(resources.RESOURCE_PAYLOAD_ENCODING, "b85")
-            self.assertGreaterEqual(len(resources.RESOURCE_SHARDS), 2)
+            self.assertEqual(resources.RESOURCE_PAYLOAD_ENCODING, "zlib+b85")
+            self.assertIn("Lib/pkg", resources.RESOURCE_GROUPS)
+            group = importlib.import_module(resources.RESOURCE_GROUPS["Lib/pkg"])
+            self.assertEqual(group.RESOURCE_PAYLOAD_ENCODING, "zlib+b85")
+            self.assertGreaterEqual(len(group.RESOURCE_SHARDS), 2)
             self.assertTrue(
-                all(name.rsplit("_", 1)[-1].isdigit() and len(name.rsplit("_", 1)[-1]) == 6 for name in resources.RESOURCE_SHARDS)
+                all(name.rsplit("_", 1)[-1].isdigit() and len(name.rsplit("_", 1)[-1]) == 6 for name in group.RESOURCE_SHARDS)
             )
             payloads = dict(resources.iter_resource_payloads())
             self.assertEqual(payloads["Lib/pkg/one.dat"], payloads["Lib/pkg/copy.dat"])
             encoded_one = "".join(payloads["Lib/pkg/one.dat"]).encode("ascii")
-            self.assertEqual(base64.b85decode(encoded_one), b"alpha")
-            one_module, one_blob = resources.RESOURCE_TARGETS["Lib/pkg/one.dat"]
-            copy_module, copy_blob = resources.RESOURCE_TARGETS["Lib/pkg/copy.dat"]
+            self.assertEqual(zlib.decompress(base64.b85decode(encoded_one)), b"alpha")
+            one_module, one_blob = group.RESOURCE_TARGETS["Lib/pkg/one.dat"][:2]
+            copy_module, copy_blob = group.RESOURCE_TARGETS["Lib/pkg/copy.dat"][:2]
             self.assertEqual((one_module, one_blob), (copy_module, copy_blob))
         finally:
             __import__("build").RUNTIME_RESOURCE_SHARD_TEXT_BYTES = old_limit

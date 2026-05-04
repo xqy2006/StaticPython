@@ -156,7 +156,8 @@ def validate_patched_tree(source_root: Path, version_info: tuple[int, int, int],
 
     runtime_resources = source_root / "Lib" / "_staticpython_runtime_resources.py"
     assert_file(runtime_resources)
-    assert_contains(runtime_resources, 'RESOURCE_PAYLOAD_ENCODING = "b85"')
+    assert_contains(runtime_resources, 'RESOURCE_PAYLOAD_ENCODING = "zlib+b85"')
+    assert_contains(runtime_resources, "RESOURCE_GROUPS")
 
     sysmodule_c = source_root / "Python" / "sysmodule.c"
     assert_contains(sysmodule_c, "GetModuleHandle(NULL)")
