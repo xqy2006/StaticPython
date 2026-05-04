@@ -18,8 +18,10 @@ from dataclasses import dataclass
 
 _INSTALLED = False
 _RESOURCE_DATA_CACHE: dict[str, bytes] = {}
-_RESOURCE_GROUPS: tuple[tuple[str, str], ...] | None = None
+_RESOURCE_GROUPS: tuple[tuple[str, str, str], ...] | None = None
 _RESOURCE_MODULE_CACHE: dict[str, object] = {}
+_RESOURCE_STORE = None
+_RESOURCE_STORE_PROBED = False
 _START_TIME = int(time.time())
 
 
@@ -29,6 +31,8 @@ _ORIGINAL_OS_STAT = os.stat
 _ORIGINAL_OS_LISTDIR = os.listdir
 _ORIGINAL_OS_SCANDIR = os.scandir
 _ORIGINAL_OS_ACCESS = os.access
+_ORIGINAL_OS_MKDIR = os.mkdir
+_ORIGINAL_OS_MAKEDIRS = os.makedirs
 _ORIGINAL_EXISTS = os.path.exists
 _ORIGINAL_ISFILE = os.path.isfile
 _ORIGINAL_ISDIR = os.path.isdir
@@ -58,7 +62,23 @@ def _resources_module():
     return resources
 
 
+def _resource_store_module():
+    global _RESOURCE_STORE, _RESOURCE_STORE_PROBED
+    if _RESOURCE_STORE_PROBED:
+        return _RESOURCE_STORE
+    _RESOURCE_STORE_PROBED = True
+    try:
+        import _staticpython_resource_store as store
+    except Exception:
+        _RESOURCE_STORE = None
+    else:
+        _RESOURCE_STORE = store
+    return _RESOURCE_STORE
+
+
 def _has_resources_module() -> bool:
+    if _resource_store_module() is not None:
+        return True
     try:
         return importlib.util.find_spec("_staticpython_runtime_resources") is not None
     except Exception:
@@ -76,7 +96,7 @@ def _decode_resource_payload(encoded: bytes, payload_encoding: str) -> bytes:
     raise ValueError(f"unsupported StaticPython resource payload encoding: {payload_encoding!r}")
 
 
-def _load_resource_groups() -> tuple[tuple[str, str], ...]:
+def _load_resource_groups() -> tuple[tuple[str, str, str], ...]:
     global _RESOURCE_GROUPS
     if _RESOURCE_GROUPS is not None:
         return _RESOURCE_GROUPS
@@ -89,7 +109,7 @@ def _load_resource_groups() -> tuple[tuple[str, str], ...]:
     raw_groups = getattr(resources, "RESOURCE_GROUPS", None)
     if raw_groups is None and hasattr(resources, "RESOURCE_TARGETS"):
         _RESOURCE_MODULE_CACHE["_staticpython_runtime_resources"] = resources
-        _RESOURCE_GROUPS = (("", "_staticpython_runtime_resources"),)
+        _RESOURCE_GROUPS = (("", "_staticpython_runtime_resources", "_staticpython_runtime_resources"),)
         return _RESOURCE_GROUPS
 
     if isinstance(raw_groups, dict):
@@ -97,11 +117,13 @@ def _load_resource_groups() -> tuple[tuple[str, str], ...]:
     else:
         items = raw_groups or ()
 
-    groups: list[tuple[str, str]] = []
+    raw_indexes = getattr(resources, "RESOURCE_GROUP_INDEXES", {})
+    groups: list[tuple[str, str, str]] = []
     for prefix, module_name in items:
         normalized = _normalize_resource_key(prefix)
         if normalized:
-            groups.append((normalized, str(module_name)))
+            index_module_name = raw_indexes.get(prefix, module_name) if isinstance(raw_indexes, dict) else module_name
+            groups.append((normalized, str(module_name), str(index_module_name)))
     groups.sort(key=lambda item: (-len(item[0]), item[0].lower()))
     _RESOURCE_GROUPS = tuple(groups)
     return _RESOURCE_GROUPS
@@ -127,40 +149,110 @@ def _resource_target_value(resource_module, key: str) -> tuple[str, str, int] | 
     return str(module_name), str(blob_id), size
 
 
+def _resource_store_file_info(key: str) -> tuple[str, str, int] | None:
+    store = _resource_store_module()
+    if store is None:
+        return None
+    try:
+        info = store.file_info(_normalize_resource_key(key))
+    except Exception:
+        return None
+    if info is None:
+        return None
+    try:
+        module_name, blob_id, size = info
+        return str(module_name), str(blob_id), int(size)
+    except Exception:
+        return None
+
+
+def _resource_store_children(key: str) -> tuple[str, ...] | None:
+    store = _resource_store_module()
+    if store is None:
+        return None
+    try:
+        children = store.children(_normalize_resource_key(key))
+    except Exception:
+        return None
+    if children is None:
+        return None
+    return tuple(str(child) for child in children)
+
+
+def _resource_store_kind(key: str) -> int:
+    store = _resource_store_module()
+    if store is None:
+        return 0
+    try:
+        return int(store.kind(_normalize_resource_key(key)))
+    except Exception:
+        return 0
+
+
+def _resource_file_size_value(resource_module, key: str) -> int | None:
+    key = _normalize_resource_key(key)
+    sizes = getattr(resource_module, "RESOURCE_FILE_SIZES", None)
+    if sizes is not None and key in sizes:
+        try:
+            return int(sizes[key])
+        except Exception:
+            return 0
+    target = _resource_target_value(resource_module, key)
+    if target is None:
+        return None
+    return target[2]
+
+
 def _resource_children_for_key(key: str, resource_module=None) -> tuple[str, ...]:
     key = _normalize_resource_key(key)
-    modules = (resource_module,) if resource_module is not None else _candidate_resource_modules(key)
+    if resource_module is None:
+        store_children = _resource_store_children(key)
+        if store_children is not None:
+            return store_children
+    modules = (resource_module,) if resource_module is not None else _candidate_resource_modules(key, indexes=True)
+    merged: set[str] = set()
     for module in modules:
         children = getattr(module, "RESOURCE_CHILDREN", {}).get(key)
         if children is not None:
-            return tuple(children)
-    return ()
+            merged.update(children)
+    return tuple(sorted(merged))
 
 
 def _resource_key_is_file(key: str) -> bool:
     key = _normalize_resource_key(key)
-    return any(_resource_target_value(module, key) is not None for module in _candidate_resource_modules(key))
+    kind = _resource_store_kind(key)
+    if kind:
+        return kind == 1
+    return any(_resource_file_size_value(module, key) is not None for module in _candidate_resource_modules(key, indexes=True))
 
 
 def _resource_key_is_dir(key: str) -> bool:
     key = _normalize_resource_key(key)
-    return any(key in getattr(module, "RESOURCE_CHILDREN", {}) for module in _candidate_resource_modules(key))
+    kind = _resource_store_kind(key)
+    if kind:
+        return kind == 2
+    return any(key in getattr(module, "RESOURCE_CHILDREN", {}) for module in _candidate_resource_modules(key, indexes=True))
 
 
 def _resolve_resource_key(key: str) -> str | None:
     key = _normalize_resource_key(key)
-    for module in _candidate_resource_modules(key):
-        if _resource_target_value(module, key) is not None or key in getattr(module, "RESOURCE_CHILDREN", {}):
+    if _resource_store_kind(key):
+        return key
+    for module in _candidate_resource_modules(key, indexes=True):
+        if _resource_file_size_value(module, key) is not None or key in getattr(module, "RESOURCE_CHILDREN", {}):
             return key
         for index_name in ("RESOURCE_BASENAME_INDEX", "RESOURCE_DIR_BASENAME_INDEX"):
             for candidate in _suffix_resource_candidates(key, getattr(module, index_name, {})):
-                if _resource_target_value(module, candidate) is not None or candidate in getattr(module, "RESOURCE_CHILDREN", {}):
+                if _resource_file_size_value(module, candidate) is not None or candidate in getattr(module, "RESOURCE_CHILDREN", {}):
                     return candidate
     return None
 
 
 def _resource_target_for_key(key: str) -> tuple[object, tuple[str, str, int]] | None:
     key = _normalize_resource_key(key)
+    store_target = _resource_store_file_info(key)
+    if store_target is not None:
+        return None, store_target
     for module in _candidate_resource_modules(key):
         target = _resource_target_value(module, key)
         if target is not None:
@@ -168,18 +260,18 @@ def _resource_target_for_key(key: str) -> tuple[object, tuple[str, str, int]] | 
     return None
 
 
-def _candidate_resource_modules(candidate: str) -> tuple[object, ...]:
+def _candidate_resource_modules(candidate: str, *, indexes: bool = False) -> tuple[object, ...]:
     candidate = _normalize_resource_key(candidate)
     lowered = candidate.lower()
     modules: list[object] = []
-    for prefix, module_name in _load_resource_groups():
+    for prefix, module_name, index_module_name in _load_resource_groups():
         lowered_prefix = prefix.lower()
         if (
             not prefix
             or lowered == lowered_prefix
             or lowered.startswith(lowered_prefix + "/")
         ):
-            modules.append(_load_resource_module(module_name))
+            modules.append(_load_resource_module(index_module_name if indexes else module_name))
     return tuple(modules)
 
 
@@ -187,7 +279,7 @@ def _group_suffix_candidates(normalized: str) -> tuple[str, ...]:
     parts = [part for part in _normalize_resource_key(normalized).split("/") if part and part != "."]
     lowered_parts = [part.lower() for part in parts]
     candidates: list[str] = []
-    for prefix, _module_name in _load_resource_groups():
+    for prefix, _module_name, _index_module_name in _load_resource_groups():
         prefix_parts = [part for part in prefix.split("/") if part]
         if prefix_parts and prefix_parts[0].lower() in {"lib", "share", "etc"}:
             marker_parts = prefix_parts[1:]
@@ -216,21 +308,28 @@ def _decode_resource_key(key: str, resource_module=None) -> bytes | None:
     modules = (resource_module,) if resource_module is not None else _candidate_resource_modules(key)
     target = None
     target_module = None
-    for module in modules:
-        target = _resource_target_value(module, key)
-        if target is not None:
-            target_module = module
-            break
+    store_target = None if resource_module is not None else _resource_store_file_info(key)
+    if store_target is not None:
+        target = store_target
+    else:
+        for module in modules:
+            target = _resource_target_value(module, key)
+            if target is not None:
+                target_module = module
+                break
     if target is None:
         return None
 
     module_name, blob_id, _size = target
-    payload_encoding = getattr(target_module, "RESOURCE_PAYLOAD_ENCODING", None)
+    payload_encoding = getattr(target_module, "RESOURCE_PAYLOAD_ENCODING", None) if target_module is not None else None
     if payload_encoding is None:
         resources = _resources_module()
         payload_encoding = getattr(resources, "RESOURCE_PAYLOAD_ENCODING", "b85") if resources is not None else "b85"
     try:
-        if hasattr(target_module, "get_resource_payload"):
+        if target_module is None:
+            shard_module = importlib.import_module(module_name)
+            encoded_chunks = shard_module.RESOURCE_BLOBS[blob_id]
+        elif hasattr(target_module, "get_resource_payload"):
             encoded_chunks = target_module.get_resource_payload(module_name, blob_id)
         else:
             encoded_chunks = None
@@ -442,11 +541,15 @@ def _resource_stat(path: object, *, follow_symlinks: bool = True):
     key = _resource_key(path)
     if key is None:
         raise FileNotFoundError(os.fspath(path))
-    target_entry = _resource_target_for_key(key)
-    if target_entry is not None:
-        _module, target = target_entry
+    store_target = _resource_store_file_info(key)
+    size = store_target[2] if store_target is not None else None
+    if size is None:
+        for module in _candidate_resource_modules(key, indexes=True):
+            size = _resource_file_size_value(module, key)
+            if size is not None:
+                break
+    if size is not None:
         mode = _stat.S_IFREG | 0o444
-        size = target[2]
         if size < 0:
             data = _decode_resource_key(key)
             size = len(data) if data is not None else 0
@@ -573,6 +676,43 @@ def _staticpython_access(path, mode, *args, dir_fd=None, effective_ids=False, fo
             return False
         return True
     return native_access
+
+
+def _real_path_exists(path) -> bool:
+    try:
+        _ORIGINAL_OS_STAT(path)
+    except OSError:
+        return False
+    return True
+
+
+def _real_path_isdir(path) -> bool:
+    try:
+        result = _ORIGINAL_OS_STAT(path)
+    except OSError:
+        return False
+    return _stat.S_ISDIR(result.st_mode)
+
+
+def _staticpython_makedirs(name, mode=0o777, exist_ok=False):
+    head, tail = os.path.split(name)
+    if not tail:
+        head, tail = os.path.split(head)
+    if head and tail and not _real_path_exists(head):
+        try:
+            _staticpython_makedirs(head, exist_ok=exist_ok)
+        except FileExistsError:
+            pass
+        current_directory = os.curdir
+        if isinstance(tail, bytes):
+            current_directory = os.fsencode(current_directory)
+        if tail == current_directory:
+            return
+    try:
+        _ORIGINAL_OS_MKDIR(name, mode)
+    except OSError:
+        if not exist_ok or not _real_path_isdir(name):
+            raise
 
 
 def _merge_directory_children(path: object) -> list[str] | None:
@@ -829,6 +969,7 @@ def install() -> None:
     os.listdir = _staticpython_listdir
     os.scandir = _staticpython_scandir
     os.access = _staticpython_access
+    os.makedirs = _staticpython_makedirs
     os.path.exists = _staticpython_exists
     os.path.isfile = _staticpython_isfile
     os.path.isdir = _staticpython_isdir
@@ -849,6 +990,7 @@ def uninstall() -> None:
     os.listdir = _ORIGINAL_OS_LISTDIR
     os.scandir = _ORIGINAL_OS_SCANDIR
     os.access = _ORIGINAL_OS_ACCESS
+    os.makedirs = _ORIGINAL_OS_MAKEDIRS
     os.path.exists = _ORIGINAL_EXISTS
     os.path.isfile = _ORIGINAL_ISFILE
     os.path.isdir = _ORIGINAL_ISDIR

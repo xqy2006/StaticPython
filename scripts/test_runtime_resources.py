@@ -160,15 +160,21 @@ class RuntimeResourceTests(unittest.TestCase):
         self.assertIn("Lib/other_pkg", resources.RESOURCE_GROUPS)
         self.assertIn("share/jupyter", resources.RESOURCE_GROUPS)
         self.assertIn("etc/jupyter", resources.RESOURCE_GROUPS)
+        self.assertIn("Lib/demo_pkg", resources.RESOURCE_GROUP_INDEXES)
         self.assertEqual(resources.RESOURCE_TARGETS, {})
 
         group = importlib.import_module(resources.RESOURCE_GROUPS["Lib/demo_pkg"])
         self.assertIn("Lib/demo_pkg/data/config.yaml", group.RESOURCE_TARGETS)
         self.assertIn("Lib/demo_pkg/data/empty.bin", group.RESOURCE_TARGETS)
-        self.assertIn("Lib/demo_pkg/data", group.RESOURCE_CHILDREN)
+        self.assertEqual(group.RESOURCE_CHILDREN, {})
         self.assertIn("config.yaml", group.RESOURCE_BASENAME_INDEX)
-        self.assertIn("data", group.RESOURCE_DIR_BASENAME_INDEX)
+        self.assertEqual(group.RESOURCE_DIR_BASENAME_INDEX, {})
         self.assertEqual(group.RESOURCE_PAYLOAD_ENCODING, "zlib+b85")
+        index = importlib.import_module(resources.RESOURCE_GROUP_INDEXES["Lib/demo_pkg"])
+        self.assertIn("Lib/demo_pkg/data", index.RESOURCE_CHILDREN)
+        self.assertIn("Lib/demo_pkg/data/config.yaml", index.RESOURCE_FILE_SIZES)
+        self.assertIn("config.yaml", index.RESOURCE_BASENAME_INDEX)
+        self.assertIn("data", index.RESOURCE_DIR_BASENAME_INDEX)
         payloads = dict(resources.iter_resource_payloads())
         self.assertGreater(len(payloads), len(group.RESOURCE_TARGETS))
         encoded_empty = "".join(payloads["Lib/demo_pkg/data/empty.bin"]).encode("ascii")
@@ -191,11 +197,14 @@ class RuntimeResourceTests(unittest.TestCase):
         self.assertEqual(self.runtime._RESOURCE_DATA_CACHE, {})
 
         self.assertTrue((self.root / "Lib" / "demo_pkg" / "data").exists())
-        self.assertIn(resources.RESOURCE_GROUPS["Lib/demo_pkg"], sys.modules)
+        self.assertNotIn(resources.RESOURCE_GROUPS["Lib/demo_pkg"], sys.modules)
+        self.assertIn(resources.RESOURCE_GROUP_INDEXES["Lib/demo_pkg"], sys.modules)
         self.assertNotIn(resources.RESOURCE_GROUPS["Lib/other_pkg"], sys.modules)
+        self.assertNotIn(resources.RESOURCE_GROUP_INDEXES["Lib/other_pkg"], sys.modules)
         self.assertEqual(self.runtime._RESOURCE_DATA_CACHE, {})
 
         self.assertEqual((self.root / "Lib" / "demo_pkg" / "data" / "config.yaml").read_text(encoding="utf-8"), "status: ok\n")
+        self.assertIn(resources.RESOURCE_GROUPS["Lib/demo_pkg"], sys.modules)
         self.assertIn("Lib/demo_pkg/data/config.yaml", self.runtime._RESOURCE_DATA_CACHE)
         self.assertNotIn(resources.RESOURCE_GROUPS["Lib/other_pkg"], sys.modules)
 
@@ -268,6 +277,13 @@ class RuntimeResourceTests(unittest.TestCase):
         destination = self.root / "copied-config.yaml"
         shutil.copy2(self.root / "Lib" / "demo_pkg" / "data" / "config.yaml", destination)
         self.assertEqual(destination.read_text(encoding="utf-8"), "status: ok\n")
+
+    def test_makedirs_uses_real_disk_state_when_virtual_share_suffix_matches(self) -> None:
+        target = self.root / "prefix" / "share" / "jupyter" / "kernels" / "python3"
+        self.assertTrue((self.root / "share" / "jupyter").exists())
+        self.assertFalse((self.root / "prefix").exists())
+        os.makedirs(target, exist_ok=True)
+        self.assertTrue(target.is_dir())
 
     def test_share_and_etc_paths_are_available_after_disk_files_are_removed(self) -> None:
         index_path = self.root / "share" / "jupyter" / "lab" / "static" / "index.html"

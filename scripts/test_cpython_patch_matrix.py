@@ -158,6 +158,7 @@ def validate_patched_tree(source_root: Path, version_info: tuple[int, int, int],
     assert_file(runtime_resources)
     assert_contains(runtime_resources, 'RESOURCE_PAYLOAD_ENCODING = "zlib+b85"')
     assert_contains(runtime_resources, "RESOURCE_GROUPS")
+    assert_file(source_root / "Python" / "staticpython_resource_store.c")
 
     sysmodule_c = source_root / "Python" / "sysmodule.c"
     assert_contains(sysmodule_c, "GetModuleHandle(NULL)")
@@ -165,6 +166,7 @@ def validate_patched_tree(source_root: Path, version_info: tuple[int, int, int],
 
     pythoncore = source_root / "PCbuild" / "pythoncore.vcxproj"
     assert_contains(pythoncore, "<ConfigurationType>StaticLibrary</ConfigurationType>")
+    assert_contains(pythoncore, "..\\Python\\staticpython_resource_store.c")
     assert_contains(pythoncore, "Py_NO_ENABLE_SHARED")
     assert_contains(pythoncore, "<VcpkgEnabled>false</VcpkgEnabled>")
     assert_contains(pythoncore, "<AdditionalOptions Condition=\"'$(Configuration)|$(Platform)'=='Release|x64'\">/GL- %(AdditionalOptions)</AdditionalOptions>")
@@ -182,6 +184,8 @@ def validate_patched_tree(source_root: Path, version_info: tuple[int, int, int],
     assert_contains(python_project, "%(AdditionalOptions)")
 
     pc_config = source_root / "PC" / "config.c"
+    assert_contains(pc_config, "PyInit__staticpython_resource_store")
+    assert_contains(pc_config, '{"_staticpython_resource_store", PyInit__staticpython_resource_store},')
     assert_not_contains(pc_config, "PyInit_challenge")
     assert_not_contains(pc_config, "PyInit_sandbox")
     for builtin in build.iter_builtin_module_registrations(source_root, build.load_manifest(), []):
