@@ -22,6 +22,8 @@ SOURCE_ROOT = REPO_ROOT
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+_REAL_OS_STAT = os.stat
+
 from build import collect_runtime_resource_files, split_frozen_modules, verify_runtime_resource_modules_frozen, write_runtime_resource_module
 
 
@@ -31,6 +33,14 @@ def _write(path: Path, data: str | bytes) -> None:
         path.write_bytes(data)
     else:
         path.write_text(data, encoding="utf-8", newline="\n")
+
+
+def _real_exists(path: Path) -> bool:
+    try:
+        _REAL_OS_STAT(path)
+    except OSError:
+        return False
+    return True
 
 
 class RuntimeResourceTests(unittest.TestCase):
@@ -273,6 +283,16 @@ class RuntimeResourceTests(unittest.TestCase):
         self.assertEqual((data_dir / "real-only.txt").read_text(encoding="utf-8"), "real\n")
         self.assertEqual((data_dir / "config.yaml").read_text(encoding="utf-8"), "status: ok\n")
 
+    def test_virtual_dir_entries_support_newer_rmtree_cleanup(self) -> None:
+        data_dir = self.root / "Lib" / "demo_pkg" / "data"
+        data_dir.mkdir(parents=True)
+        _write(data_dir / "real-only.txt", "real\n")
+        entries = {entry.name: entry for entry in os.scandir(data_dir)}
+        self.assertFalse(entries["config.yaml"].is_junction())
+        self.assertFalse(entries["real-only.txt"].is_junction())
+        shutil.rmtree(data_dir)
+        self.assertFalse(_real_exists(data_dir))
+
     def test_virtual_files_can_be_copied_with_metadata(self) -> None:
         destination = self.root / "copied-config.yaml"
         shutil.copy2(self.root / "Lib" / "demo_pkg" / "data" / "config.yaml", destination)
@@ -405,6 +425,7 @@ class RuntimeResourceTests(unittest.TestCase):
         patched_copyfile = shutil.copyfile
         patched_copy2 = shutil.copy2
         patched_copytree = shutil.copytree
+        patched_rmtree = shutil.rmtree
         path = self.root / "Lib" / "demo_pkg" / "data" / "config.yaml"
         self.assertEqual(path.read_text(encoding="utf-8"), "status: ok\n")
         self.runtime.uninstall()
@@ -414,6 +435,7 @@ class RuntimeResourceTests(unittest.TestCase):
             self.assertIsNot(shutil.copyfile, patched_copyfile)
             self.assertIsNot(shutil.copy2, patched_copy2)
             self.assertIsNot(shutil.copytree, patched_copytree)
+            self.assertIsNot(shutil.rmtree, patched_rmtree)
             self.assertFalse(path.exists())
             with self.assertRaises(FileNotFoundError):
                 path.read_text(encoding="utf-8")

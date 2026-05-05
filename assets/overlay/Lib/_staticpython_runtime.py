@@ -39,6 +39,7 @@ _ORIGINAL_ISDIR = os.path.isdir
 _ORIGINAL_SHUTIL_COPYFILE = shutil.copyfile
 _ORIGINAL_SHUTIL_COPY2 = shutil.copy2
 _ORIGINAL_SHUTIL_COPYTREE = shutil.copytree
+_ORIGINAL_SHUTIL_RMTREE = shutil.rmtree
 _ORIGINAL_SYS_EXCEPTHOOK = sys.excepthook
 _ORIGINAL_PKGUTIL_GET_DATA = None
 _ORIGINAL_IMPORTLIB_RESOURCES_FROM_PACKAGE = None
@@ -769,6 +770,9 @@ class _StaticPythonDirEntry:
     def is_symlink(self):
         return False
 
+    def is_junction(self):
+        return False
+
     def stat(self, *, follow_symlinks=True):
         return _staticpython_stat(self.path, follow_symlinks=follow_symlinks)
 
@@ -885,6 +889,15 @@ def _staticpython_shutil_copytree(
     if errors:
         raise shutil.Error(errors)
     return dst
+
+
+def _staticpython_shutil_rmtree(path, *args, **kwargs):
+    previous_scandir = os.scandir
+    os.scandir = _ORIGINAL_OS_SCANDIR
+    try:
+        return _ORIGINAL_SHUTIL_RMTREE(path, *args, **kwargs)
+    finally:
+        os.scandir = previous_scandir
 
 
 def _patch_importlib_resources() -> None:
@@ -1036,6 +1049,7 @@ def install() -> None:
     shutil.copyfile = _staticpython_shutil_copyfile
     shutil.copy2 = _staticpython_shutil_copy2
     shutil.copytree = _staticpython_shutil_copytree
+    shutil.rmtree = _staticpython_shutil_rmtree
     _patch_importlib_resources()
     _patch_pkgutil()
     _INSTALLED = True
@@ -1058,6 +1072,7 @@ def uninstall() -> None:
     shutil.copyfile = _ORIGINAL_SHUTIL_COPYFILE
     shutil.copy2 = _ORIGINAL_SHUTIL_COPY2
     shutil.copytree = _ORIGINAL_SHUTIL_COPYTREE
+    shutil.rmtree = _ORIGINAL_SHUTIL_RMTREE
     if _ORIGINAL_PKGUTIL_GET_DATA is not None:
         try:
             import pkgutil
