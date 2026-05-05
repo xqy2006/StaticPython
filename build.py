@@ -34,6 +34,7 @@ from libs import (
     run_prepare_source_hooks,
     run_post_patch_hooks,
 )
+from tools import resolve_tool_exe
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -642,6 +643,10 @@ def run_with_env(cmd: list[str], cwd: Path, env: dict[str, str], *, timeout: flo
     display = subprocess.list2cmdline([str(part) for part in cmd])
     log(f"RUN {display}")
     subprocess.run(cmd, cwd=str(cwd), check=True, timeout=timeout, env=env)
+
+
+def resolve_msbuild_exe() -> str:
+    return resolve_tool_exe("msbuild")
 
 
 def resolve_build_workers(raw_value: str | int | None = None) -> int:
@@ -2028,6 +2033,9 @@ def verify_source_root(source_root: Path) -> None:
 
 
 def ensure_tool(name: str) -> None:
+    if name.lower() == "msbuild":
+        resolve_msbuild_exe()
+        return
     if shutil.which(name) is None:
         raise RuntimeError(
             f"required tool not found on PATH: {name}. Run this inside the VS2022 Developer PowerShell / DevShell."
@@ -2123,11 +2131,14 @@ def safe_extract_tar(archive: tarfile.TarFile, destination_root: Path) -> None:
             archive.extract(member, destination_root)
 
 
-def extract_zip_archive(archive_path: Path, destination_root: Path) -> Path:
+def extract_zip_archive(archive_path: Path, destination_root: Path, *, reuse_existing: bool = False) -> Path:
     with ZipFile(archive_path) as archive:
         top_level = archive_top_level_from_zip(archive)
         extracted_root = destination_root / top_level
         if extracted_root.exists():
+            if reuse_existing and (extracted_root / "Include" / "patchlevel.h").exists():
+                log(f"reusing existing extracted source tree at {extracted_root}")
+                return extracted_root
             shutil.rmtree(extracted_root)
         safe_extract_zip(archive, destination_root)
     return extracted_root
@@ -2168,12 +2179,14 @@ def download_cpython_source(
     version: str,
     download_root: Path,
     source_archive_url: str | None,
+    *,
+    reuse_existing: bool = False,
 ) -> Path:
     download_root.mkdir(parents=True, exist_ok=True)
     archive_url = source_archive_url or CPYTHON_ARCHIVE_URL_TEMPLATE.format(version=version)
     archive_path = download_root / f"cpython-v{version}.zip"
     download_file(archive_url, archive_path)
-    source_root = extract_zip_archive(archive_path, download_root)
+    source_root = extract_zip_archive(archive_path, download_root, reuse_existing=reuse_existing)
     log(f"downloaded source tree to {source_root}")
     return source_root
 
@@ -2188,18 +2201,27 @@ def resolve_source_root(args: argparse.Namespace) -> tuple[Path, tuple[int, int,
         if args.source_root is None:
             download_root = (args.download_root or (REPO_ROOT / "downloads")).resolve()
             if args.source_archive_path is not None:
-                source_root = extract_zip_archive(args.source_archive_path.resolve(), download_root)
+                source_root = extract_zip_archive(
+                    args.source_archive_path.resolve(),
+                    download_root,
+                    reuse_existing=args.reuse_source_tree,
+                )
                 log(f"extracted local source archive to {source_root}")
                 return source_root, requested_version_info
             source_root = download_cpython_source(
                 normalized_version,
                 download_root,
                 args.source_archive_url,
+                reuse_existing=args.reuse_source_tree,
             )
             return source_root, requested_version_info
     elif args.source_root is None and args.source_archive_path is not None:
         download_root = (args.download_root or (REPO_ROOT / "downloads")).resolve()
-        source_root = extract_zip_archive(args.source_archive_path.resolve(), download_root)
+        source_root = extract_zip_archive(
+            args.source_archive_path.resolve(),
+            download_root,
+            reuse_existing=args.reuse_source_tree,
+        )
         log(f"extracted local source archive to {source_root}")
         return source_root, requested_version_info
     if args.source_root is None:
@@ -2244,7 +2266,7 @@ def ensure_freeze_module_exe(
     output_exe = get_pcbuild_output_dir(source_root, platform) / "_freeze_module.exe"
     run(
         [
-            "msbuild",
+            resolve_msbuild_exe(),
             str(pcbuild / "_freeze_module.vcxproj"),
             *msbuild_args(
                 configuration,
@@ -2801,7 +2823,7 @@ def build_python(
     for target in selected_projects:
         run(
             [
-                "msbuild",
+                resolve_msbuild_exe(),
                 str(pcbuild / target),
                 *msbuild_args(configuration, platform, workers=build_workers),
             ],
@@ -2812,7 +2834,7 @@ def build_python(
     if static_project_filter is not None or static_project_start is not None:
         run(
             [
-                "msbuild",
+                resolve_msbuild_exe(),
                 str(pcbuild / "pythoncore.vcxproj"),
                 *msbuild_args(
                     configuration,
@@ -2827,7 +2849,7 @@ def build_python(
 
     run(
         [
-            "msbuild",
+            resolve_msbuild_exe(),
             str(pcbuild / "python.vcxproj"),
             *msbuild_args(configuration, platform, *final_build_properties, workers=build_workers),
         ],
@@ -2918,6 +2940,14 @@ def parse_args() -> argparse.Namespace:
         "--source-archive-path",
         type=Path,
         help="Use a local CPython source zip archive instead of downloading one",
+    )
+    parser.add_argument(
+        "--reuse-source-tree",
+        action="store_true",
+        help=(
+            "When downloading or extracting a CPython archive, reuse an existing extracted "
+            "source tree instead of deleting it. Useful for incremental local builds."
+        ),
     )
     parser.add_argument(
         "--host-python",

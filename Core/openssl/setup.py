@@ -139,6 +139,17 @@ def validate_windows_perl(perl: str) -> None:
         )
 
 
+def require_windows_perl_for_static_openssl() -> str:
+    perl = shutil.which("perl")
+    if perl is None:
+        raise RuntimeError(
+            "OpenSSL static build requires perl on PATH. Install Strawberry Perl or ActivePerl "
+            "and rerun from VS Developer PowerShell."
+        )
+    validate_windows_perl(perl)
+    return perl
+
+
 def patch_openssl_props(context) -> None:
     path = context.source_root / "PCbuild" / "openssl.props"
     if not path.exists():
@@ -182,7 +193,6 @@ def ensure_static_openssl(context) -> None:
         return
 
     openssl_version = detect_cpython_openssl_version(context)
-    source_dir = ensure_openssl_source(context, openssl_version)
     output_dir = openssl_static_output_dir(context)
     required = [
         output_dir / "libcrypto.lib",
@@ -195,15 +205,11 @@ def ensure_static_openssl(context) -> None:
         context.log(f"using existing static OpenSSL {openssl_version} at {output_dir.relative_to(context.source_root)}")
         return
 
-    perl = shutil.which("perl")
-    if perl is None:
-        raise RuntimeError(
-            "OpenSSL static build requires perl on PATH. Install Strawberry Perl or ActivePerl "
-            "and rerun from VS Developer PowerShell."
-        )
+    perl = require_windows_perl_for_static_openssl()
     validate_windows_perl(perl)
     ensure_tool("nmake")
 
+    source_dir = ensure_openssl_source(context, openssl_version)
     output_dir.mkdir(parents=True, exist_ok=True)
     if (source_dir / "makefile").exists():
         run(context.log, ["nmake", "clean"], cwd=source_dir)

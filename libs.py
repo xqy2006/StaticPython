@@ -506,18 +506,82 @@ def _extract_tar_archive(archive_path: Path, destination_root: Path) -> None:
                 shutil.copyfileobj(source, dst)
 
 
-def _extract_archive(archive_path: Path, destination_root: Path) -> Path:
+def _extract_cache_marker_path(destination_root: Path) -> Path:
+    return destination_root.with_name(f"{destination_root.name}.staticpython-extract.json")
+
+
+def _archive_cache_identity(archive_path: Path) -> dict[str, int | str]:
+    stat = archive_path.stat()
+    return {
+        "archive": str(archive_path.resolve()),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _read_extract_cache_marker(destination_root: Path) -> dict | None:
+    marker = _extract_cache_marker_path(destination_root)
+    if not marker.exists():
+        return None
+    try:
+        return json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_extract_cache_marker(destination_root: Path, archive_path: Path) -> None:
+    marker = _extract_cache_marker_path(destination_root)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps(_archive_cache_identity(archive_path), sort_keys=True), encoding="utf-8")
+
+
+def _directory_has_entries(path: Path) -> bool:
+    try:
+        next(path.iterdir())
+    except StopIteration:
+        return False
+    except OSError:
+        return False
+    return True
+
+
+def _extract_archive(
+    archive_path: Path,
+    destination_root: Path,
+    log: Callable[[str], None] | None = None,
+) -> Path:
+    expected_identity = _archive_cache_identity(archive_path)
+    existing_identity = _read_extract_cache_marker(destination_root)
+    if destination_root.exists() and _directory_has_entries(destination_root):
+        if existing_identity in (expected_identity, None):
+            if existing_identity is None:
+                _write_extract_cache_marker(destination_root, archive_path)
+            if log is not None:
+                log(f"reusing extracted source cache {destination_root}")
+            return _resolve_extracted_root(destination_root)
+
     if destination_root.exists():
+        if log is not None:
+            log(f"refreshing extracted source cache {destination_root}")
         _remove_tree(destination_root)
     destination_root.mkdir(parents=True, exist_ok=True)
 
     suffixes = [suffix.lower() for suffix in archive_path.suffixes]
+    started = time.monotonic()
+    if log is not None:
+        log(f"extracting {archive_path} -> {destination_root}")
     if ".zip" in suffixes:
         _extract_zip_archive(archive_path, destination_root)
+        _write_extract_cache_marker(destination_root, archive_path)
+        if log is not None:
+            log(f"extracted {archive_path.name} in {time.monotonic() - started:.1f}s")
         return _resolve_extracted_root(destination_root)
 
     if any(suffix in {".tar", ".gz", ".bz2", ".xz", ".tgz"} for suffix in suffixes):
         _extract_tar_archive(archive_path, destination_root)
+        _write_extract_cache_marker(destination_root, archive_path)
+        if log is not None:
+            log(f"extracted {archive_path.name} in {time.monotonic() - started:.1f}s")
         return _resolve_extracted_root(destination_root)
 
     raise RuntimeError(f"unsupported archive format: {archive_path}")
@@ -560,8 +624,10 @@ def _materialize_source_mapping(
     for selector, target_rel in source_mapping.items():
         src = resolver(selector)
         dst = context.source_root / _normalized_relpath(target_rel)
+        started = time.monotonic()
+        context.log(f"materializing {selector} -> {target_rel}")
         _copy_entry(src, dst)
-        context.log(f"materialized {selector} -> {target_rel}")
+        context.log(f"materialized {selector} -> {target_rel} in {time.monotonic() - started:.1f}s")
 
 
 def _version_format_args(context: LibraryHookContext) -> dict[str, int | str]:
@@ -619,7 +685,7 @@ def _build_pypi_source_hook(
         elif cached_archive_path is None:
             context.log(f"reusing cached {project_name} {resolved_release_version} archive")
 
-        extracted_root = _extract_archive(archive_path, extract_root)
+        extracted_root = _extract_archive(archive_path, extract_root, context.log)
         context.log(f"using {project_name} {resolved_release_version} source from {extracted_root}")
         _materialize_source_mapping(
             context,
@@ -670,7 +736,7 @@ def _build_github_source_hook(
         else:
             context.log(f"reusing cached GitHub archive {repo}@{resolved_ref}")
 
-        extracted_root = _extract_archive(archive_path, extract_root)
+        extracted_root = _extract_archive(archive_path, extract_root, context.log)
         context.log(f"using GitHub source from {extracted_root}")
         _materialize_source_mapping(
             context,
