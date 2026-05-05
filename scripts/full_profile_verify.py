@@ -2168,27 +2168,6 @@ assert nbformat.validator.isvalid(roundtripped)
         """,
     ),
     (
-        'nest-asyncio-smoke',
-        r"""
-import asyncio
-
-import nest_asyncio
-
-
-async def inner():
-    return "ok"
-
-
-async def outer():
-    loop = asyncio.get_event_loop()
-    return loop.run_until_complete(inner())
-
-
-nest_asyncio.apply()
-assert asyncio.get_event_loop().run_until_complete(outer()) == "ok"
-        """,
-    ),
-    (
         'networkx-smoke',
         r"""
 import networkx as nx
@@ -3992,6 +3971,12 @@ SUBPROCESS_TESTS = [
         "script": "scripts/jupyter_runtime.py",
         "args": ["--target", "notebook", "--timeout", "240"],
         "timeout": 300,
+    },
+    {
+        "kind": "script",
+        "name": "nest-asyncio-runtime",
+        "script": "scripts/nest_asyncio_runtime.py",
+        "timeout": 120,
     },
 ]
 

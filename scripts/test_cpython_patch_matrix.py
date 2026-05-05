@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import build
+import libs
 
 
 DEFAULT_TAGS = ("v3.11.15", "v3.12.13", "v3.13.13", "v3.14.4", "v3.15.0a8")
@@ -197,6 +198,60 @@ def validate_patched_tree(source_root: Path, version_info: tuple[int, int, int],
         assert_contains(pc_config, f'{{"{builtin["name"]}", {builtin["pyinit"]}}},')
 
 
+def validate_verify_script_layout(source_root: Path) -> None:
+    verify_script = REPO_ROOT / "scripts" / "full_profile_verify.py"
+    text = verify_script.read_text(encoding="utf-8")
+    if "'nest-asyncio-smoke'" in text:
+        raise AssertionError("nest-asyncio smoke should not run inline in full_profile_verify.py")
+    if '"name": "nest-asyncio-runtime"' not in text:
+        raise AssertionError("nest-asyncio runtime subprocess smoke is missing from full_profile_verify.py")
+    runtime_script = REPO_ROOT / "scripts" / "nest_asyncio_runtime.py"
+    if not runtime_script.is_file():
+        raise AssertionError("scripts/nest_asyncio_runtime.py is missing")
+    runtime_text = runtime_script.read_text(encoding="utf-8")
+    for snippet in ("import anyio", "import sniffio", "from starlette.testclient import TestClient", "anyio.run(probe)"):
+        if snippet not in runtime_text:
+            raise AssertionError(f"nest_asyncio runtime coverage is missing snippet: {snippet}")
+
+
+def validate_nest_asyncio_patch_applied(source_root: Path) -> None:
+    config = build.load_manifest()
+    repo_config = build.load_config()
+    integrations = libs.load_integrations(
+        REPO_ROOT / "Lib",
+        ["nest_asyncio"],
+        target_version=build.Version("3.15.0"),
+        library_catalog=repo_config["third_party_library_catalog"],
+    )
+    version_info, version_mm, version_full = build.parse_cpython_version(source_root)
+    hook_context = build.make_library_hook_context(
+        source_root,
+        version_info,
+        version_mm,
+        version_full,
+        "Release",
+        "x64",
+    )
+    libs.run_prepare_source_hooks(integrations, hook_context)
+    libs.run_post_patch_hooks(integrations, hook_context)
+
+    target = source_root / "Lib" / "nest_asyncio.py"
+    if not target.is_file():
+        raise AssertionError("Lib/nest_asyncio.py is missing from patched source tree")
+    text = target.read_text(encoding="utf-8")
+    required_snippets = [
+        "asyncio.tasks._py_register_task = asyncio.tasks._c_register_task",
+        "task_current = getattr(asyncio.tasks, '_py_current_task', None)",
+        "task_swap = getattr(asyncio.tasks, '_py_swap_current_task', None)",
+        "if task_current is not None and task_swap is not None:",
+        "task_swap(self, None)",
+        "task_swap(self, curr_task)",
+    ]
+    for snippet in required_snippets:
+        if snippet not in text:
+            raise AssertionError(f"nest_asyncio patch missing snippet: {snippet}")
+
+
 def validate_overlay_freeze_step_one(source_root: Path, version_info: tuple[int, int, int]) -> list[PhaseResult]:
     results: list[PhaseResult] = []
     script = source_root / "Tools" / "build" / "freeze_modules.py"
@@ -308,6 +363,12 @@ def validate_tag(cpython_repo: Path, tag: str, work_root: Path, keep_worktrees: 
         if any(result.status == "FAIL" for result in results):
             return False, results, version_full
         run_phase(results, "validate_patched_tree", lambda: validate_patched_tree(worktree, version_info, version_mm))
+        if any(result.status == "FAIL" for result in results):
+            return False, results, version_full
+        run_phase(results, "validate_nest_asyncio_patch_applied", lambda: validate_nest_asyncio_patch_applied(worktree))
+        if any(result.status == "FAIL" for result in results):
+            return False, results, version_full
+        run_phase(results, "validate_verify_script_layout", lambda: validate_verify_script_layout(worktree))
         if any(result.status == "FAIL" for result in results):
             return False, results, version_full
         results.extend(validate_overlay_freeze_step_one(worktree, version_info))
