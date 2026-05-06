@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 from libs import pypi_library, source_path, write_source_text
 from tools import download_first_available, extract_source_archive
@@ -11,11 +12,13 @@ from tools import download_first_available, extract_source_archive
 MATPLOTLIB_RELEASE_VERSION = "3.10.9"
 FREETYPE_VERSION = "2.6.1"
 QHULL_VERSION = "8.0.2"
+SDL2_VERSION = "2.32.10"
 
 MATPLOTLIB_AGG_PROJECT_GUID = "{44B16CB8-02F2-4C8A-9949-66E0434F643E}"
 MATPLOTLIB_FREETYPE_PROJECT_GUID = "{8EEDC81D-B835-4F59-A539-3871C33B1871}"
 MATPLOTLIB_QHULL_PROJECT_GUID = "{9C48D991-EB14-4E73-A466-6E676E26E2EE}"
 MATPLOTLIB_BACKEND_AGG_PROJECT_GUID = "{12F9D102-207B-4D9A-8650-80F67146540E}"
+MATPLOTLIB_BACKEND_SDL_PROJECT_GUID = "{6D3550EE-5C94-44C8-9A44-3A66B35A6C61}"
 MATPLOTLIB_C_INTERNAL_UTILS_PROJECT_GUID = "{26B4DF8B-9E6E-40B8-A1AC-213F785EB5F4}"
 MATPLOTLIB_FT2FONT_PROJECT_GUID = "{BC40F20D-9547-442A-AF93-7418B01D38F1}"
 MATPLOTLIB_IMAGE_PROJECT_GUID = "{020159B8-5505-4D42-95E2-C7B7500A08E6}"
@@ -116,6 +119,35 @@ MATPLOTLIB_EXTENSION_MODULES = {
         "link_libs": [
             "matplotlib_agg.lib",
             "matplotlib_freetype.lib",
+        ],
+    },
+    "matplotlib.backends._backend_sdl": {
+        "guid": MATPLOTLIB_BACKEND_SDL_PROJECT_GUID,
+        "target": "matplotlib.backends._backend_sdl",
+        "pyinit": "PyInit__backend_sdl",
+        "sources": [
+            "src/_backend_sdl.cpp",
+        ],
+        "include_dirs": [
+            r"..\matplotlib_builtin\source\src",
+            fr"..\matplotlib_builtin\SDL-{SDL2_VERSION}\include",
+            r"..\pybind11_builtin\include",
+        ],
+        "definitions": [
+            "SDL_MAIN_HANDLED",
+        ],
+        "link_libs": [
+            "matplotlib_sdl2.lib",
+            "user32.lib",
+            "gdi32.lib",
+            "winmm.lib",
+            "imm32.lib",
+            "ole32.lib",
+            "oleaut32.lib",
+            "version.lib",
+            "uuid.lib",
+            "shell32.lib",
+            "setupapi.lib",
         ],
     },
     "matplotlib._c_internal_utils": {
@@ -228,6 +260,10 @@ MATPLOTLIB_SUPPORT_PROJECTS = {
     "matplotlib_agg": {
         "project": "matplotlib_agg.vcxproj",
         "guid": MATPLOTLIB_AGG_PROJECT_GUID,
+    },
+    "matplotlib_sdl2": {
+        "project": "matplotlib_sdl2.vcxproj",
+        "guid": "{68D0E0E2-65A1-41A8-B0BF-52B60A412B90}",
     },
     "matplotlib_freetype": {
         "project": "matplotlib_freetype.vcxproj",
@@ -663,6 +699,53 @@ def ensure_freetype_source(context) -> Path:
     return extracted_root
 
 
+def ensure_sdl2_source(context) -> Path:
+    version = SDL2_VERSION
+    source_dir = source_path(context, f"matplotlib_builtin/SDL-{version}")
+    if (source_dir / "include" / "SDL.h").exists():
+        return source_dir
+
+    archive_path = _downloaded_archive_path(
+        context,
+        "SDL2",
+        version,
+        f"SDL-{version}.zip",
+    )
+    used_source = download_first_available(
+        context.log,
+        [
+            f"https://github.com/libsdl-org/SDL/archive/refs/tags/release-{version}.zip",
+        ],
+        archive_path,
+    )
+    extracted_root = _extract_archive_if_needed(
+        context,
+        archive_path,
+        source_dir,
+        final_name=f"SDL-{version}",
+    )
+    context.log(f"materialized SDL {version} from {used_source}")
+    return extracted_root
+
+
+def _sdl_source_files(context) -> list[str]:
+    project_path = source_path(context, f"matplotlib_builtin/SDL-{SDL2_VERSION}/VisualC/SDL/SDL.vcxproj")
+    root = ET.fromstring(project_path.read_text(encoding="utf-8"))
+    namespace = {"msbuild": "http://schemas.microsoft.com/developer/msbuild/2003"}
+    source_files: list[str] = []
+    for element in root.findall(".//msbuild:ClCompile", namespace):
+        include = element.get("Include")
+        if not include:
+            continue
+        normalized = include.replace("\\", "/")
+        if not normalized.startswith("../../"):
+            continue
+        source_files.append(normalized[6:])
+    if not source_files:
+        raise RuntimeError(f"could not discover SDL source files from {project_path}")
+    return list(dict.fromkeys(source_files))
+
+
 def ensure_qhull_source(context) -> Path:
     source_dir = source_path(context, f"matplotlib_builtin/qhull-{QHULL_VERSION}")
     if (source_dir / "src" / "libqhull_r" / "qhull_ra.h").exists():
@@ -714,6 +797,687 @@ def _write_mpl_toolkits_package_init(context) -> None:
     )
 
 
+def _patch_matplotlib_backend_registry(context) -> None:
+    path = source_path(context, "Lib/matplotlib/backends/registry.py")
+    text = path.read_text(encoding="utf-8")
+
+    builtin_anchor = '        "template": "headless",\n'
+    if '"sdl2": "sdl2"' not in text:
+        text = text.replace(
+            builtin_anchor,
+            builtin_anchor + '        "sdl2": "sdl2",\n',
+            1,
+        )
+        gui_anchor = '        "wx": "wxagg",\n'
+        text = text.replace(
+            gui_anchor,
+            gui_anchor + '        "sdl2": "sdl2",\n',
+            1,
+        )
+        write_source_text(context, "Lib/matplotlib/backends/registry.py", text)
+
+
+def _patch_matplotlib_pyplot_autobackend(context) -> None:
+    path = source_path(context, "Lib/matplotlib/pyplot.py")
+    text = path.read_text(encoding="utf-8")
+    old = '            "macosx", "qtagg", "gtk4agg", "gtk3agg", "tkagg", "wxagg"]\n'
+    new = '            "macosx", "qtagg", "gtk4agg", "gtk3agg", "sdl2", "tkagg", "wxagg"]\n'
+    patched = text.replace(old, new, 1)
+    if patched != text:
+        write_source_text(context, "Lib/matplotlib/pyplot.py", patched)
+
+
+def _write_backend_sdl_module(context) -> None:
+    write_source_text(
+        context,
+        "Lib/matplotlib/backends/backend_sdl2.py",
+        """from __future__ import annotations
+
+import time
+
+from matplotlib import _api
+from matplotlib._pylab_helpers import Gcf
+from matplotlib.backend_bases import CloseEvent, FigureManagerBase, ResizeEvent, TimerBase, _Backend
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+from matplotlib.backends import _backend_sdl
+
+
+class TimerSDL(TimerBase):
+    def __init__(self, *args, **kwargs):
+        self._timer = None
+        super().__init__(*args, **kwargs)
+
+    def _timer_start(self):
+        self._timer_stop()
+        self._timer = _backend_sdl.Timer(self._on_timer, self.interval, self.single_shot)
+        self._timer.start()
+
+    def _timer_stop(self):
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _timer_set_interval(self):
+        if self._timer is not None:
+            self._timer.set_interval(self.interval)
+
+    def _timer_set_single_shot(self):
+        if self._timer is not None:
+            self._timer.set_single_shot(self.single_shot)
+
+
+class FigureCanvasSDL(FigureCanvasAgg):
+    required_interactive_framework = "sdl2"
+    manager_class = _api.classproperty(lambda cls: FigureManagerSDL)
+    _timer_cls = TimerSDL
+    supports_blit = False
+
+    def __init__(self, figure=None):
+        super().__init__(figure=figure)
+        self._window = None
+        self._closed = False
+
+    def _ensure_window(self):
+        if self._closed and self._window is None:
+            raise RuntimeError("the SDL figure window has already been closed")
+        if self._window is None:
+            width, height = [int(value) for value in self.get_width_height()]
+            self._window = _backend_sdl.Window(self.manager.get_window_title(), width, height, self)
+        return self._window
+
+    def draw(self):
+        super().draw()
+        if self._closed or self._window is None:
+            return
+        width, height = [int(value) for value in self.get_width_height()]
+        self._window.present(memoryview(self.buffer_rgba()), width, height)
+
+    def draw_idle(self):
+        if self._closed:
+            return
+        self._ensure_window().request_redraw()
+
+    def flush_events(self):
+        _backend_sdl.process_events()
+
+    def start_event_loop(self, timeout=0):
+        if self._closed:
+            return
+        self._looping = True
+        deadline = None if timeout <= 0 else time.monotonic() + timeout
+        while self._looping and not self._closed:
+            _backend_sdl.process_events()
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+
+    def _handle_redraw(self):
+        if not self._closed:
+            self.draw()
+
+    def _handle_resize(self, width, height):
+        if self._closed:
+            return
+        if width <= 0 or height <= 0:
+            return
+        dpi = self.figure.dpi
+        self.figure.set_size_inches(width / dpi, height / dpi, forward=False)
+        ResizeEvent("resize_event", self)._process()
+        self.draw()
+
+    def _handle_close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self.stop_event_loop()
+        CloseEvent("close_event", self)._process()
+        manager = getattr(self, "manager", None)
+        if manager is not None:
+            try:
+                Gcf.destroy(manager)
+            except Exception:
+                manager.destroy()
+
+
+class FigureManagerSDL(FigureManagerBase):
+    @classmethod
+    def start_main_loop(cls):
+        windows = []
+        for manager in Gcf.get_all_fig_managers():
+            manager.show()
+            window = getattr(manager.canvas, "_window", None)
+            if window is not None:
+                windows.append(window)
+        if windows:
+            _backend_sdl.run_event_loop(windows)
+
+    def show(self):
+        if self.canvas._closed and self.canvas._window is None:
+            return
+        window = self.canvas._ensure_window()
+        window.show()
+        self.canvas.draw()
+
+    def destroy(self):
+        if getattr(self, "_destroying", False):
+            return
+        self._destroying = True
+        try:
+            self.canvas.stop_event_loop()
+            self.canvas._closed = True
+            window = self.canvas._window
+            if window is not None:
+                self.canvas._window = None
+                window.close()
+        finally:
+            self._destroying = False
+
+    def set_window_title(self, title):
+        super().set_window_title(title)
+        if self.canvas._window is not None:
+            self.canvas._window.set_title(title)
+
+    def resize(self, w, h):
+        if self.canvas._window is not None:
+            self.canvas._window.resize(int(w), int(h))
+
+
+@_Backend.export
+class _BackendSDL2(_Backend):
+    backend_version = "SDL2"
+    FigureCanvas = FigureCanvasSDL
+    FigureManager = FigureManagerSDL
+    mainloop = FigureManagerSDL.start_main_loop
+""",
+    )
+    write_source_text(
+        context,
+        "matplotlib_builtin/source/src/_backend_sdl.cpp",
+        """#include <SDL.h>
+#include <pybind11/pybind11.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace py = pybind11;
+
+namespace {
+
+constexpr int SDL_EVENT_REDRAW = 1;
+constexpr int SDL_EVENT_TIMER = 2;
+
+Uint32 g_sdl_event_type = 0;
+std::unordered_map<Uint32, class Window*> g_windows;
+
+std::string sdl_error(const char* prefix)
+{
+    return std::string(prefix) + ": " + SDL_GetError();
+}
+
+void ensure_sdl_ready()
+{
+    if ((SDL_WasInit(SDL_INIT_VIDEO) == 0 || SDL_WasInit(SDL_INIT_TIMER) == 0) &&
+        SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
+        SDL_SetMainReady();
+        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
+            throw std::runtime_error(sdl_error("failed to initialize SDL"));
+        }
+    } else {
+        SDL_SetMainReady();
+    }
+    if (g_sdl_event_type == 0) {
+        g_sdl_event_type = SDL_RegisterEvents(1);
+        if (g_sdl_event_type == static_cast<Uint32>(-1)) {
+            throw std::runtime_error(sdl_error("failed to reserve SDL user event"));
+        }
+        SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+    }
+}
+
+Uint32 sdl_event_type()
+{
+    ensure_sdl_ready();
+    return g_sdl_event_type;
+}
+
+class Timer {
+  public:
+    Timer(py::object callback, int interval, bool single_shot)
+        : callback_(std::move(callback)),
+          interval_(std::max(interval, 1)),
+          single_shot_(single_shot)
+    {
+    }
+
+    ~Timer()
+    {
+        stop();
+    }
+
+    void start()
+    {
+        stop();
+        ensure_sdl_ready();
+        generation_.fetch_add(1);
+        SDL_TimerID id = SDL_AddTimer(static_cast<Uint32>(interval_), &Timer::timer_callback, this);
+        if (id == 0) {
+            throw std::runtime_error(sdl_error("failed to start SDL timer"));
+        }
+        timer_id_.store(id);
+    }
+
+    void stop()
+    {
+        generation_.fetch_add(1);
+        SDL_TimerID id = timer_id_.exchange(0);
+        if (id != 0) {
+            SDL_RemoveTimer(id);
+        }
+    }
+
+    void set_interval(int interval)
+    {
+        interval_ = std::max(interval, 1);
+        if (timer_id_.load() != 0) {
+            start();
+        }
+    }
+
+    void set_single_shot(bool single_shot)
+    {
+        single_shot_ = single_shot;
+    }
+
+    void dispatch(std::uint64_t generation)
+    {
+        if (generation != generation_.load()) {
+            return;
+        }
+        if (single_shot_) {
+            timer_id_.store(0);
+        }
+        try {
+            callback_();
+        } catch (py::error_already_set& error) {
+            PyErr_WriteUnraisable(error.value().ptr());
+        }
+    }
+
+  private:
+    static Uint32 SDLCALL timer_callback(Uint32 interval, void* userdata)
+    {
+        auto* self = static_cast<Timer*>(userdata);
+        SDL_Event event{};
+        event.type = sdl_event_type();
+        event.user.code = SDL_EVENT_TIMER;
+        event.user.data1 = self;
+        event.user.data2 = reinterpret_cast<void*>(static_cast<uintptr_t>(self->generation_.load()));
+        SDL_PushEvent(&event);
+        return self->single_shot_ ? 0 : interval;
+    }
+
+    py::object callback_;
+    std::atomic<std::uint64_t> generation_{0};
+    std::atomic<SDL_TimerID> timer_id_{0};
+    int interval_;
+    bool single_shot_;
+};
+
+class Window {
+  public:
+    Window(const std::string& title, int width, int height, py::object canvas)
+        : canvas_(std::move(canvas)),
+          width_(std::max(width, 1)),
+          height_(std::max(height, 1))
+    {
+        ensure_sdl_ready();
+        window_ = SDL_CreateWindow(
+            title.c_str(),
+            SDL_WINDOWPOS_UNDEFINED,
+            SDL_WINDOWPOS_UNDEFINED,
+            width_,
+            height_,
+            SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE
+        );
+        if (window_ == nullptr) {
+            throw std::runtime_error(sdl_error("failed to create SDL window"));
+        }
+        renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_SOFTWARE);
+        if (renderer_ == nullptr) {
+            SDL_DestroyWindow(window_);
+            window_ = nullptr;
+            throw std::runtime_error(sdl_error("failed to create SDL renderer"));
+        }
+        SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 255);
+        window_id_ = SDL_GetWindowID(window_);
+        g_windows[window_id_] = this;
+    }
+
+    ~Window()
+    {
+        close();
+    }
+
+    void show()
+    {
+        if (!is_open()) {
+            return;
+        }
+        SDL_ShowWindow(window_);
+        request_redraw();
+    }
+
+    void set_title(const std::string& title)
+    {
+        if (is_open()) {
+            SDL_SetWindowTitle(window_, title.c_str());
+        }
+    }
+
+    void resize(int width, int height)
+    {
+        if (!is_open()) {
+            return;
+        }
+        SDL_SetWindowSize(window_, std::max(width, 1), std::max(height, 1));
+    }
+
+    void request_redraw()
+    {
+        if (!is_open() || redraw_pending_) {
+            return;
+        }
+        SDL_Event event{};
+        event.type = sdl_event_type();
+        event.user.code = SDL_EVENT_REDRAW;
+        event.user.data1 = this;
+        redraw_pending_ = true;
+        if (SDL_PushEvent(&event) < 0) {
+            redraw_pending_ = false;
+            throw std::runtime_error(sdl_error("failed to queue redraw request"));
+        }
+    }
+
+    void process_events();
+
+    void present(py::buffer rgba, int width, int height)
+    {
+        ensure_open();
+        py::buffer_info info = rgba.request();
+        if (width <= 0 || height <= 0) {
+            return;
+        }
+        auto expected = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
+        if (info.itemsize != 1 || static_cast<size_t>(info.size) < expected) {
+            throw std::runtime_error("expected a contiguous RGBA byte buffer");
+        }
+        ensure_texture(width, height);
+        if (SDL_UpdateTexture(texture_, nullptr, info.ptr, width * 4) != 0) {
+            throw std::runtime_error(sdl_error("failed to update SDL texture"));
+        }
+        if (SDL_RenderClear(renderer_) != 0) {
+            throw std::runtime_error(sdl_error("failed to clear SDL renderer"));
+        }
+        if (SDL_RenderCopy(renderer_, texture_, nullptr, nullptr) != 0) {
+            throw std::runtime_error(sdl_error("failed to copy SDL texture"));
+        }
+        SDL_RenderPresent(renderer_);
+    }
+
+    void close()
+    {
+        if (closed_) {
+            return;
+        }
+        closed_ = true;
+        redraw_pending_ = false;
+        if (window_id_ != 0) {
+            g_windows.erase(window_id_);
+            window_id_ = 0;
+        }
+        if (texture_ != nullptr) {
+            SDL_DestroyTexture(texture_);
+            texture_ = nullptr;
+        }
+        if (renderer_ != nullptr) {
+            SDL_DestroyRenderer(renderer_);
+            renderer_ = nullptr;
+        }
+        if (window_ != nullptr) {
+            SDL_DestroyWindow(window_);
+            window_ = nullptr;
+        }
+        canvas_ = py::none();
+    }
+
+    bool is_open() const
+    {
+        return !closed_ && window_ != nullptr && renderer_ != nullptr;
+    }
+
+    Uint32 window_id() const
+    {
+        return window_id_;
+    }
+
+    void dispatch_redraw()
+    {
+        if (!is_open()) {
+            return;
+        }
+        redraw_pending_ = false;
+        call_canvas("_handle_redraw");
+    }
+
+    void dispatch_resize(int width, int height)
+    {
+        if (!is_open()) {
+            return;
+        }
+        width_ = std::max(width, 1);
+        height_ = std::max(height, 1);
+        call_canvas("_handle_resize", width_, height_);
+    }
+
+    void dispatch_close()
+    {
+        if (closed_) {
+            return;
+        }
+        call_canvas("_handle_close");
+    }
+
+  private:
+    void ensure_open() const
+    {
+        if (!is_open()) {
+            throw std::runtime_error("the SDL figure window is closed");
+        }
+    }
+
+    void ensure_texture(int width, int height)
+    {
+        if (texture_ != nullptr && texture_width_ == width && texture_height_ == height) {
+            return;
+        }
+        if (texture_ != nullptr) {
+            SDL_DestroyTexture(texture_);
+            texture_ = nullptr;
+        }
+        texture_ = SDL_CreateTexture(
+            renderer_,
+            SDL_PIXELFORMAT_RGBA32,
+            SDL_TEXTUREACCESS_STREAMING,
+            width,
+            height
+        );
+        if (texture_ == nullptr) {
+            throw std::runtime_error(sdl_error("failed to create SDL texture"));
+        }
+        texture_width_ = width;
+        texture_height_ = height;
+    }
+
+    template <typename... Args>
+    void call_canvas(const char* method_name, Args&&... args)
+    {
+        if (canvas_.is_none()) {
+            return;
+        }
+        try {
+            canvas_.attr(method_name)(std::forward<Args>(args)...);
+        } catch (py::error_already_set& error) {
+            PyErr_WriteUnraisable(error.value().ptr());
+        }
+    }
+
+    py::object canvas_;
+    SDL_Window* window_ = nullptr;
+    SDL_Renderer* renderer_ = nullptr;
+    SDL_Texture* texture_ = nullptr;
+    Uint32 window_id_ = 0;
+    int width_ = 0;
+    int height_ = 0;
+    int texture_width_ = 0;
+    int texture_height_ = 0;
+    bool closed_ = false;
+    bool redraw_pending_ = false;
+};
+
+Window* lookup_window(Uint32 window_id)
+{
+    auto it = g_windows.find(window_id);
+    return it == g_windows.end() ? nullptr : it->second;
+}
+
+void dispatch_event(const SDL_Event& event)
+{
+    if (event.type == SDL_WINDOWEVENT) {
+        auto* window = lookup_window(event.window.windowID);
+        if (window == nullptr) {
+            return;
+        }
+        switch (event.window.event) {
+        case SDL_WINDOWEVENT_EXPOSED:
+        case SDL_WINDOWEVENT_SHOWN:
+        case SDL_WINDOWEVENT_RESTORED:
+            window->dispatch_redraw();
+            break;
+        case SDL_WINDOWEVENT_SIZE_CHANGED:
+        case SDL_WINDOWEVENT_RESIZED:
+            window->dispatch_resize(event.window.data1, event.window.data2);
+            break;
+        case SDL_WINDOWEVENT_CLOSE:
+            window->dispatch_close();
+            break;
+        default:
+            break;
+        }
+        return;
+    }
+
+    if (event.type == SDL_QUIT) {
+        std::vector<Window*> snapshot;
+        snapshot.reserve(g_windows.size());
+        for (const auto& item : g_windows) {
+            snapshot.push_back(item.second);
+        }
+        for (auto* window : snapshot) {
+            if (window != nullptr) {
+                window->dispatch_close();
+            }
+        }
+        return;
+    }
+
+    if (event.type == sdl_event_type()) {
+        if (event.user.code == SDL_EVENT_REDRAW) {
+            auto* window = static_cast<Window*>(event.user.data1);
+            if (window != nullptr) {
+                window->dispatch_redraw();
+            }
+        } else if (event.user.code == SDL_EVENT_TIMER) {
+            auto* timer = static_cast<Timer*>(event.user.data1);
+            if (timer != nullptr) {
+                auto generation = static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(event.user.data2));
+                timer->dispatch(generation);
+            }
+        }
+    }
+}
+
+void process_events_impl()
+{
+    ensure_sdl_ready();
+    SDL_Event event{};
+    while (SDL_PollEvent(&event) != 0) {
+        dispatch_event(event);
+    }
+}
+
+bool any_open(const std::vector<Window*>& windows)
+{
+    for (auto* window : windows) {
+        if (window != nullptr && window->is_open()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+void Window::process_events()
+{
+    process_events_impl();
+}
+
+PYBIND11_MODULE(_backend_sdl, m)
+{
+    py::class_<Timer>(m, "Timer")
+        .def(py::init<py::object, int, bool>(), py::arg("callback"), py::arg("interval"), py::arg("single_shot"))
+        .def("start", &Timer::start)
+        .def("stop", &Timer::stop)
+        .def("set_interval", &Timer::set_interval)
+        .def("set_single_shot", &Timer::set_single_shot);
+
+    py::class_<Window>(m, "Window")
+        .def(py::init<const std::string&, int, int, py::object>(), py::arg("title"), py::arg("width"), py::arg("height"), py::arg("canvas"))
+        .def("show", &Window::show)
+        .def("set_title", &Window::set_title)
+        .def("resize", &Window::resize)
+        .def("request_redraw", &Window::request_redraw)
+        .def("process_events", &Window::process_events)
+        .def("present", &Window::present, py::arg("rgba"), py::arg("width"), py::arg("height"))
+        .def("close", &Window::close);
+
+    m.def("process_events", &process_events_impl);
+    m.def("run_event_loop", [](py::iterable windows) {
+        ensure_sdl_ready();
+        std::vector<Window*> tracked;
+        for (py::handle item : windows) {
+            tracked.push_back(item.cast<Window*>());
+        }
+        SDL_Event event{};
+        while (any_open(tracked)) {
+            if (SDL_WaitEventTimeout(&event, 50) != 0) {
+                dispatch_event(event);
+            }
+            process_events_impl();
+        }
+    });
+}
+""",
+    )
+
+
+
 def _patch_matplotlib_sources(context) -> None:
     path = source_path(context, "matplotlib_builtin/source/src/_c_internal_utils.cpp")
     text = path.read_text(encoding="utf-8")
@@ -721,6 +1485,8 @@ def _patch_matplotlib_sources(context) -> None:
     if patched != text:
         write_source_text(context, "matplotlib_builtin/source/src/_c_internal_utils.cpp", patched)
     write_source_text(context, "matplotlib_builtin/source/src/_enums.h", PATCHED_MATPLOTLIB_ENUMS_HEADER)
+    _patch_matplotlib_backend_registry(context)
+    _patch_matplotlib_pyplot_autobackend(context)
 
 
 def _ensure_required_files(context, files: list[str]) -> None:
@@ -734,20 +1500,26 @@ def prepare_matplotlib_project(context) -> None:
         raise RuntimeError(f"matplotlib builtin integration currently supports only x64, not {context.platform}")
 
     ensure_freetype_source(context)
+    ensure_sdl2_source(context)
     ensure_qhull_source(context)
     _write_matplotlib_version_module(context)
     _write_mpl_toolkits_package_init(context)
+    _write_backend_sdl_module(context)
     _patch_matplotlib_sources(context)
 
     _ensure_required_files(
         context,
         [
             "Lib/matplotlib/__init__.py",
+            "Lib/matplotlib/backends/backend_sdl2.py",
             "Lib/mpl_toolkits",
             "Lib/mpl_toolkits/__init__.py",
             "Lib/pylab.py",
+            "matplotlib_builtin/source/src/_backend_sdl.cpp",
             "matplotlib_builtin/source/src/ft2font_wrapper.cpp",
             "matplotlib_builtin/source/extern/agg24-svn/include/agg_basics.h",
+            f"matplotlib_builtin/SDL-{SDL2_VERSION}/include/SDL.h",
+            f"matplotlib_builtin/SDL-{SDL2_VERSION}/src/SDL.c",
             f"matplotlib_builtin/freetype-{FREETYPE_VERSION}/include/ft2build.h",
             f"matplotlib_builtin/qhull-{QHULL_VERSION}/src/libqhull_r/qhull_ra.h",
             "pybind11_builtin/include/pybind11/pybind11.h",
@@ -794,6 +1566,23 @@ def prepare_matplotlib_project(context) -> None:
             source_files=MATPLOTLIB_QHULL_SOURCES,
             source_root=fr"..\matplotlib_builtin\qhull-{QHULL_VERSION}",
             include_dirs=[fr"..\matplotlib_builtin\qhull-{QHULL_VERSION}\src"],
+            extra_options=["/bigobj"],
+        ),
+    )
+    write_source_text(
+        context,
+        "PCbuild/matplotlib_sdl2.vcxproj",
+        _render_static_library_project(
+            project_guid=MATPLOTLIB_SUPPORT_PROJECTS["matplotlib_sdl2"]["guid"],
+            root_namespace="matplotlib_sdl2",
+            target_name="matplotlib_sdl2",
+            source_files=_sdl_source_files(context),
+            source_root=fr"..\matplotlib_builtin\SDL-{SDL2_VERSION}",
+            include_dirs=[fr"..\matplotlib_builtin\SDL-{SDL2_VERSION}\include"],
+            definitions=[
+                "SDL_STATIC_LIB",
+                "SDL_MAIN_HANDLED",
+            ],
             extra_options=["/bigobj"],
         ),
     )
@@ -844,12 +1633,15 @@ LIBRARY_INTEGRATION = pypi_library(
     materialized_paths=[
         "Lib/matplotlib/__init__.py",
         "Lib/matplotlib/_version.py",
+        "Lib/matplotlib/backends/backend_sdl2.py",
         "Lib/matplotlib/mpl-data/matplotlibrc",
         "Lib/mpl_toolkits",
         "Lib/mpl_toolkits/__init__.py",
         "Lib/pylab.py",
+        "matplotlib_builtin/source/src/_backend_sdl.cpp",
         "matplotlib_builtin/source/src/ft2font_wrapper.cpp",
         "matplotlib_builtin/source/extern/agg24-svn/include/agg_basics.h",
+        f"matplotlib_builtin/SDL-{SDL2_VERSION}/include/SDL.h",
         f"matplotlib_builtin/freetype-{FREETYPE_VERSION}/include/ft2build.h",
         f"matplotlib_builtin/qhull-{QHULL_VERSION}/src/libqhull_r/qhull_ra.h",
         *[f"PCbuild/{project}" for project, _guid in [*MATPLOTLIB_SUPPORT_PROJECT_ITEMS, *MATPLOTLIB_EXTENSION_PROJECT_ITEMS]],

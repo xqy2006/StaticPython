@@ -125,6 +125,29 @@ def test_matplotlib() -> None:
     assert len(payload) > 1000
 
 
+def test_matplotlib_sdl2() -> None:
+    os.environ.setdefault("MPLCONFIGDIR", tempfile.mkdtemp(prefix="staticpython-mpl-sdl-"))
+
+    import matplotlib
+
+    matplotlib.use("module://matplotlib.backends.backend_sdl2", force=True)
+
+    _assert_builtin("matplotlib.backends._backend_sdl")
+
+    from matplotlib import pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(2, 1.5), dpi=80)
+    ax.plot([0, 1, 2], [0, 1, 0], marker="o")
+    ax.set_title("SDL backend")
+
+    manager = fig.canvas.manager
+    manager.show()
+    fig.canvas.flush_events()
+    fig.canvas.start_event_loop(0.05)
+    manager.destroy()
+    plt.close(fig)
+
+
 def main() -> int:
     tests = [
         ("numpy", test_numpy),
@@ -132,6 +155,7 @@ def main() -> int:
         ("contourpy", test_contourpy),
         ("kiwisolver", test_kiwisolver),
         ("matplotlib", test_matplotlib),
+        ("matplotlib-sdl2", test_matplotlib_sdl2),
     ]
     for name, test in tests:
         print(f"[staticpython-matplotlib-verify] {name}: running", flush=True)
