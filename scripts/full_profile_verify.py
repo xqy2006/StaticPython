@@ -1366,11 +1366,17 @@ solver.updateVariables()
 assert round(x.value(), 7) == 6.0
 assert round(y.value(), 7) == 4.0
 
-solver.addEditVariable(x, kiwi.strength.strong)
-solver.suggestValue(x, 8)
-solver.updateVariables()
-assert round(x.value(), 7) == 8.0
-assert round(y.value(), 7) == 2.0
+editable_x = kiwi.Variable("editable_x")
+editable_y = kiwi.Variable("editable_y")
+editable = kiwi.Solver()
+editable.addConstraint(editable_x + editable_y == 10)
+editable.addEditVariable(editable_x, kiwi.strength.strong)
+editable.addEditVariable(editable_y, kiwi.strength.medium)
+editable.suggestValue(editable_x, 8)
+editable.suggestValue(editable_y, 1)
+editable.updateVariables()
+assert round(editable_x.value(), 7) == 8.0
+assert round(editable_y.value(), 7) == 2.0
 assert kiwi.__version__
         """,
     ),
@@ -2036,9 +2042,11 @@ for name in (
 
 from matplotlib import ft2font
 from matplotlib import pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
 assert ft2font.__freetype_version__ == "2.6.1"
 assert ft2font.__freetype_build_type__ == "local"
+assert Axes3D.__name__ == "Axes3D"
 
 data_path = matplotlib.get_data_path()
 assert data_path.endswith("mpl-data"), data_path

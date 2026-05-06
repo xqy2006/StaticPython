@@ -704,6 +704,16 @@ def _write_matplotlib_version_module(context) -> None:
     write_source_text(context, "Lib/matplotlib/_version.py", f'version = "{version}"\n')
 
 
+def _write_mpl_toolkits_package_init(context) -> None:
+    write_source_text(
+        context,
+        "Lib/mpl_toolkits/__init__.py",
+        '"""StaticPython bootstrap for mpl_toolkits."""\n'
+        "from pkgutil import extend_path\n\n"
+        "__path__ = extend_path(__path__, __name__)\n",
+    )
+
+
 def _patch_matplotlib_sources(context) -> None:
     path = source_path(context, "matplotlib_builtin/source/src/_c_internal_utils.cpp")
     text = path.read_text(encoding="utf-8")
@@ -726,6 +736,7 @@ def prepare_matplotlib_project(context) -> None:
     ensure_freetype_source(context)
     ensure_qhull_source(context)
     _write_matplotlib_version_module(context)
+    _write_mpl_toolkits_package_init(context)
     _patch_matplotlib_sources(context)
 
     _ensure_required_files(
@@ -733,6 +744,7 @@ def prepare_matplotlib_project(context) -> None:
         [
             "Lib/matplotlib/__init__.py",
             "Lib/mpl_toolkits",
+            "Lib/mpl_toolkits/__init__.py",
             "Lib/pylab.py",
             "matplotlib_builtin/source/src/ft2font_wrapper.cpp",
             "matplotlib_builtin/source/extern/agg24-svn/include/agg_basics.h",
@@ -834,6 +846,7 @@ LIBRARY_INTEGRATION = pypi_library(
         "Lib/matplotlib/_version.py",
         "Lib/matplotlib/mpl-data/matplotlibrc",
         "Lib/mpl_toolkits",
+        "Lib/mpl_toolkits/__init__.py",
         "Lib/pylab.py",
         "matplotlib_builtin/source/src/ft2font_wrapper.cpp",
         "matplotlib_builtin/source/extern/agg24-svn/include/agg_basics.h",

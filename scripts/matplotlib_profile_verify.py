@@ -71,6 +71,18 @@ def test_kiwisolver() -> None:
     assert round(x.value(), 7) == 6.0
     assert round(y.value(), 7) == 4.0
 
+    editable_x = kiwi.Variable("editable_x")
+    editable_y = kiwi.Variable("editable_y")
+    editable = kiwi.Solver()
+    editable.addConstraint(editable_x + editable_y == 10)
+    editable.addEditVariable(editable_x, kiwi.strength.strong)
+    editable.addEditVariable(editable_y, kiwi.strength.medium)
+    editable.suggestValue(editable_x, 8)
+    editable.suggestValue(editable_y, 1)
+    editable.updateVariables()
+    assert round(editable_x.value(), 7) == 8.0
+    assert round(editable_y.value(), 7) == 2.0
+
 
 def test_matplotlib() -> None:
     os.environ.setdefault("MPLCONFIGDIR", tempfile.mkdtemp(prefix="staticpython-mpl-"))
@@ -92,9 +104,11 @@ def test_matplotlib() -> None:
 
     from matplotlib import ft2font
     from matplotlib import pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
 
     assert ft2font.__freetype_version__ == "2.6.1"
     assert ft2font.__freetype_build_type__ == "local"
+    assert Axes3D.__name__ == "Axes3D"
     assert matplotlib.get_data_path().endswith("mpl-data")
 
     fig, ax = plt.subplots(figsize=(2, 1.5), dpi=80)
