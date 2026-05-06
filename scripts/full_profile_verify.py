@@ -578,6 +578,34 @@ assert {"color": "red", "marker": "o"} in list(product)
         """,
     ),
     (
+        'contourpy-smoke',
+        r"""
+import importlib.util
+
+import numpy as np
+
+import contourpy
+from contourpy.util import build_config
+
+assert importlib.util.find_spec("contourpy._contourpy").origin == "built-in"
+assert contourpy.__version__
+
+z = np.array(
+    [
+        [0.0, 0.5, 1.0],
+        [0.5, 1.0, 1.5],
+        [1.0, 1.5, 2.0],
+    ],
+    dtype=np.float64,
+)
+generator = contourpy.contour_generator(z=z, name="serial")
+lines = generator.lines(0.75)
+assert lines
+assert all(line.shape[1] == 2 for line in lines)
+assert build_config()["contourpy_version"] == contourpy.__version__
+        """,
+    ),
+    (
         'dateutil-smoke',
         r"""
 from datetime import datetime
@@ -1321,6 +1349,38 @@ assert add(2, 5) == 7
         """,
     ),
     (
+        'kiwisolver-smoke',
+        r"""
+import importlib.util
+
+import kiwisolver as kiwi
+
+assert importlib.util.find_spec("kiwisolver._cext").origin == "built-in"
+
+x = kiwi.Variable("x")
+y = kiwi.Variable("y")
+solver = kiwi.Solver()
+solver.addConstraint(x + y == 10)
+solver.addConstraint(x - y == 2)
+solver.updateVariables()
+assert round(x.value(), 7) == 6.0
+assert round(y.value(), 7) == 4.0
+
+editable_x = kiwi.Variable("editable_x")
+editable_y = kiwi.Variable("editable_y")
+editable = kiwi.Solver()
+editable.addConstraint(editable_x + editable_y == 10)
+editable.addEditVariable(editable_x, kiwi.strength.strong)
+editable.addEditVariable(editable_y, kiwi.strength.medium)
+editable.suggestValue(editable_x, 8)
+editable.suggestValue(editable_y, 1)
+editable.updateVariables()
+assert round(editable_x.value(), 7) == 8.0
+assert round(editable_y.value(), 7) == 2.0
+assert kiwi.__version__
+        """,
+    ),
+    (
         'json5-smoke',
         r"""
 import io
@@ -1951,6 +2011,59 @@ assert backend.figure_formats == {"png"}
 backend.figure_format = "svg"
 assert backend.figure_formats == {"svg"}
 assert backend.print_figure_kwargs["bbox_inches"] == "tight"
+        """,
+    ),
+    (
+        'matplotlib-smoke',
+        r"""
+import importlib.util
+import io
+import os
+import tempfile
+
+_staticpython_mpl_tmpdir = tempfile.TemporaryDirectory(prefix="staticpython-mpl-")
+os.environ.setdefault("MPLCONFIGDIR", _staticpython_mpl_tmpdir.name)
+
+import matplotlib
+
+matplotlib.use("Agg", force=True)
+
+for name in (
+    "matplotlib.ft2font",
+    "matplotlib._path",
+    "matplotlib._image",
+    "matplotlib._qhull",
+    "matplotlib._tri",
+    "matplotlib._c_internal_utils",
+    "matplotlib.backends._backend_agg",
+):
+    spec = importlib.util.find_spec(name)
+    assert spec is not None, name
+    assert spec.origin == "built-in", (name, spec.origin)
+
+from matplotlib import ft2font
+from matplotlib import pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+assert ft2font.__freetype_version__ == "2.6.1"
+assert ft2font.__freetype_build_type__ == "local"
+assert Axes3D.__name__ == "Axes3D"
+
+data_path = matplotlib.get_data_path()
+assert data_path.endswith("mpl-data"), data_path
+
+fig, ax = plt.subplots(figsize=(2, 1.5), dpi=80)
+ax.plot([0, 1, 2], [0, 1, 0], marker="o")
+ax.set_title("StaticPython")
+ax.fill_between([0, 1, 2], [0, 0.25, 0], alpha=0.2)
+
+buffer = io.BytesIO()
+fig.savefig(buffer, format="png")
+plt.close(fig)
+
+payload = buffer.getvalue()
+assert payload.startswith(b"\x89PNG\r\n\x1a\n")
+assert len(payload) > 1024
         """,
     ),
     (
