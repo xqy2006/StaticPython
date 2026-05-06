@@ -6,6 +6,17 @@ import os
 import tempfile
 
 
+_TEMP_DIRS: list[tempfile.TemporaryDirectory[str]] = []
+
+
+def _ensure_mplconfigdir(prefix: str) -> None:
+    if "MPLCONFIGDIR" in os.environ:
+        return
+    temp_dir = tempfile.TemporaryDirectory(prefix=prefix)
+    _TEMP_DIRS.append(temp_dir)
+    os.environ["MPLCONFIGDIR"] = temp_dir.name
+
+
 def _assert_builtin(module_name: str) -> None:
     spec = importlib.util.find_spec(module_name)
     assert spec is not None, module_name
@@ -85,7 +96,7 @@ def test_kiwisolver() -> None:
 
 
 def test_matplotlib() -> None:
-    os.environ.setdefault("MPLCONFIGDIR", tempfile.mkdtemp(prefix="staticpython-mpl-"))
+    _ensure_mplconfigdir("staticpython-mpl-")
 
     import matplotlib
 
@@ -126,7 +137,7 @@ def test_matplotlib() -> None:
 
 
 def test_matplotlib_sdl2() -> None:
-    os.environ.setdefault("MPLCONFIGDIR", tempfile.mkdtemp(prefix="staticpython-mpl-sdl-"))
+    _ensure_mplconfigdir("staticpython-mpl-sdl-")
 
     import matplotlib
 

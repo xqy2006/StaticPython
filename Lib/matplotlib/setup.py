@@ -13,6 +13,7 @@ MATPLOTLIB_RELEASE_VERSION = "3.10.9"
 FREETYPE_VERSION = "2.6.1"
 QHULL_VERSION = "8.0.2"
 SDL2_VERSION = "2.32.10"
+FREETYPE_TAG = f"VER-{FREETYPE_VERSION.replace('.', '-')}"
 
 MATPLOTLIB_AGG_PROJECT_GUID = "{44B16CB8-02F2-4C8A-9949-66E0434F643E}"
 MATPLOTLIB_FREETYPE_PROJECT_GUID = "{8EEDC81D-B835-4F59-A539-3871C33B1871}"
@@ -113,7 +114,7 @@ MATPLOTLIB_EXTENSION_MODULES = {
         "include_dirs": [
             r"..\matplotlib_builtin\source\src",
             r"..\matplotlib_builtin\source\extern\agg24-svn\include",
-            r"..\matplotlib_builtin\freetype-2.6.1\include",
+            fr"..\matplotlib_builtin\freetype-{FREETYPE_VERSION}\include",
             r"..\pybind11_builtin\include",
         ],
         "link_libs": [
@@ -178,7 +179,7 @@ MATPLOTLIB_EXTENSION_MODULES = {
         "include_dirs": [
             r"..\matplotlib_builtin\source\src",
             r"..\matplotlib_builtin\source\extern\agg24-svn\include",
-            r"..\matplotlib_builtin\freetype-2.6.1\include",
+            fr"..\matplotlib_builtin\freetype-{FREETYPE_VERSION}\include",
             r"..\pybind11_builtin\include",
         ],
         "definitions": [
@@ -231,7 +232,7 @@ MATPLOTLIB_EXTENSION_MODULES = {
         ],
         "include_dirs": [
             r"..\matplotlib_builtin\source\src",
-            r"..\matplotlib_builtin\qhull-8.0.2\src",
+            fr"..\matplotlib_builtin\qhull-{QHULL_VERSION}\src",
             r"..\pybind11_builtin\include",
         ],
         "definitions": [
@@ -684,8 +685,8 @@ def ensure_freetype_source(context) -> Path:
         [
             f"https://download.savannah.nongnu.org/releases/freetype/freetype-old/freetype-{FREETYPE_VERSION}.tar.gz",
             f"https://downloads.sourceforge.net/project/freetype/freetype2/{FREETYPE_VERSION}/freetype-{FREETYPE_VERSION}.tar.gz",
-            "https://gitlab.freedesktop.org/freetype/freetype/-/archive/VER-2-6-1/freetype-VER-2-6-1.tar.gz",
-            "https://github.com/freetype/freetype/archive/refs/tags/VER-2-6-1.tar.gz",
+            f"https://gitlab.freedesktop.org/freetype/freetype/-/archive/{FREETYPE_TAG}/freetype-{FREETYPE_TAG}.tar.gz",
+            f"https://github.com/freetype/freetype/archive/refs/tags/{FREETYPE_TAG}.tar.gz",
         ],
         archive_path,
     )

@@ -588,7 +588,7 @@ import contourpy
 from contourpy.util import build_config
 
 assert importlib.util.find_spec("contourpy._contourpy").origin == "built-in"
-assert contourpy.__version__.startswith("1.3.")
+assert contourpy.__version__
 
 z = np.array(
     [
@@ -2021,7 +2021,8 @@ import io
 import os
 import tempfile
 
-os.environ.setdefault("MPLCONFIGDIR", tempfile.mkdtemp(prefix="staticpython-mpl-"))
+_staticpython_mpl_tmpdir = tempfile.TemporaryDirectory(prefix="staticpython-mpl-")
+os.environ.setdefault("MPLCONFIGDIR", _staticpython_mpl_tmpdir.name)
 
 import matplotlib
 

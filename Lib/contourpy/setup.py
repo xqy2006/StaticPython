@@ -7,6 +7,7 @@ from libs import pypi_library, source_path, write_source_text
 
 
 CONTOURPY_CEXT_PROJECT_GUID = "{A0137B09-DC4A-432F-A4A3-3BD7838B7986}"
+CONTOURPY_RELEASE_VERSION = "1.3.3"
 
 CONTOURPY_SOURCES = [
     "chunk_local.cpp",
@@ -180,6 +181,7 @@ def prepare_contourpy_project(context) -> None:
 
 LIBRARY_INTEGRATION = pypi_library(
     name="contourpy",
+    release_version=CONTOURPY_RELEASE_VERSION,
     dependencies=["numpy", "pybind11"],
     source_mapping={
         "lib/contourpy": "Lib/contourpy",
