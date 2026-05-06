@@ -382,12 +382,27 @@ def replace_function_block_once(
 
 def ensure_package_markers(text: str, package_name: str) -> str:
     package_line = f"__package__ = '{package_name}'"
-    path_line = "__path__ = [__name__]"
-    if package_line in text and path_line in text:
+    path_block = (
+        "try:\n"
+        "    __path__ = list(getattr(__spec__, 'submodule_search_locations', ()) or ())\n"
+        "except Exception:\n"
+        "    __path__ = []\n"
+        "if not __path__:\n"
+        "    import os as _staticpython_os\n"
+        "    __path__ = [_staticpython_os.path.dirname(__file__)]"
+    )
+    legacy_path_line = "__path__ = [__name__]"
+    if package_line in text and path_block in text:
         return text
 
-    header = f"{package_line}\n\n{path_line}\n\n"
-    return header + text.lstrip("\ufeff")
+    text = text.lstrip("\ufeff")
+    if package_line in text and legacy_path_line in text:
+        return text.replace(legacy_path_line, path_block, 1)
+    if package_line in text:
+        return text.replace(package_line, f"{package_line}\n\n{path_block}", 1)
+
+    header = f"{package_line}\n\n{path_block}\n\n"
+    return header + text
 
 
 def module_verification_step(
