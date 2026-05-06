@@ -161,6 +161,13 @@
         "source_provider": "pypi"
       },
       {
+        "name": "cppy",
+        "source_mapping": {
+          "cppy": "Lib/cppy"
+        },
+        "source_provider": "pypi"
+      },
+      {
         "name": "cycler",
         "overlay_entries": [
           "Lib/cycler"
@@ -584,6 +591,13 @@
         "source_provider": "pypi"
       },
       {
+        "name": "patsy",
+        "overlay_entries": [
+          "Lib/patsy"
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "pandocfilters",
         "overlay_entries": [
           "Lib/pandocfilters.py"
@@ -654,6 +668,14 @@
         "overlay_entries": [
           "Lib/pyasn1_modules"
         ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pybind11",
+        "source_mapping": {
+          "include/pybind11": "pybind11_builtin/include/pybind11",
+          "pybind11": "Lib/pybind11"
+        },
         "source_provider": "pypi"
       },
       {
@@ -1168,6 +1190,8 @@
         "colorama",
         "comm",
         "comtypes",
+        "contourpy",
+        "cppy",
         "Crypto",
         "cycler",
         "dateutil",
@@ -1221,6 +1245,7 @@
         "jupyterlab",
         "jupyterlab_pygments",
         "jupyterlab_server",
+        "kiwisolver",
         "lark",
         "libui",
         "loguru",
@@ -1229,6 +1254,7 @@
         "markdown_it",
         "markupsafe",
         "marshmallow",
+        "matplotlib",
         "matplotlib_inline",
         "mdurl",
         "mistune",
@@ -1252,6 +1278,7 @@
         "overrides",
         "packaging",
         "pandas",
+        "patsy",
         "pandocfilters",
         "parso",
         "pathspec",
@@ -1269,6 +1296,7 @@
         "py",
         "pyasn1",
         "pyasn1_modules",
+        "pybind11",
         "pycparser",
         "pygments",
         "pymongo",

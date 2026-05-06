@@ -1,0 +1,38 @@
+{
+  "default_profile": "contourpy-kiwisolver",
+  "third_party_library_catalog": {
+    "libraries": [
+      {
+        "name": "cppy",
+        "source_mapping": {
+          "cppy": "Lib/cppy"
+        },
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pybind11",
+        "source_mapping": {
+          "include/pybind11": "pybind11_builtin/include/pybind11",
+          "pybind11": "Lib/pybind11"
+        },
+        "source_provider": "pypi"
+      }
+    ]
+  },
+  "profiles": {
+    "contourpy-kiwisolver": {
+      "description": "Focused local profile for Matplotlib prerequisite native modules.",
+      "core_libraries": "all",
+      "third_party_libraries": [
+        "numpy",
+        "pybind11",
+        "contourpy",
+        "cppy",
+        "kiwisolver"
+      ],
+      "verification": {
+        "enabled": false
+      }
+    }
+  }
+}
