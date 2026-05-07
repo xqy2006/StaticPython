@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import zlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -65,6 +66,12 @@ FROZEN_DATA_SHARD_BYTES = 2 * 1024 * 1024
 FROZEN_DATA_SHARD_DIGITS = 6
 BASELINE_PYTHON_PROJECT_REFERENCES = {"pythoncore.vcxproj"}
 PROFILE_METADATA_RELATIVE_PATH = Path("PCbuild") / "staticpython-profile.json"
+STATIC_LIB_SDK_SCHEMA_VERSION = 1
+STATIC_LIB_SDK_METADATA_NAME = "staticpython-static-libs.json"
+STATIC_LIB_SDK_METADATA_RELATIVE_PATH = Path("metadata") / STATIC_LIB_SDK_METADATA_NAME
+STATIC_LIB_SDK_PROFILE_METADATA_RELATIVE_PATH = Path("metadata") / "staticpython-profile.json"
+STATIC_LIB_SDK_README_RELATIVE_PATH = Path("README.txt")
+STATIC_LIB_SDK_LIBRARY_DIR_RELATIVE_PATH = Path("lib")
 RUNTIME_RESOURCE_MODULE_BASENAME = "_staticpython_runtime_resources"
 RUNTIME_RESOURCE_MODULE_RELATIVE_PATH = Path("Lib") / f"{RUNTIME_RESOURCE_MODULE_BASENAME}.py"
 RUNTIME_RESOURCE_STORE_MODULE = "_staticpython_resource_store"
@@ -83,6 +90,42 @@ RUNTIME_RESOURCE_SKIP_DIR_NAMES = {
     "build",
     "dist",
     "node_modules",
+}
+WINDOWS_SYSTEM_LIBRARY_NAMES = {
+    "advapi32.lib",
+    "bcrypt.lib",
+    "comctl32.lib",
+    "comdlg32.lib",
+    "crypt32.lib",
+    "d2d1.lib",
+    "dwrite.lib",
+    "gdi32.lib",
+    "gdiplus.lib",
+    "iphlpapi.lib",
+    "kernel32.lib",
+    "legacy_stdio_definitions.lib",
+    "odbccp32.lib",
+    "odbc32.lib",
+    "ole32.lib",
+    "oleaut32.lib",
+    "pathcch.lib",
+    "pdh.lib",
+    "powrprof.lib",
+    "propsys.lib",
+    "psapi.lib",
+    "rpcrt4.lib",
+    "secur32.lib",
+    "shell32.lib",
+    "shlwapi.lib",
+    "user32.lib",
+    "userenv.lib",
+    "uuid.lib",
+    "uxtheme.lib",
+    "version.lib",
+    "wbemuuid.lib",
+    "winmm.lib",
+    "winspool.lib",
+    "ws2_32.lib",
 }
 
 ET.register_namespace("", MSBUILD_NS)
@@ -149,6 +192,33 @@ def write_profile_metadata(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
     log(f"wrote build profile metadata to {path.relative_to(source_root)}")
+
+
+def static_lib_sdk_asset_name(version_full: str, platform: str, profile: str) -> str:
+    return f"python-{version_full}-static-libs-{profile}-{platform.lower()}.zip"
+
+
+def normalize_library_name(library_name: str) -> str:
+    return Path(library_name.replace("$(PyDebugExt)", "")).name.lower()
+
+
+def is_windows_system_library(library_name: str) -> bool:
+    return normalize_library_name(library_name) in WINDOWS_SYSTEM_LIBRARY_NAMES
+
+
+def is_python_host_library(library_name: str) -> bool:
+    stem = Path(normalize_library_name(library_name)).stem
+    return stem in {"python", "python3", "pythoncore"} or re.fullmatch(r"python\d{2,3}", stem) is not None
+
+
+def is_packaged_static_library(library_name: str) -> bool:
+    normalized = normalize_library_name(library_name)
+    return (
+        normalized.endswith(".lib")
+        and normalized != "%(additionaldependencies)"
+        and not is_windows_system_library(normalized)
+        and not is_python_host_library(normalized)
+    )
 
 
 def resolve_profile(config: dict, profile_name: str | None) -> tuple[str, dict]:
@@ -566,7 +636,7 @@ def sync_python_project_references(root: ET.Element, desired_projects: list[dict
             root.remove(item_group)
 
 
-def build_python_link_dependencies(source_root: Path, manifest: dict, integrations: list) -> str:
+def iter_python_link_dependencies(source_root: Path, manifest: dict, integrations: list) -> list[str]:
     all_project_stems = {Path(project).stem for project in all_static_library_projects(manifest, integrations)}
     available_project_stems = {Path(project).stem for project in iter_static_library_projects(source_root, manifest, integrations)}
     dependencies = []
@@ -584,10 +654,15 @@ def build_python_link_dependencies(source_root: Path, manifest: dict, integratio
             )
             continue
         dependencies.append(dependency)
+    return dependencies
+
+
+def build_python_link_dependencies(source_root: Path, manifest: dict, integrations: list) -> str:
+    dependencies = iter_python_link_dependencies(source_root, manifest, integrations)
     return ";".join([*dependencies, "%(AdditionalDependencies)"])
 
 
-def build_python_link_options(source_root: Path, manifest: dict, integrations: list) -> str:
+def iter_python_link_wholearchive_libraries(source_root: Path, manifest: dict, integrations: list) -> list[str]:
     all_project_stems = {Path(project).stem for project in all_static_library_projects(manifest, integrations)}
     available_project_stems = {Path(project).stem for project in iter_static_library_projects(source_root, manifest, integrations)}
     wholearchive = []
@@ -603,9 +678,354 @@ def build_python_link_options(source_root: Path, manifest: dict, integrations: l
             )
             continue
         wholearchive.append(library)
+    return wholearchive
+
+
+def build_python_link_options(source_root: Path, manifest: dict, integrations: list) -> str:
+    wholearchive = iter_python_link_wholearchive_libraries(source_root, manifest, integrations)
     prefixes = [f"/WHOLEARCHIVE:{name}" for name in wholearchive]
     prefixes.append("%(AdditionalOptions)")
     return " ".join(prefixes)
+
+
+def try_relative_to(path: Path, root: Path) -> Path | None:
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        return None
+
+
+def display_path(path: Path, root: Path) -> str:
+    relative = try_relative_to(path, root)
+    if relative is not None:
+        return relative.as_posix()
+    return str(path)
+
+
+def library_search_roots(source_root: Path, platform: str) -> list[Path]:
+    roots: list[Path] = []
+    for candidate in (
+        get_pcbuild_output_dir(source_root, platform),
+        source_root / "PCbuild",
+        source_root / "externals",
+    ):
+        if not candidate.exists():
+            continue
+        if any(candidate == existing for existing in roots):
+            continue
+        roots.append(candidate)
+    return roots
+
+
+def library_candidate_sort_key(source_root: Path, platform: str, path: Path) -> tuple[int, int, int, str]:
+    relative = try_relative_to(path, source_root)
+    relative_text = relative.as_posix().lower() if relative is not None else str(path).lower()
+    parts = [part.lower() for part in relative.parts] if relative is not None else [part.lower() for part in path.parts]
+    outdir_parts = ["pcbuild", platform_output_dir_name(platform).lower()]
+    if parts[:2] == outdir_parts:
+        bucket = 0
+    elif parts[:1] == ["externals"]:
+        bucket = 1
+    elif parts[:1] == ["pcbuild"]:
+        bucket = 2
+    else:
+        bucket = 3
+    return (bucket, len(parts), len(relative_text), relative_text)
+
+
+def index_library_files(source_root: Path, platform: str) -> dict[str, list[Path]]:
+    indexed: dict[str, list[Path]] = {}
+    seen_paths: set[str] = set()
+    for root in library_search_roots(source_root, platform):
+        for path in root.rglob("*.lib"):
+            key = str(path.resolve())
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            indexed.setdefault(path.name.lower(), []).append(path)
+    for candidates in indexed.values():
+        candidates.sort(key=lambda item: library_candidate_sort_key(source_root, platform, item))
+    return indexed
+
+
+def collect_static_lib_sdk_library_specs(source_root: Path, platform: str, manifest: dict, integrations: list) -> list[dict]:
+    specs: list[dict] = []
+    by_name: dict[str, dict] = {}
+
+    def add_library(library_name: str, reason: str) -> None:
+        normalized = normalize_library_name(library_name)
+        if not is_packaged_static_library(normalized):
+            return
+        record = by_name.get(normalized)
+        if record is None:
+            record = {"logical_name": normalized, "reasons": []}
+            by_name[normalized] = record
+            specs.append(record)
+        if reason not in record["reasons"]:
+            record["reasons"].append(reason)
+
+    for dependency in iter_python_link_dependencies(source_root, manifest, integrations):
+        add_library(dependency, "link_dependency")
+    for library in iter_python_link_wholearchive_libraries(source_root, manifest, integrations):
+        add_library(library, "wholearchive")
+    for project in iter_static_library_projects(source_root, manifest, integrations):
+        add_library(f"{Path(project).stem}.lib", "static_library_project")
+    for entry in iter_staged_static_libraries(manifest, integrations):
+        target_name = entry.get("target_name")
+        if isinstance(target_name, str):
+            add_library(target_name, "staged_static_library")
+
+    return specs
+
+
+def resolve_static_lib_sdk_records(
+    source_root: Path,
+    platform: str,
+    manifest: dict,
+    integrations: list,
+) -> list[dict]:
+    library_index = index_library_files(source_root, platform)
+    records: list[dict] = []
+    missing: list[str] = []
+
+    for spec in collect_static_lib_sdk_library_specs(source_root, platform, manifest, integrations):
+        logical_name = spec["logical_name"]
+        candidates = library_index.get(logical_name, [])
+        if not candidates:
+            missing.append(logical_name)
+            continue
+        source_path = candidates[0]
+        records.append(
+            {
+                "logical_name": logical_name,
+                "archive_path": (STATIC_LIB_SDK_LIBRARY_DIR_RELATIVE_PATH / logical_name).as_posix(),
+                "source_name": source_path.name,
+                "source_relative_path": display_path(source_path, source_root),
+                "reasons": list(spec["reasons"]),
+                "source_path": source_path,
+            }
+        )
+
+    if missing:
+        preview = ", ".join(missing[:12])
+        suffix = " ..." if len(missing) > 12 else ""
+        raise RuntimeError(
+            "could not locate built static library file(s) required for SDK export: "
+            f"{preview}{suffix}"
+        )
+
+    return records
+
+
+def static_lib_sdk_metadata_path(root: Path) -> Path:
+    return root / STATIC_LIB_SDK_METADATA_RELATIVE_PATH
+
+
+def load_static_lib_sdk_metadata(root: Path) -> dict:
+    path = static_lib_sdk_metadata_path(root)
+    if not path.exists():
+        raise RuntimeError(f"static library SDK metadata not found: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_static_lib_sdk_readme(destination: Path, version_full: str, platform: str, profile_name: str) -> None:
+    lines = [
+        "StaticPython native static library SDK",
+        "",
+        f"CPython version: {version_full}",
+        f"Platform: {platform}",
+        f"Source profile: {profile_name}",
+        "",
+        "This package contains prebuilt native .lib files for StaticPython.",
+        "pythoncore/python.exe are intentionally not included.",
+        "",
+        "You must still build your own CPython source tree locally so StaticPython can:",
+        "- regenerate frozen modules",
+        "- regenerate runtime resource data",
+        "- relink python.exe/pythoncore for your chosen library set",
+        "",
+        "Typical reuse flow:",
+        "python .\\build.py <source_root> --profile <profile> --prebuilt-static-lib-sdk <this zip or extracted dir>",
+        "",
+        "build.py will install these .lib files into PCbuild output and skip rebuilding the packaged native static libraries.",
+    ]
+    path = destination / STATIC_LIB_SDK_README_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
+def export_static_library_sdk(
+    source_root: Path,
+    output_dir: Path,
+    version_full: str,
+    platform: str,
+    profile_name: str,
+    manifest: dict,
+    integrations: list,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    records = resolve_static_lib_sdk_records(source_root, platform, manifest, integrations)
+    filtered_link_dependencies = [
+        normalize_library_name(name)
+        for name in iter_python_link_dependencies(source_root, manifest, integrations)
+        if is_packaged_static_library(name)
+    ]
+    filtered_wholearchive = [
+        normalize_library_name(name)
+        for name in iter_python_link_wholearchive_libraries(source_root, manifest, integrations)
+        if is_packaged_static_library(name)
+    ]
+    metadata = {
+        "schema_version": STATIC_LIB_SDK_SCHEMA_VERSION,
+        "version_full": version_full,
+        "platform": platform,
+        "profile_name": profile_name,
+        "packaged_link_dependencies_release_x64": list(dict.fromkeys(filtered_link_dependencies)),
+        "packaged_link_wholearchive_release_x64": list(dict.fromkeys(filtered_wholearchive)),
+        "builtin_module_registrations": iter_builtin_module_registrations(source_root, manifest, integrations),
+        "static_library_projects_release_x64": iter_static_library_projects(source_root, manifest, integrations),
+        "libraries": [
+            {
+                "logical_name": record["logical_name"],
+                "archive_path": record["archive_path"],
+                "source_name": record["source_name"],
+                "source_relative_path": record["source_relative_path"],
+                "reasons": record["reasons"],
+            }
+            for record in records
+        ],
+    }
+
+    destination = output_dir / static_lib_sdk_asset_name(version_full, platform, profile_name)
+    if destination.exists():
+        destination.unlink()
+
+    with tempfile.TemporaryDirectory(prefix="staticpython-static-libs-export-") as temp_dir:
+        staging_root = Path(temp_dir)
+        library_dir = staging_root / STATIC_LIB_SDK_LIBRARY_DIR_RELATIVE_PATH
+        library_dir.mkdir(parents=True, exist_ok=True)
+
+        for record in records:
+            shutil.copy2(record["source_path"], library_dir / record["logical_name"])
+
+        metadata_path = staging_root / STATIC_LIB_SDK_METADATA_RELATIVE_PATH
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+
+        profile_path = profile_metadata_path(source_root)
+        if profile_path.exists():
+            copied_profile_path = staging_root / STATIC_LIB_SDK_PROFILE_METADATA_RELATIVE_PATH
+            copied_profile_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(profile_path, copied_profile_path)
+
+        write_static_lib_sdk_readme(staging_root, version_full, platform, profile_name)
+
+        archive_base = destination.with_suffix("")
+        archive_path = shutil.make_archive(str(archive_base), "zip", root_dir=staging_root)
+        if Path(archive_path) != destination:
+            shutil.move(archive_path, destination)
+
+    log(f"copied static library SDK to {destination}")
+    return destination
+
+
+def detect_static_lib_sdk_root(path: Path) -> Path:
+    if static_lib_sdk_metadata_path(path).exists():
+        return path
+
+    children = [child for child in path.iterdir() if child.is_dir()]
+    if len(children) == 1 and static_lib_sdk_metadata_path(children[0]).exists():
+        return children[0]
+
+    raise RuntimeError(
+        "could not locate a StaticPython static library SDK root; expected "
+        f"{STATIC_LIB_SDK_METADATA_RELATIVE_PATH.as_posix()} under {path}"
+    )
+
+
+def prepare_static_lib_sdk(path: Path) -> tuple[Path, tempfile.TemporaryDirectory | None]:
+    resolved = path.resolve()
+    if resolved.is_dir():
+        return detect_static_lib_sdk_root(resolved), None
+    if resolved.is_file() and resolved.suffix.lower() == ".zip":
+        temp_dir = tempfile.TemporaryDirectory(prefix="staticpython-static-libs-sdk-")
+        extract_root = Path(temp_dir.name)
+        with ZipFile(resolved) as archive:
+            safe_extract_zip(archive, extract_root)
+        return detect_static_lib_sdk_root(extract_root), temp_dir
+    raise RuntimeError(f"prebuilt static library SDK must be a .zip archive or directory: {path}")
+
+
+def install_prebuilt_static_library_sdk(
+    source_root: Path,
+    platform: str,
+    manifest: dict,
+    integrations: list,
+    version_full: str,
+    profile_name: str,
+    sdk_root: Path,
+) -> dict:
+    metadata = load_static_lib_sdk_metadata(sdk_root)
+    if int(metadata.get("schema_version", 0)) != STATIC_LIB_SDK_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"unsupported static library SDK schema version {metadata.get('schema_version')!r}; "
+            f"expected {STATIC_LIB_SDK_SCHEMA_VERSION}"
+        )
+    if metadata.get("version_full") != version_full:
+        raise RuntimeError(
+            f"static library SDK version {metadata.get('version_full')!r} does not match build version {version_full!r}"
+        )
+    if str(metadata.get("platform", "")).lower() != platform.lower():
+        raise RuntimeError(
+            f"static library SDK platform {metadata.get('platform')!r} does not match build platform {platform!r}"
+        )
+
+    sdk_profile = metadata.get("profile_name")
+    if sdk_profile and sdk_profile != profile_name:
+        log(f"using static library SDK built from profile {sdk_profile!r} for current profile {profile_name!r}")
+
+    available = {
+        str(record["logical_name"]).lower(): record
+        for record in metadata.get("libraries", [])
+        if isinstance(record, dict) and record.get("logical_name")
+    }
+    required = list(
+        dict.fromkeys(
+            [
+                normalize_library_name(name)
+                for name in iter_python_link_dependencies(source_root, manifest, integrations)
+                if is_packaged_static_library(name)
+            ]
+            + [
+                normalize_library_name(name)
+                for name in iter_python_link_wholearchive_libraries(source_root, manifest, integrations)
+                if is_packaged_static_library(name)
+            ]
+        )
+    )
+    missing = [name for name in required if name not in available]
+    if missing:
+        raise RuntimeError(
+            "static library SDK is missing library file(s) required by the current build profile: "
+            + ", ".join(missing)
+        )
+
+    output_dir = get_pcbuild_output_dir(source_root, platform)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for logical_name, record in available.items():
+        archive_path = record.get("archive_path")
+        if not isinstance(archive_path, str):
+            raise RuntimeError(f"static library SDK record for {logical_name} is missing archive_path")
+        source_path = sdk_root / Path(archive_path)
+        if not source_path.exists():
+            raise RuntimeError(f"static library SDK file is missing: {source_path}")
+        shutil.copy2(source_path, output_dir / logical_name)
+
+    log(
+        f"installed {len(available)} prebuilt static library file(s) into "
+        f"{display_path(output_dir, source_root)}"
+    )
+    return metadata
 
 
 def set_or_create_property(root: ET.Element, name: str, value: str) -> None:
@@ -2760,6 +3180,7 @@ def build_python(
     version_full: str,
     static_project_filter: set[str] | None = None,
     static_project_start: str | None = None,
+    use_prebuilt_static_libraries: bool = False,
     build_workers: int | None = None,
 ) -> None:
     pcbuild = source_root / "PCbuild"
@@ -2770,7 +3191,9 @@ def build_python(
     stage_static_libraries(source_root, platform, manifest, integrations)
 
     available_projects = iter_static_library_projects(source_root, manifest, integrations)
-    if static_project_filter is None:
+    if use_prebuilt_static_libraries:
+        selected_projects = []
+    elif static_project_filter is None:
         selected_projects = available_projects
     else:
         requested_projects = set()
@@ -2819,19 +3242,22 @@ def build_python(
             )
         selected_projects = selected_projects[start_index:]
 
-    log(f"building {len(selected_projects)} static library project(s)")
-    for target in selected_projects:
-        run(
-            [
-                resolve_msbuild_exe(),
-                str(pcbuild / target),
-                *msbuild_args(configuration, platform, workers=build_workers),
-            ],
-            cwd=source_root,
-        )
+    if use_prebuilt_static_libraries:
+        log("skipping native static library project builds because prebuilt static libraries were installed")
+    else:
+        log(f"building {len(selected_projects)} static library project(s)")
+        for target in selected_projects:
+            run(
+                [
+                    resolve_msbuild_exe(),
+                    str(pcbuild / target),
+                    *msbuild_args(configuration, platform, workers=build_workers),
+                ],
+                cwd=source_root,
+            )
 
     final_build_properties = []
-    if static_project_filter is not None or static_project_start is not None:
+    if use_prebuilt_static_libraries or static_project_filter is not None or static_project_start is not None:
         run(
             [
                 resolve_msbuild_exe(),
@@ -3004,6 +3430,22 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Copy the finished single-file python.exe to this directory with a versioned filename",
     )
+    parser.add_argument(
+        "--output-static-lib-dir",
+        type=Path,
+        help=(
+            "Export a reusable native static-library SDK zip to this directory. "
+            "The package excludes pythoncore/python.exe and is meant for later local freeze + relink builds."
+        ),
+    )
+    parser.add_argument(
+        "--prebuilt-static-lib-sdk",
+        type=Path,
+        help=(
+            "Reuse a previously exported static-library SDK (.zip or extracted directory). "
+            "build.py will still regenerate frozen modules/resources locally, but it will skip rebuilding the packaged native static libraries."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -3011,6 +3453,18 @@ def main() -> int:
     args = parse_args()
     build_workers = resolve_build_workers(args.build_workers)
     source_root, requested_version_info = resolve_source_root(args)
+    export_static_lib_only = (
+        args.skip_build
+        and args.output_static_lib_dir is not None
+        and args.output_dir is None
+        and args.prebuilt_static_lib_sdk is None
+    )
+    install_prebuilt_static_lib_only = (
+        args.skip_build
+        and args.prebuilt_static_lib_sdk is not None
+        and args.output_dir is None
+        and args.output_static_lib_dir is None
+    )
 
     if not args.skip_build:
         ensure_tool("msbuild")
@@ -3063,91 +3517,135 @@ def main() -> int:
     log(f"build workers: {build_workers}")
     DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     WORK_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    if integrations:
-        if profile.get("third_party_libraries") != "all":
-            log("pruning stale third-party source paths for the selected incremental profile")
-            cleanup_unselected_third_party_sources(
-                source_root,
-                all_third_party_integrations,
-                third_party_integrations,
-            )
-        cleanup_integration_legacy_paths(source_root, integrations)
-        log(f"materializing configured integration sources into {source_root}")
-        run_prepare_source_hooks(
-            integrations,
-            make_library_hook_context(source_root, version_info, version_mm, version_full, args.configuration, args.platform),
-        )
-    else:
-        log("skipping integration source materialization for this profile")
-    log(f"copying overlay assets into {source_root}")
-    copy_overlay_entries(source_root, ASSET_ROOT, manifest, integrations, version_info)
-    log("applying in-place patches")
-    apply_patches(
-        source_root,
-        version_info,
-        version_mm,
-        version_full,
-        manifest,
-        integrations,
-        args.platform,
-        args.configuration,
-    )
-    write_profile_metadata(
-        source_root,
-        profile_name,
-        config_path,
-        version_full,
-        core_integrations,
-        third_party_integrations,
-    )
 
-    if not args.skip_get_externals:
-        log("running get_externals.bat")
-        maybe_get_externals(source_root)
-
-    built_exe: Path | None = None
-    if not args.skip_build:
-        maybe_restore_getpath_header(source_root, version_info)
-        if args.skip_freeze:
-            log("skipping frozen module regeneration for incremental build")
+    if export_static_lib_only or install_prebuilt_static_lib_only:
+        if export_static_lib_only:
+            log("skip source materialization and patching because only static library SDK export was requested")
         else:
-            log("building freeze tool and regenerating frozen modules")
-            freeze_modules(
-                source_root,
-                args.host_python,
-                args.configuration,
-                args.platform,
-                version_info,
-                build_workers,
+            log("skip source materialization and patching because only prebuilt static library installation was requested")
+    else:
+        if integrations:
+            if profile.get("third_party_libraries") != "all":
+                log("pruning stale third-party source paths for the selected incremental profile")
+                cleanup_unselected_third_party_sources(
+                    source_root,
+                    all_third_party_integrations,
+                    third_party_integrations,
+                )
+            cleanup_integration_legacy_paths(source_root, integrations)
+            log(f"materializing configured integration sources into {source_root}")
+            run_prepare_source_hooks(
+                integrations,
+                make_library_hook_context(
+                    source_root,
+                    version_info,
+                    version_mm,
+                    version_full,
+                    args.configuration,
+                    args.platform,
+                ),
             )
-            maybe_restore_getpath_header(source_root, version_info)
-            verify_runtime_resource_modules_frozen(source_root)
-        log("splitting frozen module bytecode data for MSVC")
-        split_frozen_modules(source_root)
-        log("building custom static libraries and python.exe")
-        build_python(
+        else:
+            log("skipping integration source materialization for this profile")
+        log(f"copying overlay assets into {source_root}")
+        copy_overlay_entries(source_root, ASSET_ROOT, manifest, integrations, version_info)
+        log("applying in-place patches")
+        apply_patches(
             source_root,
-            args.configuration,
-            args.platform,
-            manifest,
-            integrations,
             version_info,
             version_mm,
             version_full,
-            set(args.build_static_project) if args.build_static_project else None,
-            args.build_static_project_from,
-            build_workers,
+            manifest,
+            integrations,
+            args.platform,
+            args.configuration,
         )
-        built_exe = get_pcbuild_output_dir(source_root, args.platform) / "python.exe"
+        write_profile_metadata(
+            source_root,
+            profile_name,
+            config_path,
+            version_full,
+            core_integrations,
+            third_party_integrations,
+        )
 
-    if not args.skip_build and not args.skip_verify:
-        log("running post-build profile verification")
-        built_exe = verify_built_python(source_root, args.platform, manifest, args.host_python, profile_name, config_path)
+        if not args.skip_get_externals:
+            log("running get_externals.bat")
+            maybe_get_externals(source_root)
 
-    if not args.skip_build and args.output_dir:
-        if built_exe is None:
+    sdk_temp_dir: tempfile.TemporaryDirectory | None = None
+    use_prebuilt_static_libraries = args.prebuilt_static_lib_sdk is not None
+    if use_prebuilt_static_libraries:
+        sdk_root, sdk_temp_dir = prepare_static_lib_sdk(args.prebuilt_static_lib_sdk)
+        install_prebuilt_static_library_sdk(
+            source_root,
+            args.platform,
+            manifest,
+            integrations,
+            version_full,
+            profile_name,
+            sdk_root,
+        )
+
+    built_exe: Path | None = None
+    try:
+        if not args.skip_build:
+            maybe_restore_getpath_header(source_root, version_info)
+            if args.skip_freeze:
+                log("skipping frozen module regeneration for incremental build")
+            else:
+                log("building freeze tool and regenerating frozen modules")
+                freeze_modules(
+                    source_root,
+                    args.host_python,
+                    args.configuration,
+                    args.platform,
+                    version_info,
+                    build_workers,
+                )
+                maybe_restore_getpath_header(source_root, version_info)
+                verify_runtime_resource_modules_frozen(source_root)
+            log("splitting frozen module bytecode data for MSVC")
+            split_frozen_modules(source_root)
+            log("building custom static libraries and python.exe")
+            build_python(
+                source_root,
+                args.configuration,
+                args.platform,
+                manifest,
+                integrations,
+                version_info,
+                version_mm,
+                version_full,
+                set(args.build_static_project) if args.build_static_project else None,
+                args.build_static_project_from,
+                use_prebuilt_static_libraries,
+                build_workers,
+            )
             built_exe = get_pcbuild_output_dir(source_root, args.platform) / "python.exe"
-        export_built_python(built_exe, args.output_dir.resolve(), version_full, args.platform, profile_name)
+
+        if not args.skip_build and not args.skip_verify:
+            log("running post-build profile verification")
+            built_exe = verify_built_python(source_root, args.platform, manifest, args.host_python, profile_name, config_path)
+
+        if not args.skip_build and args.output_dir:
+            if built_exe is None:
+                built_exe = get_pcbuild_output_dir(source_root, args.platform) / "python.exe"
+            export_built_python(built_exe, args.output_dir.resolve(), version_full, args.platform, profile_name)
+
+        if args.output_static_lib_dir:
+            export_static_library_sdk(
+                source_root,
+                args.output_static_lib_dir.resolve(),
+                version_full,
+                args.platform,
+                profile_name,
+                manifest,
+                integrations,
+            )
+    finally:
+        if sdk_temp_dir is not None:
+            sdk_temp_dir.cleanup()
 
     log("done")
     return 0

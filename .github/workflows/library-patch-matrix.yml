@@ -1,0 +1,487 @@
+name: Validate Library Patch Matrix
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      cpython_version:
+        description: CPython version, for example 3.13.13 or 3.15.0a8
+        required: true
+        default: 3.13.13
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  DEFAULT_CPYTHON_VERSION: "3.13.13"
+  LIBRARY_PATCH_SHARD_COUNT: "8"
+
+jobs:
+  resolve-cpython-matrix:
+    runs-on: windows-2022
+    outputs:
+      versions: ${{ steps.resolve.outputs.versions }}
+
+    steps:
+      - name: Resolve CPython version matrix
+        id: resolve
+        shell: pwsh
+        run: |
+          $manualVersion = "${{ inputs.cpython_version }}".Trim()
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            if ([string]::IsNullOrWhiteSpace($manualVersion)) {
+              $manualVersion = $env:DEFAULT_CPYTHON_VERSION
+            }
+            $versionsJson = ConvertTo-Json -InputObject @($manualVersion) -Compress
+            "versions=$versionsJson" >> $env:GITHUB_OUTPUT
+            Write-Host "Using manually requested CPython version: $manualVersion"
+            exit 0
+          }
+
+          $tags = @(git ls-remote --tags --refs https://github.com/python/cpython.git "v3.*" |
+            ForEach-Object {
+              if ($_ -match "refs/tags/v((3)\.(11|12|13|14|15)\.([0-9]+)(?:(a|b|rc)([0-9]+))?)$") {
+                $phase = $matches[6]
+                $phaseRank = 4
+                if ($phase -eq "a") {
+                  $phaseRank = 1
+                }
+                elseif ($phase -eq "b") {
+                  $phaseRank = 2
+                }
+                elseif ($phase -eq "rc") {
+                  $phaseRank = 3
+                }
+                [PSCustomObject]@{
+                  Version = $matches[1]
+                  Series = "3.$($matches[3])"
+                  Major = [int]$matches[2]
+                  Minor = [int]$matches[3]
+                  Micro = [int]$matches[4]
+                  PhaseRank = $phaseRank
+                  PhaseSerial = if ($matches[7]) { [int]$matches[7] } else { 0 }
+                }
+              }
+            })
+          if (-not $tags) {
+            throw "Could not resolve CPython tags from python/cpython"
+          }
+
+          $versions = foreach ($series in @("3.11", "3.12", "3.13", "3.14", "3.15")) {
+            $latest = $tags |
+              Where-Object { $_.Series -eq $series } |
+              Sort-Object Major, Minor, Micro, PhaseRank, PhaseSerial |
+              Select-Object -Last 1
+            if (-not $latest) {
+              throw "Could not resolve latest CPython $series version"
+            }
+            $latest.Version
+          }
+
+          $versionsJson = ConvertTo-Json -InputObject @($versions) -Compress
+          "versions=$versionsJson" >> $env:GITHUB_OUTPUT
+          Write-Host "Resolved CPython versions: $($versions -join ', ')"
+
+  resolve-library-shards:
+    runs-on: windows-2022
+    outputs:
+      shards: ${{ steps.resolve.outputs.shards }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve library shards
+        id: resolve
+        shell: pwsh
+        run: |
+          @'
+          import json
+          import os
+          from pathlib import Path
+
+          config = json.loads(Path("config.json").read_text(encoding="utf-8"))
+          libraries = list(config["profiles"]["full"]["third_party_libraries"])
+          shard_count = max(1, int(os.environ["LIBRARY_PATCH_SHARD_COUNT"]))
+          shards = []
+          for index in range(shard_count):
+              shard_libraries = libraries[index::shard_count]
+              if shard_libraries:
+                  shards.append(
+                      {
+                          "index": index + 1,
+                          "count": len(shard_libraries),
+                          "libraries": shard_libraries,
+                      }
+                  )
+
+          print(f"Resolved {len(libraries)} libraries into {len(shards)} shard(s)")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write("shards=" + json.dumps(shards, separators=(",", ":")) + "\n")
+          '@ | python -
+
+  validate:
+    name: Validate ${{ matrix.cpython_version }} / shard ${{ matrix.shard.index }}
+    runs-on: windows-2022
+    timeout-minutes: 360
+    needs:
+      - resolve-cpython-matrix
+      - resolve-library-shards
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        cpython_version: ${{ fromJSON(needs.resolve-cpython-matrix.outputs.versions) }}
+        shard: ${{ fromJSON(needs.resolve-library-shards.outputs.shards) }}
+
+    env:
+      MATRIX_CPYTHON_VERSION: ${{ matrix.cpython_version }}
+      MATRIX_SHARD_INDEX: ${{ matrix.shard.index }}
+      SHARD_LIBRARIES_JSON: ${{ toJSON(matrix.shard.libraries) }}
+      RESULT_JSON: ${{ runner.temp }}/library-patch-matrix-${{ matrix.cpython_version }}-shard${{ matrix.shard.index }}.json
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate downloadable library versions
+        shell: pwsh
+        run: |
+          @'
+          import json
+          import os
+          import re
+          import shutil
+          import sys
+          import traceback
+          from pathlib import Path
+
+          repo_root = Path.cwd()
+          if str(repo_root) not in sys.path:
+              sys.path.insert(0, str(repo_root))
+
+          import build
+          import libs
+
+
+          def safe_name(value: str) -> str:
+              return re.sub(r"[^0-9A-Za-z_.-]+", "-", value).strip("-")
+
+
+          def remove_path(path: Path) -> None:
+              if not path.exists():
+                  return
+              if path.is_dir():
+                  libs._remove_tree(path)
+              else:
+                  path.unlink()
+
+
+          def cleanup_integration_paths(source_root: Path, integration) -> None:
+              stale_paths = {
+                  relative.replace("\\", "/")
+                  for relative in [
+                      *getattr(integration, "materialized_paths", []),
+                      *getattr(integration, "cleanup_paths", []),
+                  ]
+              }
+              for relative in sorted(stale_paths, key=lambda value: (value.count("/"), len(value)), reverse=True):
+                  remove_path(source_root / relative)
+
+
+          def compatible_release_versions(integration, target_version) -> list[str]:
+              project_name = integration.project_name or integration.name
+              payload = libs._load_pypi_release_payload(project_name, None)
+              releases = payload.get("releases", {})
+              project_requires_python = payload.get("info", {}).get("requires_python")
+              versions: list[str] = []
+              for raw_version in libs._sorted_release_versions(releases):
+                  files = releases.get(raw_version, [])
+                  compatible = False
+                  for file_info in files:
+                      if file_info.get("yanked"):
+                          continue
+                      if file_info.get("packagetype") not in {"sdist", "bdist_wheel"}:
+                          continue
+                      if not file_info.get("url"):
+                          continue
+                      requires_python = file_info.get("requires_python") or project_requires_python
+                      if not libs._supports_target_python(requires_python, target_version):
+                          continue
+                      compatible = True
+                      break
+                  if compatible:
+                      versions.append(raw_version)
+              return versions
+
+
+          def assert_materialized_paths_exist(source_root: Path, integration) -> None:
+              missing = []
+              for relative in getattr(integration, "materialized_paths", []):
+                  if not (source_root / relative).exists():
+                      missing.append(relative)
+              if missing:
+                  preview = ", ".join(missing[:10])
+                  suffix = "" if len(missing) <= 10 else f" (+{len(missing) - 10} more)"
+                  raise RuntimeError(f"missing materialized path(s): {preview}{suffix}")
+
+
+          cpython_version = os.environ["MATRIX_CPYTHON_VERSION"].strip()
+          shard_index = int(os.environ["MATRIX_SHARD_INDEX"])
+          selected_libraries = json.loads(os.environ["SHARD_LIBRARIES_JSON"])
+          result_path = Path(os.environ["RESULT_JSON"])
+          work_root = Path(os.environ["RUNNER_TEMP"]) / f"staticpython-library-patch-matrix-{safe_name(cpython_version)}-shard{shard_index}"
+
+          if work_root.exists():
+              libs._remove_tree(work_root)
+          work_root.mkdir(parents=True, exist_ok=True)
+
+          build.DOWNLOAD_ROOT = work_root / "downloads"
+          build.WORK_CACHE_ROOT = work_root / "vendor-stage"
+          build.DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+          build.WORK_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+
+          summary = {
+              "cpython_version": cpython_version,
+              "shard_index": shard_index,
+              "library_count": len(selected_libraries),
+              "libraries": [],
+              "failure_count": 0,
+              "job_failures": [],
+          }
+
+          def write_summary() -> None:
+              result_path.parent.mkdir(parents=True, exist_ok=True)
+              result_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+          try:
+              manifest = build.load_manifest()
+              config = build.load_config()
+              _profile_name, profile = build.resolve_profile(config, "full")
+              third_party_catalog = build.profile_library_catalog(config, profile, "third_party_library_catalog")
+
+              cpython_download_root = work_root / "cpython"
+              base_source_root = build.download_cpython_source(
+                  cpython_version,
+                  cpython_download_root,
+                  None,
+                  reuse_existing=True,
+              )
+              version_info, version_mm, version_full = build.parse_cpython_version(base_source_root)
+              target_version = build.Version(version_full)
+              integrations = libs.load_integrations(
+                  build.LIB_PATCH_ROOT,
+                  selected_libraries,
+                  target_version=target_version,
+                  library_catalog=third_party_catalog,
+              )
+              by_name = {integration.name.casefold(): integration for integration in integrations}
+
+              for library_name in selected_libraries:
+                  library_summary = {
+                      "name": str(library_name),
+                      "project_name": None,
+                      "source_provider": None,
+                      "compatible_versions": 0,
+                      "passed_versions": [],
+                      "failed_versions": [],
+                      "library_failures": [],
+                  }
+                  summary["libraries"].append(library_summary)
+                  write_summary()
+                  source_root = None
+                  try:
+                      integration = by_name.get(str(library_name).casefold())
+                      if integration is None:
+                          raise RuntimeError(f"failed to resolve integration {library_name!r} for CPython {version_full}")
+
+                      library_summary["name"] = integration.name
+                      library_summary["project_name"] = integration.project_name
+                      library_summary["source_provider"] = integration.source_provider
+
+                      release_versions = compatible_release_versions(integration, target_version)
+                      library_summary["compatible_versions"] = len(release_versions)
+                      write_summary()
+
+                      if not release_versions:
+                          print(f"[library-patch-matrix] {integration.name}: no compatible downloadable versions for CPython {version_full}")
+                          continue
+
+                      source_root = work_root / "sources" / safe_name(integration.name)
+                      if source_root.exists():
+                          libs._remove_tree(source_root)
+                      shutil.copytree(base_source_root, source_root)
+                      hook_context = build.make_library_hook_context(
+                          source_root,
+                          version_info,
+                          version_mm,
+                          version_full,
+                          "Release",
+                          "x64",
+                      )
+
+                      print(
+                          f"[library-patch-matrix] {integration.name}: validating {len(release_versions)} version(s) "
+                          f"for CPython {version_full}"
+                      )
+
+                      for index, raw_version in enumerate(release_versions, start=1):
+                          try:
+                              integration.release_version = raw_version
+                              cleanup_integration_paths(source_root, integration)
+                              libs.run_prepare_source_hooks([integration], hook_context)
+                              build.copy_overlay_entries(
+                                  source_root,
+                                  build.ASSET_ROOT,
+                                  {"overlay_entries": []},
+                                  [integration],
+                                  version_info,
+                              )
+                              libs.run_pre_patch_hooks([integration], hook_context)
+                              libs.run_post_patch_hooks([integration], hook_context)
+                              assert_materialized_paths_exist(source_root, integration)
+                              library_summary["passed_versions"].append(raw_version)
+                              if index % 25 == 0 or index == len(release_versions):
+                                  print(
+                                      f"[library-patch-matrix] {integration.name}: "
+                                      f"{index}/{len(release_versions)} version(s) checked"
+                                  )
+                          except Exception as exc:
+                              failure = {
+                                  "version": raw_version,
+                                  "error": f"{type(exc).__name__}: {exc}",
+                                  "traceback": traceback.format_exc(),
+                              }
+                              library_summary["failed_versions"].append(failure)
+                              summary["failure_count"] += 1
+                              print(
+                                  f"[library-patch-matrix] {integration.name} {raw_version} failed: "
+                                  f"{type(exc).__name__}: {exc}"
+                              )
+                          write_summary()
+                  except Exception as exc:
+                      failure = {
+                          "error": f"{type(exc).__name__}: {exc}",
+                          "traceback": traceback.format_exc(),
+                      }
+                      library_summary["library_failures"].append(failure)
+                      summary["failure_count"] += 1
+                      print(
+                          f"[library-patch-matrix] {library_summary['name']} library-level failure: "
+                          f"{type(exc).__name__}: {exc}"
+                      )
+                  finally:
+                      if source_root is not None and source_root.exists():
+                          libs._remove_tree(source_root)
+                      write_summary()
+          except Exception as exc:
+              summary["job_failures"].append(
+                  {
+                      "error": f"{type(exc).__name__}: {exc}",
+                      "traceback": traceback.format_exc(),
+                  }
+              )
+              summary["failure_count"] += 1
+              print(f"[library-patch-matrix] job-level failure: {type(exc).__name__}: {exc}")
+          finally:
+              write_summary()
+
+          total_versions = sum(library["compatible_versions"] for library in summary["libraries"])
+          passed_versions = sum(len(library["passed_versions"]) for library in summary["libraries"])
+          failed_versions = sum(len(library["failed_versions"]) for library in summary["libraries"])
+          library_failures = sum(len(library["library_failures"]) for library in summary["libraries"])
+          job_failures = len(summary["job_failures"])
+          print(
+              f"[library-patch-matrix] shard {shard_index} / CPython {cpython_version}: "
+              f"{passed_versions} passed, {failed_versions} version failures, "
+              f"{library_failures} library failures, {job_failures} job failures, "
+              f"{total_versions} total compatible version(s)"
+          )
+
+          if summary["failure_count"]:
+              failed_preview = []
+              for library in summary["libraries"]:
+                  for failure in library["failed_versions"][:5]:
+                      failed_preview.append(f"{library['name']} {failure['version']}: {failure['error']}")
+                  for failure in library["library_failures"][:5]:
+                      failed_preview.append(f"{library['name']} <library>: {failure['error']}")
+                  if len(failed_preview) >= 20:
+                      break
+              for failure in summary["job_failures"][:5]:
+                  failed_preview.append(f"<job>: {failure['error']}")
+              if failed_preview:
+                  print("[library-patch-matrix] first failures:")
+                  for line in failed_preview[:20]:
+                      print(f"  - {line}")
+              raise SystemExit(1)
+          '@ | python -
+
+      - name: Publish shard summary
+        if: always()
+        shell: pwsh
+        run: |
+          @'
+          import json
+          import os
+          from pathlib import Path
+
+          result_path = Path(os.environ["RESULT_JSON"])
+          if not result_path.exists():
+              print(f"summary file not found: {result_path}")
+              raise SystemExit(0)
+
+          summary = json.loads(result_path.read_text(encoding="utf-8"))
+          total_versions = sum(library["compatible_versions"] for library in summary["libraries"])
+          passed_versions = sum(len(library["passed_versions"]) for library in summary["libraries"])
+          failed_versions = sum(len(library["failed_versions"]) for library in summary["libraries"])
+          library_failures = sum(len(library["library_failures"]) for library in summary["libraries"])
+          job_failures = len(summary["job_failures"])
+
+          lines = [
+              f"### CPython {summary['cpython_version']} / shard {summary['shard_index']}",
+              "",
+              f"- Libraries in shard: {summary['library_count']}",
+              f"- Compatible downloadable versions checked: {total_versions}",
+              f"- Passed versions: {passed_versions}",
+              f"- Failed versions: {failed_versions}",
+              f"- Library-level failures: {library_failures}",
+              f"- Job-level failures: {job_failures}",
+          ]
+          if failed_versions or library_failures:
+              lines.append("- Failed libraries:")
+              for library in summary["libraries"]:
+                  if library["failed_versions"] or library["library_failures"]:
+                      lines.append(
+                          f"  - {library['name']}: "
+                          f"{len(library['failed_versions'])} version failure(s), "
+                          f"{len(library['library_failures'])} library failure(s)"
+                      )
+          if job_failures:
+              lines.append(f"- Job-level failures captured: {job_failures}")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write("\n".join(lines) + "\n")
+          '@ | python -
+
+      - name: Upload shard summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: library-patch-matrix-${{ matrix.cpython_version }}-shard${{ matrix.shard.index }}
+          path: ${{ env.RESULT_JSON }}
+          if-no-files-found: warn

@@ -2,6 +2,8 @@ name: Build StaticPython Release
 
 on:
   push:
+    branches:
+      - master
   pull_request:
   workflow_dispatch:
     inputs:
@@ -151,7 +153,8 @@ jobs:
             --profile stdlib `
             --build-workers "$env:STATICPYTHON_BUILD_WORKERS" `
             --skip-verify `
-            --output-dir "$dist"
+            --output-dir "$dist" `
+            --output-static-lib-dir "$dist"
 
       - name: Find stdlib artifact
         id: stdlib_artifact
@@ -163,11 +166,27 @@ jobs:
           }
           "path=$($asset.FullName)" >> $env:GITHUB_OUTPUT
 
+      - name: Find stdlib static library SDK
+        id: stdlib_static_lib_artifact
+        shell: pwsh
+        run: |
+          $asset = Get-ChildItem "$env:GITHUB_WORKSPACE\dist\${{ matrix.cpython_version }}\stdlib\*static-libs*.zip" | Select-Object -First 1
+          if ($null -eq $asset) {
+            throw "No built static library SDK zip found in dist"
+          }
+          "path=$($asset.FullName)" >> $env:GITHUB_OUTPUT
+
       - name: Upload stdlib workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: staticpython-${{ matrix.cpython_version }}-stdlib
           path: ${{ steps.stdlib_artifact.outputs.path }}
+
+      - name: Upload stdlib static library SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: staticpython-${{ matrix.cpython_version }}-stdlib-static-libs
+          path: ${{ steps.stdlib_static_lib_artifact.outputs.path }}
 
       - name: Build full StaticPython
         shell: pwsh
@@ -180,7 +199,8 @@ jobs:
             --profile full `
             --build-workers "$env:STATICPYTHON_FULL_BUILD_WORKERS" `
             --skip-verify `
-            --output-dir "$dist"
+            --output-dir "$dist" `
+            --output-static-lib-dir "$dist"
 
       - name: Find full artifact
         id: full_artifact
@@ -192,11 +212,27 @@ jobs:
           }
           "path=$($asset.FullName)" >> $env:GITHUB_OUTPUT
 
+      - name: Find full static library SDK
+        id: full_static_lib_artifact
+        shell: pwsh
+        run: |
+          $asset = Get-ChildItem "$env:GITHUB_WORKSPACE\dist\${{ matrix.cpython_version }}\full\*static-libs*.zip" | Select-Object -First 1
+          if ($null -eq $asset) {
+            throw "No built static library SDK zip found in dist"
+          }
+          "path=$($asset.FullName)" >> $env:GITHUB_OUTPUT
+
       - name: Upload full workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: staticpython-${{ matrix.cpython_version }}-full
           path: ${{ steps.full_artifact.outputs.path }}
+
+      - name: Upload full static library SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: staticpython-${{ matrix.cpython_version }}-full-static-libs
+          path: ${{ steps.full_static_lib_artifact.outputs.path }}
 
       - name: Verify stdlib executable
         if: ${{ always() && steps.stdlib_artifact.outputs.path != '' }}
@@ -258,7 +294,7 @@ jobs:
       - build
 
     steps:
-      - name: Download built executables
+      - name: Download built artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: staticpython-${{ inputs.cpython_version || env.DEFAULT_CPYTHON_VERSION }}-*
@@ -282,9 +318,10 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($name)) {
             $name = "StaticPython $version"
           }
-          $assets = @(Get-ChildItem "$env:GITHUB_WORKSPACE\dist\*.exe")
+          $assets = @(Get-ChildItem "$env:GITHUB_WORKSPACE\dist\*.exe"), @(Get-ChildItem "$env:GITHUB_WORKSPACE\dist\*static-libs*.zip")
+          $assets = @($assets | Where-Object { $_ -ne $null })
           if ($assets.Count -eq 0) {
-            throw "No built .exe artifacts found"
+            throw "No built release artifacts found"
           }
           $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.txt"
           @"
