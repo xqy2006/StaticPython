@@ -148,7 +148,7 @@ jobs:
       MATRIX_CPYTHON_VERSION: ${{ matrix.cpython_version }}
       MATRIX_SHARD_INDEX: ${{ matrix.shard.index }}
       SHARD_LIBRARIES_JSON: ${{ toJSON(matrix.shard.libraries) }}
-      RESULT_JSON: ${{ runner.temp }}/library-patch-matrix-${{ matrix.cpython_version }}-shard${{ matrix.shard.index }}.json
+      RESULT_JSON: .tmp/library-patch-matrix-${{ matrix.cpython_version }}-shard${{ matrix.shard.index }}.json
 
     steps:
       - name: Checkout
