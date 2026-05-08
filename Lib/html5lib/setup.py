@@ -12,38 +12,46 @@ from libs import (
 )
 
 
+def _candidate_archives(
+    context,
+    project_name: str,
+    normalized: str,
+    release_version: str | None,
+) -> list[tuple[str, object, str | None, bool]]:
+    target_version = Version(".".join(str(part) for part in context.version_info))
+    if release_version is not None:
+        cached_archive_paths = _find_cached_pypi_archives(
+            context.download_cache_root,
+            normalized,
+            release_version,
+            target_version,
+        )
+        if cached_archive_paths:
+            return [(release_version, path, None, True) for path in cached_archive_paths]
+
+    candidates: list[tuple[str, object, str | None, bool]] = []
+    for resolved_release_version, file_info in _iter_pypi_distribution_candidates(
+        project_name,
+        target_version,
+        release_version,
+    ):
+        archive_path = (
+            context.download_cache_root
+            / "pypi"
+            / normalized
+            / resolved_release_version
+            / file_info["filename"]
+        )
+        candidates.append((resolved_release_version, archive_path, file_info["url"], False))
+    return candidates
+
+
 def _prepare_html5lib_source(context) -> None:
     integration = LIBRARY_INTEGRATION
     project_name = integration.project_name or integration.name
     normalized = _normalized_project_name(project_name)
     release_version = integration.release_version
-    if release_version is None:
-        raise RuntimeError("html5lib integration requires release_version")
-
-    target_version = Version(".".join(str(part) for part in context.version_info))
-    cached_archive_paths = _find_cached_pypi_archives(
-        context.download_cache_root,
-        normalized,
-        release_version,
-        target_version,
-    )
-    if cached_archive_paths:
-        candidates = [(release_version, path, None, True) for path in cached_archive_paths]
-    else:
-        candidates = []
-        for resolved_release_version, file_info in _iter_pypi_distribution_candidates(
-            project_name,
-            target_version,
-            release_version,
-        ):
-            archive_path = (
-                context.download_cache_root
-                / "pypi"
-                / normalized
-                / resolved_release_version
-                / file_info["filename"]
-            )
-            candidates.append((resolved_release_version, archive_path, file_info["url"], False))
+    candidates = _candidate_archives(context, project_name, normalized, release_version)
 
     failures: list[str] = []
     for resolved_release_version, archive_path, url, cached in candidates:
@@ -67,18 +75,16 @@ def _prepare_html5lib_source(context) -> None:
         try:
             extracted_root = _extract_archive(archive_path, extract_root, context.log)
             context.log(f"using {project_name} {resolved_release_version} source from {extracted_root}")
-            try:
-                package_src = _resolve_source_entry(extracted_root, "html5lib")
-            except RuntimeError:
-                package_src = _resolve_source_entry(extracted_root, "src")
+            package_src = _resolve_source_entry(extracted_root, "html5lib||src/html5lib")
             _copy_entry(package_src, context.source_root / "Lib" / "html5lib")
             return
         except RuntimeError as exc:
             failures.append(f"{archive_path.name}: {exc}")
             context.log(f"distribution candidate failed for {project_name} {resolved_release_version}: {archive_path.name}: {exc}")
 
+    target_description = f"release {release_version!r}" if release_version is not None else "all releases"
     raise RuntimeError(
-        f"all compatible PyPI distribution artifacts failed for {project_name!r} release {release_version!r}: "
+        f"all compatible PyPI distribution artifacts failed for {project_name!r} {target_description}: "
         + "; ".join(failures)
     )
 
