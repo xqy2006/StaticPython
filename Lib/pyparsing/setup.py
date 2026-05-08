@@ -5,6 +5,42 @@ def patch_pyparsing_unicode_identifiers(context) -> None:
     def patch(text: str) -> str:
         replacements = [
             (
+                "    \u0627\u0644\u0639\u0631\u0628\u064a\u0629 = Arabic\n",
+                '    locals()["\\u0627\\u0644\\u0639\\u0631\\u0628\\u064a\\u0629"] = Arabic\n',
+            ),
+            (
+                "    \u4e2d\u6587 = Chinese\n",
+                '    locals()["\\u4e2d\\u6587"] = Chinese\n',
+            ),
+            (
+                "    \u043a\u0438\u0440\u0438\u043b\u043b\u0438\u0446\u0430 = Cyrillic\n",
+                '    locals()["\\u043a\\u0438\\u0440\\u0438\\u043b\\u043b\\u0438\\u0446\\u0430"] = Cyrillic\n',
+            ),
+            (
+                "    \u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac = Greek\n",
+                '    locals()["\\u0395\\u03bb\\u03bb\\u03b7\\u03bd\\u03b9\\u03ba\\u03ac"] = Greek\n',
+            ),
+            (
+                "    \u05e2\u05b4\u05d1\u05e8\u05b4\u05d9\u05ea = Hebrew\n",
+                '    locals()["\\u05e2\\u05b4\\u05d1\\u05e8\\u05b4\\u05d9\\u05ea"] = Hebrew\n',
+            ),
+            (
+                "    \u65e5\u672c\u8a9e = Japanese\n",
+                '    locals()["\\u65e5\\u672c\\u8a9e"] = Japanese\n',
+            ),
+            (
+                "    \ud55c\uad6d\uc5b4 = Korean\n",
+                '    locals()["\\ud55c\\uad6d\\uc5b4"] = Korean\n',
+            ),
+            (
+                "    \u0e44\u0e17\u0e22 = Thai\n",
+                '    locals()["\\u0e44\\u0e17\\u0e22"] = Thai\n',
+            ),
+            (
+                "    \u0926\u0947\u0935\u0928\u093e\u0917\u0930\u0940 = Devanagari\n",
+                '    locals()["\\u0926\\u0947\\u0935\\u0928\\u093e\\u0917\\u0930\\u0940"] = Devanagari\n',
+            ),
+            (
                 "        \u6f22\u5b57 = Kanji\n",
                 '        locals()["\\u6f22\\u5b57"] = Kanji\n',
             ),
