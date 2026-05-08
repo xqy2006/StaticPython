@@ -1631,6 +1631,9 @@ LIBRARY_INTEGRATION = pypi_library(
         "extern/agg24-svn": "matplotlib_builtin/source/extern/agg24-svn",
         "PKG-INFO": "matplotlib_builtin/source/PKG-INFO",
     },
+    source_ignore_patterns=[
+        "tests",
+    ],
     materialized_paths=[
         "Lib/matplotlib/__init__.py",
         "Lib/matplotlib/_version.py",

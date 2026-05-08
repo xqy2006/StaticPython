@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from libs import pypi_library, replace_text_once, source_path, transform_source_text, write_source_text
+from libs import ensure_text_after, pypi_library, replace_regex_once, source_path, transform_first_existing_source_text, write_source_text
 
 
 def embed_jupyter_events_schemas(context) -> None:
     package_root = source_path(context, "Lib/jupyter_events")
+    schemas_root = package_root / "schemas"
+    if not schemas_root.exists():
+        return
     schema_text = {
         path.relative_to(package_root).as_posix(): path.read_text(encoding="utf-8")
-        for path in sorted((package_root / "schemas").rglob("*"))
+        for path in sorted(schemas_root.rglob("*"))
         if path.is_file()
     }
 
@@ -21,44 +24,50 @@ def embed_jupyter_events_schemas(context) -> None:
     )
 
     def patch_validators(text: str) -> str:
-        text = replace_text_once(
+        text = replace_regex_once(
             text,
-            "from . import yaml\n",
+            r"from \. import yaml\n",
             "from . import yaml\nfrom ._static_schemas import SCHEMA_TEXT as _STATICPYTHON_SCHEMA_TEXT\n",
             label="jupyter_events static schema import",
         )
-        text = replace_text_once(
+        text = replace_regex_once(
             text,
-            "EVENT_METASCHEMA = yaml.load(EVENT_METASCHEMA_FILEPATH)\n",
+            r"EVENT_METASCHEMA = yaml\.load\(EVENT_METASCHEMA_FILEPATH\)\n",
             'EVENT_METASCHEMA = yaml.loads(_STATICPYTHON_SCHEMA_TEXT["schemas/event-metaschema.yml"])\n',
             label="jupyter_events event metaschema",
         )
-        text = replace_text_once(
+        text = replace_regex_once(
             text,
-            "EVENT_CORE_SCHEMA = yaml.load(EVENT_CORE_SCHEMA_FILEPATH)\n",
+            r"EVENT_CORE_SCHEMA = yaml\.load\(EVENT_CORE_SCHEMA_FILEPATH\)\n",
             'EVENT_CORE_SCHEMA = yaml.loads(_STATICPYTHON_SCHEMA_TEXT["schemas/event-core-schema.yml"])\n',
             label="jupyter_events core schema",
         )
-        return replace_text_once(
+        return replace_regex_once(
             text,
-            "PROPERTY_METASCHEMA = yaml.load(PROPERTY_METASCHEMA_FILEPATH)\n",
+            r"PROPERTY_METASCHEMA = yaml\.load\(PROPERTY_METASCHEMA_FILEPATH\)\n",
             'PROPERTY_METASCHEMA = yaml.loads(_STATICPYTHON_SCHEMA_TEXT["schemas/property-metaschema.yml"])\n',
             label="jupyter_events property metaschema",
         )
 
-    transform_source_text(context, "Lib/jupyter_events/validators.py", patch_validators)
-
     def patch_yaml(text: str) -> str:
-        text = replace_text_once(
+        if "from ._static_schemas import SCHEMA_TEXT as _STATICPYTHON_SCHEMA_TEXT\n" not in text:
+            if "from pathlib import Path, PurePath\n" in text:
+                text = ensure_text_after(
+                    text,
+                    "from pathlib import Path, PurePath\n",
+                    "from ._static_schemas import SCHEMA_TEXT as _STATICPYTHON_SCHEMA_TEXT\n",
+                    label="jupyter_events yaml static schema import",
+                )
+            else:
+                text = ensure_text_after(
+                    text,
+                    "from pathlib import Path\n",
+                    "from ._static_schemas import SCHEMA_TEXT as _STATICPYTHON_SCHEMA_TEXT\n",
+                    label="jupyter_events yaml static schema import",
+                )
+        return replace_regex_once(
             text,
-            "from pathlib import Path\n\n",
-            "from pathlib import Path\n\nfrom ._static_schemas import SCHEMA_TEXT as _STATICPYTHON_SCHEMA_TEXT\n\n",
-            label="jupyter_events yaml static schema import",
-        )
-        return replace_text_once(
-            text,
-            "    data = Path(str(fpath)).read_text(encoding=\"utf-8\")\n"
-            "    return loads(data)\n",
+            r"(?ms)\s+data = Path\(str\(fpath\)\)\.read_text\(encoding=\"utf-8\"\)\n\s+return loads\(data\)\n",
             "    path_text = str(fpath).replace('\\\\', '/')\n"
             "    marker = '/jupyter_events/schemas/'\n"
             "    if marker in path_text:\n"
@@ -72,19 +81,15 @@ def embed_jupyter_events_schemas(context) -> None:
         )
 
     def patch_schema(text: str) -> str:
-        text = replace_text_once(
+        text = replace_regex_once(
             text,
-            "from . import yaml\n",
+            r"from \. import yaml\n",
             "from . import yaml\nfrom ._static_schemas import SCHEMA_TEXT as _STATICPYTHON_SCHEMA_TEXT\n",
             label="jupyter_events schema static import",
         )
-        return replace_text_once(
+        return replace_regex_once(
             text,
-            "            if not Path(schema).exists():\n"
-            "                msg = f'Schema file not present at path \"{schema}\".'\n"
-            "                raise EventSchemaFileAbsent(msg)\n"
-            "\n"
-            "            loaded_schema = yaml.load(schema)\n",
+            r"(?ms)\s+if not Path\(schema\)\.exists\(\):\n\s+msg = f'Schema file not present at path \"\{schema\}\".'\n\s+raise EventSchemaFileAbsent\(msg\)\n\n\s+loaded_schema = yaml\.load\(schema\)\n",
             "            path_text = str(schema).replace('\\\\', '/')\n"
             "            marker = '/jupyter_events/schemas/'\n"
             "            static_schema = None\n"
@@ -99,8 +104,24 @@ def embed_jupyter_events_schemas(context) -> None:
             label="jupyter_events schema embedded path loader",
         )
 
-    transform_source_text(context, "Lib/jupyter_events/yaml.py", patch_yaml)
-    transform_source_text(context, "Lib/jupyter_events/schema.py", patch_schema)
+    transform_first_existing_source_text(
+        context,
+        ["Lib/jupyter_events/validators.py"],
+        patch_validators,
+        allow_all_missing=True,
+    )
+    transform_first_existing_source_text(
+        context,
+        ["Lib/jupyter_events/yaml.py"],
+        patch_yaml,
+        allow_all_missing=True,
+    )
+    transform_first_existing_source_text(
+        context,
+        ["Lib/jupyter_events/schema.py"],
+        patch_schema,
+        allow_all_missing=True,
+    )
 
 
 LIBRARY_INTEGRATION = pypi_library(

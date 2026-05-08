@@ -1,4 +1,4 @@
-from libs import simple_library, source_path, transform_source_text, write_source_text
+from libs import replace_regex_once, simple_library, source_path, transform_source_text, write_source_text
 
 
 def embed_parso_grammars(context) -> None:
@@ -7,7 +7,7 @@ def embed_parso_grammars(context) -> None:
         f"python/{path.name}": path.read_text(encoding="utf-8")
         for path in sorted(grammar_root.glob("grammar*.txt"))
     }
-    if not grammars or "python/grammar313.txt" not in grammars:
+    if not grammars:
         raise RuntimeError("expected Parso grammar files were not materialized")
 
     write_source_text(
@@ -25,33 +25,17 @@ def embed_parso_grammars(context) -> None:
         )
         if "_STATICPYTHON_GRAMMARS" not in text:
             raise RuntimeError("failed to patch Parso static grammar import")
-        return text.replace(
-            "        try:\n"
-            "            with open(path) as f:\n"
-            "                bnf_text = f.read()\n"
-            "\n"
-            "            grammar = PythonGrammar(version_info, bnf_text)\n"
-            "            return _loaded_grammars.setdefault(path, grammar)\n"
-            "        except FileNotFoundError:\n"
-            "            message = \"Python version %s.%s is currently not supported.\" % (\n"
-            "                version_info.major, version_info.minor\n"
-            "            )\n"
-            "            raise NotImplementedError(message)\n",
-            "        try:\n"
-            "            grammar_key = file.replace(os.sep, \"/\")\n"
-            "            bnf_text = _STATICPYTHON_GRAMMARS.get(grammar_key)\n"
-            "            if bnf_text is None:\n"
-            "                with open(path) as f:\n"
-            "                    bnf_text = f.read()\n"
-            "\n"
-            "            grammar = PythonGrammar(version_info, bnf_text)\n"
-            "            return _loaded_grammars.setdefault(path, grammar)\n"
-            "        except FileNotFoundError:\n"
-            "            message = \"Python version %s.%s is currently not supported.\" % (\n"
-            "                version_info.major, version_info.minor\n"
-            "            )\n"
-            "            raise NotImplementedError(message)\n",
-            1,
+        return replace_regex_once(
+            text,
+            r"(?m)^(?P<indent>\s*)with open\(path\) as f:\n(?P=indent)\s{4}bnf_text = f\.read\(\)\n\n(?P=indent)grammar = PythonGrammar\(version_info, bnf_text\)\n(?P=indent)return _loaded_grammars\.setdefault\(path, grammar\)\n",
+            "\\g<indent>grammar_key = file.replace(os.sep, \"/\")\n"
+            "\\g<indent>bnf_text = _STATICPYTHON_GRAMMARS.get(grammar_key)\n"
+            "\\g<indent>if bnf_text is None:\n"
+            "\\g<indent>    with open(path) as f:\n"
+            "\\g<indent>        bnf_text = f.read()\n\n"
+            "\\g<indent>grammar = PythonGrammar(version_info, bnf_text)\n"
+            "\\g<indent>return _loaded_grammars.setdefault(path, grammar)\n",
+            label="Parso grammar loader body",
         )
 
     transform_source_text(context, "Lib/parso/grammar.py", patch_grammar)
@@ -61,8 +45,7 @@ LIBRARY_INTEGRATION = simple_library(
     name="parso",
     overlay_entries=["Lib/parso"],
     materialized_paths=[
-        "Lib/parso/python/grammar313.txt",
-        "Lib/parso/python/grammar314.txt",
+        "Lib/parso",
         "Lib/parso/_staticpython_grammars.py",
     ],
     post_patch_hooks=[embed_parso_grammars],

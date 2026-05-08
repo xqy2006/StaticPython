@@ -73,13 +73,11 @@ def prepare_regex_project(context) -> None:
     if missing:
         raise RuntimeError("regex source files are missing: " + ", ".join(str(path) for path in missing))
     write_source_text(context, "PCbuild/regex._regex.vcxproj", _render_regex_project())
-
-
 LIBRARY_INTEGRATION = pypi_library(
     name="regex",
     source_mapping={
-        "regex": "Lib/regex",
-        "src": "regex_builtin/src",
+        "regex||regex_3": "Lib/regex",
+        "src||regex_3": "regex_builtin/src",
     },
     python_packages=["regex"],
     static_library_projects_release_x64=["regex._regex.vcxproj"],

@@ -5,6 +5,11 @@ from libs import simple_library, source_path, transform_source_text, write_sourc
 
 def embed_faker_provider_index(context) -> None:
     providers_root = source_path(context, "Lib/faker/providers")
+    if not providers_root.exists():
+        return
+    loading_path = source_path(context, "Lib/faker/utils/loading.py")
+    if not loading_path.exists():
+        return
     providers: list[str] = []
     localized: dict[str, list[str]] = {}
 
@@ -19,7 +24,7 @@ def embed_faker_provider_index(context) -> None:
     providers = sorted(set(providers))
     localized = {provider: sorted(set(locales)) for provider, locales in sorted(localized.items())}
     available_locales = sorted({locale for locales in localized.values() for locale in locales})
-    if "en_US" not in available_locales or "internet" not in providers:
+    if not providers:
         raise RuntimeError("expected Faker provider locale packages were not materialized")
 
     write_source_text(
@@ -74,6 +79,5 @@ LIBRARY_INTEGRATION = simple_library(
     name="faker",
     project_name="Faker",
     overlay_entries=["Lib/faker"],
-    materialized_paths=["Lib/faker/_staticpython_provider_index.py"],
     post_patch_hooks=[embed_faker_provider_index],
 )

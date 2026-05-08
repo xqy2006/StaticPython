@@ -1,10 +1,4 @@
-from libs import (
-    replace_text_once,
-    simple_library,
-    source_path,
-    transform_source_text,
-    write_source_text,
-)
+from libs import replace_regex_once, replace_text_once, simple_library, source_path, transform_source_text, write_source_text
 
 
 def patch_nbconvert_sources(context) -> None:
@@ -20,7 +14,14 @@ def patch_nbconvert_sources(context) -> None:
         if f"{template_name}/conf.json" in templates
     }
     template_names = sorted({key.split("/", 1)[0] for key in templates})
-    if "lab/index.html.j2" not in templates or "base/display_priority.j2" not in templates:
+    modern_template_layout = "lab/index.html.j2" in templates and "base/display_priority.j2" in templates
+    if not templates:
+        raise RuntimeError("expected nbconvert templates were not materialized")
+    if modern_template_layout is False and "classic/index.html.j2" in templates:
+        modern_template_layout = True
+    if modern_template_layout and (
+        "lab/index.html.j2" not in templates or "base/display_priority.j2" not in templates
+    ):
         raise RuntimeError("expected nbconvert templates were not materialized")
 
     write_source_text(
@@ -33,6 +34,8 @@ def patch_nbconvert_sources(context) -> None:
     )
 
     def patch_exporter_base(text: str) -> str:
+        if "from .exporter import Exporter\n" not in text:
+            return text
         text = replace_text_once(
             text,
             "from .exporter import Exporter\n",
@@ -90,7 +93,7 @@ def _iter_exporter_entries():
             label="nbconvert get_export_names fallback call",
         )
 
-    transform_source_text(context, "Lib/nbconvert/exporters/base.py", patch_exporter_base)
+    transform_source_text(context, "Lib/nbconvert/exporters/base.py", patch_exporter_base, allow_missing=True)
 
     def patch_template_exporter(text: str) -> str:
         text = replace_text_once(
@@ -99,6 +102,8 @@ def _iter_exporter_entries():
             "from .exporter import Exporter\nfrom nbconvert._staticpython_templates import CONFS as _STATICPYTHON_TEMPLATE_CONFS\nfrom nbconvert._staticpython_templates import TEMPLATE_NAMES as _STATICPYTHON_TEMPLATE_NAMES\nfrom nbconvert._staticpython_templates import TEMPLATES as _STATICPYTHON_TEMPLATES\n",
             label="nbconvert template exporter static imports",
         )
+        if "def _get_conf(" not in text:
+            return text
         text = replace_text_once(
             text,
             "        loaders = [\n"
@@ -121,38 +126,30 @@ def _iter_exporter_entries():
             "        ]\n",
             label="nbconvert embedded jinja template loader",
         )
-        text = replace_text_once(
+        text = replace_regex_once(
             text,
-            "        conf: dict[str, t.Any] = {}  # the configuration once all conf files are merged\n"
-            "        for path in map(Path, self.template_paths):\n"
-            "            conf_path = path / \"conf.json\"\n"
-            "            try:\n"
-            "                conf_path_exists = conf_path.exists()\n"
-            "            except PermissionError:\n"
-            "                # for Python <3.14\n"
-            "                pass\n"
-            "            else:\n"
-            "                if conf_path_exists:\n"
-            "                    with conf_path.open() as f:\n"
-            "                        conf = recursive_update(conf, json.load(f))\n"
-            "        return conf\n",
-            "        conf: dict[str, t.Any] = {}  # the configuration once all conf files are merged\n"
-            "        for template_name in reversed(self.get_template_names()):\n"
-            "            conf_text = _STATICPYTHON_TEMPLATE_CONFS.get(template_name)\n"
-            "            if conf_text:\n"
-            "                conf = recursive_update(conf, json.loads(conf_text))\n"
-            "        for path in map(Path, self.template_paths):\n"
-            "            conf_path = path / \"conf.json\"\n"
-            "            try:\n"
-            "                conf_path_exists = conf_path.exists()\n"
-            "            except PermissionError:\n"
-            "                # for Python <3.14\n"
-            "                pass\n"
-            "            else:\n"
-            "                if conf_path_exists:\n"
-            "                    with conf_path.open() as f:\n"
-            "                        conf = recursive_update(conf, json.load(f))\n"
-            "        return conf\n",
+            r"(?ms)^    def _get_conf\(self\):\n.*?^    @default\(\"template_paths\"\)\n",
+            """    def _get_conf(self):
+        conf: dict[str, t.Any] = {}  # the configuration once all conf files are merged
+        for template_name in reversed(self.get_template_names()):
+            conf_text = _STATICPYTHON_TEMPLATE_CONFS.get(template_name)
+            if conf_text:
+                conf = recursive_update(conf, json.loads(conf_text))
+        for path in map(Path, self.template_paths):
+            conf_path = path / "conf.json"
+            try:
+                conf_path_exists = conf_path.exists()
+            except PermissionError:
+                # for Python <3.14
+                pass
+            else:
+                if conf_path_exists:
+                    with conf_path.open() as f:
+                        conf = recursive_update(conf, json.load(f))
+        return conf
+
+    @default("template_paths")
+""",
             label="nbconvert embedded template conf loader",
         )
         text = replace_text_once(
@@ -177,22 +174,49 @@ def _iter_exporter_entries():
             "            base_template = t.cast(t.Any, conf.get(\"base_template\"))\n",
             label="nbconvert embedded template name discovery",
         )
-        return replace_text_once(
+        return replace_regex_once(
             text,
-            "        additional_paths = []\n"
-            "        for path in self.template_data_paths:\n"
-            "            if not prune or os.path.exists(path):\n"
-            "                additional_paths.append(path)\n"
-            "\n"
-            "        return paths + self.extra_template_paths + additional_paths\n",
-            "        additional_paths = []\n"
-            "        for path in self.template_data_paths:\n"
-            "            if not prune or os.path.exists(path):\n"
-            "                additional_paths.append(path)\n"
-            "\n"
-            "        if _STATICPYTHON_TEMPLATES:\n"
-            "            additional_paths.append(\"staticpython-nbconvert-templates\")\n"
-            "        return paths + self.extra_template_paths + additional_paths\n",
+            r"(?ms)^    def _template_paths\(self, prune=True, root_dirs=None\):\n.*?^    @classmethod\n",
+            """    def _template_paths(self, prune=True, root_dirs=None):
+        paths = []
+        root_dirs = self.get_prefix_root_dirs()
+        template_names = self.get_template_names()
+        for template_name in template_names:
+            for base_dir in self.extra_template_basedirs:
+                path = os.path.join(base_dir, template_name)
+                try:
+                    if not prune or os.path.exists(path):
+                        paths.append(path)
+                except PermissionError:
+                    pass
+            for root_dir in root_dirs:
+                base_dir = os.path.join(root_dir, "nbconvert", "templates")
+                path = os.path.join(base_dir, template_name)
+                try:
+                    if not prune or os.path.exists(path):
+                        paths.append(path)
+                except PermissionError:
+                    pass
+
+        for root_dir in root_dirs:
+            paths.append(root_dir)
+            base_dir = os.path.join(root_dir, "nbconvert", "templates")
+            paths.append(base_dir)
+
+            compatibility_dir = os.path.join(root_dir, "nbconvert", "templates", "compatibility")
+            paths.append(compatibility_dir)
+
+        additional_paths = []
+        for path in self.template_data_paths:
+            if not prune or os.path.exists(path):
+                additional_paths.append(path)
+
+        if _STATICPYTHON_TEMPLATES:
+            additional_paths.append("staticpython-nbconvert-templates")
+        return paths + self.extra_template_paths + additional_paths
+
+    @classmethod
+""",
             label="nbconvert embedded template path marker",
         )
 

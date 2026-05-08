@@ -545,13 +545,16 @@ def prepare_pandas_project(context) -> None:
     if not pandas_runtime_dir(context).exists():
         raise RuntimeError(f"expected pandas runtime package at {pandas_runtime_dir(context)}")
 
+    _replace_tree(pandas_runtime_dir(context), pandas_build_package_dir(context))
+
+
+def prepare_pandas_build_files(context) -> None:
     if not pandas_numpy_include_dir(context).exists():
         raise RuntimeError(
             "pandas requires the NumPy integration to be materialized first; "
             f"missing include dir: {pandas_numpy_include_dir(context)}"
         )
 
-    _replace_tree(pandas_runtime_dir(context), pandas_build_package_dir(context))
     write_source_text(context, "pandas_builtin/meson_target_python.py", _render_meson_wrapper(context))
     write_source_text(context, "pandas_builtin/meson_target_python.cmd", _render_meson_launcher(context))
     write_source_text(context, "pandas_builtin/meson-python.ini", _render_meson_native_file(context))
@@ -921,6 +924,7 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     prepare_source_hooks=[prepare_pandas_project],
     post_patch_hooks=[
+        prepare_pandas_build_files,
         _patch_pandas_python_probe,
         _patch_pandas_numpy_include,
         _patch_generate_version,

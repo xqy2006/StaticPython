@@ -12,7 +12,7 @@ def patch_ipython_sources(context):
 
     ipython_root = context.source_root / "Lib" / "IPython"
     for path in sorted(ipython_root.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="latin-1")
         if "from IPython.testing.skipdoctest import skip_doctest" not in text:
             continue
         relative = path.relative_to(context.source_root).as_posix()

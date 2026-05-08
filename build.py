@@ -324,6 +324,12 @@ def iter_builtin_module_registrations(source_root: Path, manifest: dict, integra
     for builtin in integration_candidates:
         if builtin["name"] in seen:
             continue
+        if builtin["name"] not in available_projects:
+            log(
+                f"skip builtin registration {builtin['name']} because the corresponding integration project is unavailable "
+                "in this CPython version"
+            )
+            continue
         filtered.append(builtin)
         seen.add(builtin["name"])
     return filtered

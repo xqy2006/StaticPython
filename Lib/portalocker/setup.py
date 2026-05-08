@@ -3,6 +3,8 @@ from libs import replace_text_once, simple_library, transform_source_text
 
 def patch_portalocker_sources(context):
     def patch_windows_locker(text):
+        if "class MsvcrtLocker(BaseLocker):" not in text:
+            return text
         text = replace_text_once(
             text,
             "    class MsvcrtLocker(BaseLocker):\n"

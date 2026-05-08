@@ -16,7 +16,8 @@ def _project_configurations() -> str:
 """
 
 
-def _render_multidict_project() -> str:
+def _render_multidict_project(source_files: list[str]) -> str:
+    compile_items = "\n".join(f'    <ClCompile Include="{path}" />' for path in source_files)
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
 {_project_configurations()}  <PropertyGroup Label="Globals">
@@ -53,11 +54,25 @@ def _render_multidict_project() -> str:
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\\Lib\\multidict\\_multidict.c" />
+{compile_items}
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />
 </Project>
 """
+
+
+def _legacy_multidict_sources() -> list[str]:
+    return [
+        "..\\Lib\\multidict\\_multidict.c",
+        "..\\Lib\\multidict\\_pair_list.c",
+        "..\\Lib\\multidict\\_multidict_iter.c",
+        "..\\Lib\\multidict\\_multidict_views.c",
+        "..\\Lib\\multidict\\_istr.c",
+    ]
+
+
+def _modern_multidict_sources() -> list[str]:
+    return ["..\\Lib\\multidict\\_multidict.c"]
 
 
 def prepare_multidict_project(context) -> None:
@@ -65,9 +80,22 @@ def prepare_multidict_project(context) -> None:
     headers = source_path(context, "Lib/multidict/_multilib")
     if not source.exists():
         raise RuntimeError(f"multidict C source file is missing: {source}")
-    if not headers.exists():
-        raise RuntimeError(f"multidict _multilib headers are missing: {headers}")
-    write_source_text(context, "PCbuild/multidict._multidict.vcxproj", _render_multidict_project())
+
+    if headers.exists():
+        source_files = _modern_multidict_sources()
+    else:
+        source_files = _legacy_multidict_sources()
+        missing_legacy = [
+            path
+            for path in source_files[1:]
+            if not source_path(context, path.replace("..\\Lib\\", "Lib/").replace("\\", "/")).exists()
+        ]
+        if missing_legacy:
+            raise RuntimeError(
+                "multidict legacy native sources are missing: " + ", ".join(missing_legacy)
+            )
+
+    write_source_text(context, "PCbuild/multidict._multidict.vcxproj", _render_multidict_project(source_files))
 
 
 LIBRARY_INTEGRATION = pypi_library(

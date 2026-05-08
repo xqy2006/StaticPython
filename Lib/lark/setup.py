@@ -19,21 +19,34 @@ def patch_lark_sources(context) -> None:
             ),
             label="lark embedded grammar table",
         )
+        old_loader = (
+            "            full_path = os.path.join(path, grammar_path)\n"
+            "            try:\n"
+            "                text: Optional[bytes] = pkgutil.get_data(self.pkg_name, full_path)\n"
+        )
+        new_loader = (
+            "            full_path = os.path.join(path, grammar_path)\n"
+            "            try:\n"
+            "                text: Optional[str] = pkgutil.get_data(self.pkg_name, full_path)\n"
+        )
+        replacement = (
+            "            full_path = os.path.join(path, grammar_path)\n"
+            "            embedded_text = _STATICPYTHON_EMBEDDED_GRAMMARS.get(full_path.replace('\\\\', '/'))\n"
+            "            if embedded_text is not None:\n"
+            "                return PackageResource(self.pkg_name, full_path), embedded_text\n"
+            "            try:\n"
+        )
+        if old_loader in text:
+            return replace_text_once(
+                text,
+                old_loader,
+                replacement + "                text: Optional[bytes] = pkgutil.get_data(self.pkg_name, full_path)\n",
+                label="lark embedded grammar loader fallback",
+            )
         return replace_text_once(
             text,
-            (
-                "            full_path = os.path.join(path, grammar_path)\n"
-                "            try:\n"
-                "                text: Optional[bytes] = pkgutil.get_data(self.pkg_name, full_path)\n"
-            ),
-            (
-                "            full_path = os.path.join(path, grammar_path)\n"
-                "            embedded_text = _STATICPYTHON_EMBEDDED_GRAMMARS.get(full_path.replace('\\\\', '/'))\n"
-                "            if embedded_text is not None:\n"
-                "                return PackageResource(self.pkg_name, full_path), embedded_text\n"
-                "            try:\n"
-                "                text: Optional[bytes] = pkgutil.get_data(self.pkg_name, full_path)\n"
-            ),
+            new_loader,
+            replacement + "                text: Optional[str] = pkgutil.get_data(self.pkg_name, full_path)\n",
             label="lark embedded grammar loader fallback",
         )
 

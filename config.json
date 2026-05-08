@@ -127,8 +127,11 @@
       },
       {
         "name": "cattrs",
-        "overlay_entries": [
-          "Lib/cattrs"
+        "source_mapping": {
+          "cattrs||src/cattrs||cattr||src/cattr": "Lib/cattrs"
+        },
+        "python_packages": [
+          "cattrs"
         ],
         "source_provider": "pypi"
       },
@@ -551,7 +554,7 @@
         "project_name": "notebook-shim",
         "source_mapping": {
           "notebook_shim": "Lib/notebook_shim",
-          "jupyter_server_config.d/notebook_shim.json": "etc/jupyter/jupyter_server_config.d/notebook_shim.json"
+          "jupyter_server_config.d/notebook_shim.json||jupyter-config/jupyter_server_config.d/notebook_shim.json": "etc/jupyter/jupyter_server_config.d/notebook_shim.json"
         },
         "source_provider": "pypi"
       },
@@ -696,7 +699,7 @@
         "name": "pymongo",
         "source_mapping": {
           "pymongo": "Lib/pymongo",
-          "bson": "Lib/bson",
+          "bson||pymongo/bson.py": "Lib/bson",
           "gridfs": "Lib/gridfs"
         },
         "python_packages": [

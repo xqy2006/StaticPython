@@ -15,23 +15,57 @@ def patch_text_unidecode_sources(context) -> None:
     data_bin = source_path(context, "Lib/text_unidecode/data.bin").read_bytes()
 
     def patch_init(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "import pkgutil\n\n",
-            (
-                "import pkgutil\n\n"
-                "_STATICPYTHON_TEXT_UNIDECODE_DATA = "
-                + _bytes_chunks_literal(data_bin)
-                + "\n\n"
-            ),
-            label="text_unidecode embedded data resource",
-        )
-        return replace_text_once(
-            text,
-            "_replaces = pkgutil.get_data(__name__, 'data.bin').decode('utf8').split('\\x00')\n",
-            "_replaces = _STATICPYTHON_TEXT_UNIDECODE_DATA.decode('utf8').split('\\x00')\n",
-            label="text_unidecode data.bin loader",
-        )
+        if "_STATICPYTHON_TEXT_UNIDECODE_DATA" in text:
+            return text
+        constant_block = "_STATICPYTHON_TEXT_UNIDECODE_DATA = " + _bytes_chunks_literal(data_bin) + "\n\n"
+        if "import pkgutil\n\n" in text:
+            text = replace_text_once(
+                text,
+                "import pkgutil\n\n",
+                "import pkgutil\n\n" + constant_block,
+                label="text_unidecode embedded data resource",
+            )
+            return replace_text_once(
+                text,
+                "_replaces = pkgutil.get_data(__name__, 'data.bin').decode('utf8').split('\\x00')\n",
+                "_replaces = _STATICPYTHON_TEXT_UNIDECODE_DATA.decode('utf8').split('\\x00')\n",
+                label="text_unidecode data.bin loader",
+            )
+        if "from pkg_resources import resource_filename\n" in text:
+            text = replace_text_once(
+                text,
+                "from pkg_resources import resource_filename\n",
+                "from pkg_resources import resource_filename\n\n" + constant_block,
+                label="text_unidecode embedded data resource",
+            )
+            return replace_text_once(
+                text,
+                (
+                    "_data_path = resource_filename(__name__, 'data.bin')\n"
+                    "with open(_data_path, 'rb') as f:\n"
+                    "    _replaces = f.read().decode('utf8').split('\\x00')\n"
+                ),
+                "_replaces = _STATICPYTHON_TEXT_UNIDECODE_DATA.decode('utf8').split('\\x00')\n",
+                label="text_unidecode data.bin loader",
+            )
+        if "import os\n" in text and "_data_path = os.path.join(os.path.dirname(__file__), 'data.bin')\n" in text:
+            text = replace_text_once(
+                text,
+                "import os\n",
+                "import os\n\n" + constant_block,
+                label="text_unidecode embedded data resource",
+            )
+            return replace_text_once(
+                text,
+                (
+                    "_data_path = os.path.join(os.path.dirname(__file__), 'data.bin')\n"
+                    "with open(_data_path, 'rb') as f:\n"
+                    "    _replaces = f.read().decode('utf8').split('\\x00')\n"
+                ),
+                "_replaces = _STATICPYTHON_TEXT_UNIDECODE_DATA.decode('utf8').split('\\x00')\n",
+                label="text_unidecode data.bin loader",
+            )
+        raise RuntimeError("expected snippet not found in text_unidecode embedded data resource")
 
     transform_source_text(context, "Lib/text_unidecode/__init__.py", patch_init)
 

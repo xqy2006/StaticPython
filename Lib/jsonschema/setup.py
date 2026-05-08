@@ -7,8 +7,11 @@ from libs import pypi_library, replace_text_once, source_path, transform_source_
 
 def embed_jsonschema_schemas(context) -> None:
     package_root = source_path(context, "Lib/jsonschema")
+    schema_root = package_root / "schemas"
+    if not schema_root.exists():
+        return
     schemas = {}
-    for path in sorted((package_root / "schemas").rglob("*")):
+    for path in sorted(schema_root.rglob("*")):
         if not path.is_file():
             continue
         schemas[path.relative_to(package_root).as_posix()] = json.loads(path.read_text(encoding="utf-8"))

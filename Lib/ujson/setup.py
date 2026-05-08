@@ -103,7 +103,7 @@ def prepare_ujson_project(context) -> None:
 LIBRARY_INTEGRATION = pypi_library(
     name="ujson",
     source_mapping={
-        "src/ujson": "ujson_builtin",
+        "src/ujson||.": "ujson_builtin",
     },
     python_packages=["ujson"],
     static_library_projects_release_x64=["ujson.vcxproj"],

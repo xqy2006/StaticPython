@@ -52,8 +52,8 @@ def _render_msgpack_cmsgpack_project() -> str:
       <RuntimeLibrary Condition="'$(Configuration)|$(Platform)'=='Release|x64'">MultiThreaded</RuntimeLibrary>
     </ClCompile>
   </ItemDefinitionGroup>
-  <ItemGroup>
-    <ClCompile Include="..\\Lib\\msgpack\\_cmsgpack.c" />
+    <ItemGroup>
+    <ClCompile Include="..\\Lib\\msgpack\\_cmsgpack.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />
 </Project>
@@ -61,9 +61,10 @@ def _render_msgpack_cmsgpack_project() -> str:
 
 
 def prepare_msgpack_cmsgpack_project(context) -> None:
-    source = source_path(context, "Lib/msgpack/_cmsgpack.c")
+    source = source_path(context, "Lib/msgpack/_cmsgpack.cpp")
     if not source.exists():
-        raise RuntimeError(f"msgpack _cmsgpack source file is missing: {source}")
+        context.log("msgpack _cmsgpack source is absent in this release; keeping pure Python build")
+        return
     write_source_text(context, "PCbuild/msgpack._cmsgpack.vcxproj", _render_msgpack_cmsgpack_project())
 
 

@@ -23,12 +23,23 @@ def patch_black_sources(context) -> None:
     )
 
     def patch_linegen(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "        \u00d8: set[str] = set()\n",
-            "        _empty_parens: set[str] = set()\n",
-            label="black linegen ascii empty parens name",
-        )
+        replacement = "        _empty_parens: set[str] = set()\n"
+        if "        \u00d8: set[str] = set()\n" in text:
+            text = replace_text_once(
+                text,
+                "        \u00d8: set[str] = set()\n",
+                replacement,
+                label="black linegen ascii empty parens name",
+            )
+        elif "        \u00d8: Set[str] = set()\n" in text:
+            text = replace_text_once(
+                text,
+                "        \u00d8: Set[str] = set()\n",
+                replacement,
+                label="black linegen ascii empty parens name",
+            )
+        elif replacement not in text:
+            raise RuntimeError("expected snippet not found in black linegen ascii empty parens name")
         return text.replace("parens=\u00d8", "parens=_empty_parens").replace(
             "keywords=\u00d8", "keywords=_empty_parens"
         )
@@ -89,14 +100,10 @@ def patch_black_sources(context) -> None:
         )
         return replace_text_once(
             text,
-            "    schema = importlib.resources.files(pkg).joinpath(fname)\n"
-            "    with schema.open(encoding=\"utf-8\") as f:\n"
-            "        return json.load(f)\n",
+            "    fname = \"black.schema.json\"\n",
+            "    fname = \"black.schema.json\"\n\n"
             "    if _STATICPYTHON_SCHEMA is not None:\n"
-            "        return _STATICPYTHON_SCHEMA\n"
-            "    schema = importlib.resources.files(pkg).joinpath(fname)\n"
-            "    with schema.open(encoding=\"utf-8\") as f:\n"
-            "        return json.load(f)\n",
+            "        return _STATICPYTHON_SCHEMA\n",
             label="black schema embedded fallback",
         )
 

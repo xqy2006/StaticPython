@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import base64
+import re
 
-from libs import replace_text_once, simple_library, source_path, transform_source_text, write_source_text
+from libs import simple_library, source_path, transform_source_text, write_source_text
 
 
 def embed_babel_data(context) -> None:
     package_root = source_path(context, "Lib/babel")
+    locale_data_root = package_root / "locale-data"
+    if not locale_data_root.exists():
+        locale_data_root = package_root / "localedata"
     locale_data = {
         path.stem: base64.b64encode(path.read_bytes()).decode("ascii")
-        for path in sorted((package_root / "locale-data").glob("*.dat"))
+        for path in sorted(locale_data_root.glob("*.dat"))
     }
     global_data = base64.b64encode((package_root / "global.dat").read_bytes()).decode("ascii")
-    if not locale_data or "root" not in locale_data or "en_US" not in locale_data:
+    if not locale_data or "root" not in locale_data:
         raise RuntimeError("expected Babel locale-data files were not materialized")
 
     write_source_text(
@@ -29,85 +33,181 @@ def embed_babel_data(context) -> None:
     )
 
     def patch_core(text: str) -> str:
-        text = text.replace(
-            "from babel import localedata\n",
-            "from babel import localedata\nfrom babel._staticpython_data import global_bytes as _staticpython_global_bytes\n",
-            1,
-        ) if "_staticpython_global_bytes" not in text else text
-        return replace_text_once(
-            text,
-            "        dirname = os.path.join(os.path.dirname(__file__))\n"
-            "        filename = os.path.join(dirname, 'global.dat')\n"
-            "        if not os.path.isfile(filename):\n"
-            "            _raise_no_data_error()\n"
-            "        with open(filename, 'rb') as fileobj:\n"
-            "            _global_data = pickle.load(fileobj)\n"
-            "            assert _global_data is not None\n",
+        if "_staticpython_global_bytes" not in text:
+            anchor = "from babel import localedata\n"
+            if anchor not in text:
+                raise RuntimeError("expected 'from babel import localedata' in babel.core")
+            text = text.replace(
+                anchor,
+                anchor + "from babel._staticpython_data import global_bytes as _staticpython_global_bytes\n",
+                1,
+            )
+        if "pickle.loads(_staticpython_global_bytes())" in text:
+            return text
+        updated, count = re.subn(
+            r"(?ms)^def get_global\(.*?(?=^LOCALE_ALIASES =)",
+            "def get_global(key):\n"
+            "    \"\"\"Return the dictionary for the given key in the global data.\"\"\"\n"
+            "    global _global_data\n"
+            "    if _global_data is None:\n"
             "        _global_data = pickle.loads(_staticpython_global_bytes())\n"
-            "        assert _global_data is not None\n",
-            label="babel global data loader",
+            "        assert _global_data is not None\n"
+            "    return _global_data.get(key, {})\n\n",
+            text,
+            count=1,
         )
+        if count != 1:
+            raise RuntimeError("expected get_global() implementation in babel.core")
+        return updated
 
     def patch_localedata(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "from typing import Any\n",
-            "from typing import Any\n\nfrom babel._staticpython_data import LOCALE_DATA as _STATICPYTHON_LOCALE_DATA\nfrom babel._staticpython_data import locale_bytes as _staticpython_locale_bytes\n",
-            label="babel localedata static data import",
-        )
-        text = replace_text_once(
-            text,
-            "    file_found = os.path.exists(resolve_locale_filename(name))\n"
-            "    return True if file_found else bool(normalize_locale(name))\n",
+        if "_STATICPYTHON_LOCALE_DATA" not in text:
+            if "except ImportError:\n    import dummy_threading as threading\n" in text:
+                text = text.replace(
+                    "except ImportError:\n    import dummy_threading as threading\n",
+                    "except ImportError:\n    import dummy_threading as threading\n"
+                    "from babel._staticpython_data import LOCALE_DATA as _STATICPYTHON_LOCALE_DATA\n"
+                    "from babel._staticpython_data import locale_bytes as _staticpython_locale_bytes\n",
+                    1,
+                )
+            elif "from typing import Any\n" in text:
+                text = text.replace(
+                    "from typing import Any\n",
+                    "from typing import Any\n\n"
+                    "from babel._staticpython_data import LOCALE_DATA as _STATICPYTHON_LOCALE_DATA\n"
+                    "from babel._staticpython_data import locale_bytes as _staticpython_locale_bytes\n",
+                    1,
+                )
+            else:
+                anchor = "import threading\n"
+                if anchor not in text:
+                    raise RuntimeError("expected threading import block in babel.localedata")
+                text = text.replace(
+                    anchor,
+                    anchor
+                    + "from babel._staticpython_data import LOCALE_DATA as _STATICPYTHON_LOCALE_DATA\n"
+                    + "from babel._staticpython_data import locale_bytes as _staticpython_locale_bytes\n",
+                    1,
+                )
+        updated, count = re.subn(
+            r"(?ms)^def exists\(.*?(?=^(?:@lru_cache\(maxsize=None\)\n)?def (?:locale_identifiers|list)\()",
+            "def exists(name):\n"
+            "    \"\"\"Check whether locale data is available for the given locale.\"\"\"\n"
+            "    if not name:\n"
+            "        return False\n"
             "    if name in _STATICPYTHON_LOCALE_DATA:\n"
             "        return True\n"
-            "    file_found = os.path.exists(resolve_locale_filename(name))\n"
-            "    return True if file_found else bool(normalize_locale(name))\n",
-            label="babel locale exists loader",
-        )
-        text = replace_text_once(
+            "    if name in _cache:\n"
+            "        return True\n"
+            "    resolver = globals().get('resolve_locale_filename')\n"
+            "    if callable(resolver):\n"
+            "        file_found = os.path.exists(resolver(name))\n"
+            "    else:\n"
+            "        file_found = os.path.exists(os.path.join(_dirname, '%s.dat' % name))\n"
+            "    normalize = globals().get('normalize_locale')\n"
+            "    if callable(normalize):\n"
+            "        return True if file_found else bool(normalize(name))\n"
+            "    return file_found\n\n",
             text,
-            "    return [\n"
-            "        stem\n"
-            "        for stem, extension in (\n"
-            "            os.path.splitext(filename) for filename in os.listdir(_dirname)\n"
-            "        )\n"
-            "        if extension == '.dat' and stem != 'root'\n"
-            "    ]\n",
-            "    if _STATICPYTHON_LOCALE_DATA:\n"
-            "        return sorted(name for name in _STATICPYTHON_LOCALE_DATA if name != 'root')\n"
-            "    return [\n"
-            "        stem\n"
-            "        for stem, extension in (\n"
-            "            os.path.splitext(filename) for filename in os.listdir(_dirname)\n"
-            "        )\n"
-            "        if extension == '.dat' and stem != 'root'\n"
-            "    ]\n",
-            label="babel locale identifiers loader",
+            count=1,
         )
-        return replace_text_once(
-            text,
-            "            filename = resolve_locale_filename(name)\n"
-            "            with open(filename, 'rb') as fileobj:\n"
-            "                if name != 'root' and merge_inherited:\n"
-            "                    merge(data, pickle.load(fileobj))\n"
-            "                else:\n"
-            "                    data = pickle.load(fileobj)\n",
+        if count != 1:
+            raise RuntimeError("expected exists() implementation in babel.localedata")
+        text = updated
+        if "def locale_identifiers(" in text:
+            updated, count = re.subn(
+                r"(?ms)^(?:@lru_cache\(maxsize=None\)\n)?def locale_identifiers\(.*?(?=^def _is_non_likely_script\()",
+                "@lru_cache(maxsize=None)\n"
+                "def locale_identifiers():\n"
+                "    \"\"\"Return all locale identifiers that have data available.\"\"\"\n"
+                "    if _STATICPYTHON_LOCALE_DATA:\n"
+                "        return sorted(name for name in _STATICPYTHON_LOCALE_DATA if name != 'root')\n"
+                "    return [\n"
+                "        stem\n"
+                "        for stem, extension in (\n"
+                "            os.path.splitext(filename) for filename in os.listdir(_dirname)\n"
+                "        )\n"
+                "        if extension == '.dat' and stem != 'root'\n"
+                "    ]\n\n",
+                text,
+                count=1,
+            )
+            if count != 1:
+                raise RuntimeError("expected locale_identifiers() implementation in babel.localedata")
+            text = updated
+        else:
+            updated, count = re.subn(
+                r"(?ms)^def list\(.*?(?=^def load\()",
+                "def list():\n"
+                "    \"\"\"Return all locale identifiers that have data available.\"\"\"\n"
+                "    if _STATICPYTHON_LOCALE_DATA:\n"
+                "        return sorted(name for name in _STATICPYTHON_LOCALE_DATA if name != 'root')\n"
+                "    return [stem for stem, extension in [\n"
+                "        os.path.splitext(filename) for filename in os.listdir(_dirname)\n"
+                "    ] if extension == '.dat' and stem != 'root']\n\n",
+                text,
+                count=1,
+            )
+            if count != 1:
+                raise RuntimeError("expected list() implementation in babel.localedata")
+            text = updated
+        updated, count = re.subn(
+            r"(?ms)^def load\(.*?(?=^def merge\()",
+            "def load(name, merge_inherited=True):\n"
+            "    \"\"\"Load the locale data for the given locale.\"\"\"\n"
+            "    name = os.path.basename(name)\n"
+            "    _cache_lock.acquire()\n"
+            "    try:\n"
+            "        data = _cache.get(name)\n"
+            "        if not data:\n"
+            "            if name == 'root' or not merge_inherited:\n"
+            "                data = {}\n"
+            "            else:\n"
+            "                parent = None\n"
+            "                try:\n"
+            "                    from babel.core import get_global as _staticpython_get_global\n"
+            "                except Exception:\n"
+            "                    _staticpython_get_global = None\n"
+            "                if _staticpython_get_global is not None:\n"
+            "                    try:\n"
+            "                        parent = _staticpython_get_global('parent_exceptions').get(name)\n"
+            "                    except Exception:\n"
+            "                        parent = None\n"
+            "                if not parent:\n"
+            "                    non_likely_script = globals().get('_is_non_likely_script')\n"
+            "                    if callable(non_likely_script) and non_likely_script(name):\n"
+            "                        parent = 'root'\n"
+            "                    else:\n"
+            "                        parts = name.split('_')\n"
+            "                        parent = 'root' if len(parts) == 1 else '_'.join(parts[:-1])\n"
+            "                data = load(parent).copy()\n"
             "            if name in _STATICPYTHON_LOCALE_DATA:\n"
             "                loaded = pickle.loads(_staticpython_locale_bytes(name))\n"
-            "                if name != 'root' and merge_inherited:\n"
-            "                    merge(data, loaded)\n"
-            "                else:\n"
-            "                    data = loaded\n"
             "            else:\n"
-            "                filename = resolve_locale_filename(name)\n"
-            "                with open(filename, 'rb') as fileobj:\n"
-            "                    if name != 'root' and merge_inherited:\n"
-            "                        merge(data, pickle.load(fileobj))\n"
-            "                    else:\n"
-            "                        data = pickle.load(fileobj)\n",
-            label="babel locale data loader",
+            "                resolver = globals().get('resolve_locale_filename')\n"
+            "                if callable(resolver):\n"
+            "                    filename = resolver(name)\n"
+            "                else:\n"
+            "                    filename = os.path.join(_dirname, '%s.dat' % name)\n"
+            "                fileobj = open(filename, 'rb')\n"
+            "                try:\n"
+            "                    loaded = pickle.load(fileobj)\n"
+            "                finally:\n"
+            "                    fileobj.close()\n"
+            "            if name != 'root' and merge_inherited:\n"
+            "                merge(data, loaded)\n"
+            "            else:\n"
+            "                data = loaded\n"
+            "            _cache[name] = data\n"
+            "        return data\n"
+            "    finally:\n"
+            "        _cache_lock.release()\n\n",
+            text,
+            count=1,
         )
+        if count != 1:
+            raise RuntimeError("expected load() implementation in babel.localedata")
+        return updated
 
     transform_source_text(context, "Lib/babel/core.py", patch_core)
     transform_source_text(context, "Lib/babel/localedata.py", patch_localedata)
@@ -119,9 +219,6 @@ LIBRARY_INTEGRATION = simple_library(
     overlay_entries=["Lib/babel"],
     materialized_paths=[
         "Lib/babel/global.dat",
-        "Lib/babel/locale-data/root.dat",
-        "Lib/babel/locale-data/en.dat",
-        "Lib/babel/locale-data/en_US.dat",
         "Lib/babel/_staticpython_data.py",
     ],
     post_patch_hooks=[embed_babel_data],

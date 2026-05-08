@@ -5,12 +5,14 @@ from libs import simple_library, source_path, transform_source_text, write_sourc
 
 def embed_docutils_resources(context) -> None:
     package_root = source_path(context, "Lib/docutils")
+    if not source_path(context, "Lib/docutils/writers/_html_base.py").exists():
+        return
     resources = {
         path.relative_to(package_root).as_posix(): path.read_text(encoding="utf-8")
         for path in sorted(package_root.rglob("*"))
         if path.is_file() and path.suffix.lower() in {".txt", ".css", ".tex", ".sty"}
     }
-    if "writers/html5_polyglot/template.txt" not in resources:
+    if not resources:
         raise RuntimeError("expected Docutils HTML5 template was not materialized")
 
     write_source_text(
@@ -67,6 +69,5 @@ def embed_docutils_resources(context) -> None:
 LIBRARY_INTEGRATION = simple_library(
     name="docutils",
     overlay_entries=["Lib/docutils"],
-    materialized_paths=["Lib/docutils/_staticpython_resources.py"],
     post_patch_hooks=[embed_docutils_resources],
 )

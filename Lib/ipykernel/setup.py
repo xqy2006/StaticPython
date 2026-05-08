@@ -3,10 +3,23 @@ from __future__ import annotations
 import base64
 import re
 
-from libs import simple_library, source_path, transform_source_text, write_source_text
+from libs import replace_regex_once, simple_library, source_path, transform_source_text, write_source_text
 
 
 def embed_ipykernel_resources(context) -> None:
+    write_source_text(
+        context,
+        "Lib/ipykernel_launcher.py",
+        '"""Entry point for launching an IPython kernel."""\n\n'
+        "import sys\n\n"
+        'if __name__ == "__main__":\n'
+        "    if sys.path and sys.path[0] == \"\":\n"
+        "        del sys.path[0]\n"
+        "\n"
+        "    from ipykernel import kernelapp as app\n"
+        "\n"
+        "    app.launch_new_instance()\n",
+    )
     resources_root = source_path(context, "Lib/ipykernel/resources")
     encoded_resources = {
         path.name: base64.b64encode(path.read_bytes()).decode("ascii")
@@ -40,6 +53,20 @@ def embed_ipykernel_resources(context) -> None:
                 count=1,
             )
             if count != 1:
+                text, count = re.subn(
+                    r"(import tempfile\n)",
+                    (
+                        "\\1"
+                        "import importlib.util\n"
+                        "from ._static_resources import (\n"
+                        "    RESOURCES as _STATICPYTHON_RESOURCES,\n"
+                        "    resource_bytes as _staticpython_resource_bytes,\n"
+                        ")\n"
+                    ),
+                    text,
+                    count=1,
+                )
+            if count != 1:
                 raise RuntimeError("failed to patch ipykernel kernelspec imports")
 
         text, count = re.subn(
@@ -48,23 +75,44 @@ def embed_ipykernel_resources(context) -> None:
             text,
             count=1,
         )
-        if count != 1 and 'importlib.util.find_spec("debugpy") is not None' not in text:
+        if count != 1:
+            text, count = re.subn(
+                r'"metadata": \{"debugger": _is_debugpy_available\},',
+                '"metadata": {"debugger": importlib.util.find_spec("debugpy") is not None},',
+                text,
+                count=1,
+            )
+        if count != 1:
+            text, count = re.subn(
+                r"'metadata': \{\s*'debugger': _is_debugpy_available\s*\}",
+                '\'metadata\': {\'debugger\': importlib.util.find_spec("debugpy") is not None}',
+                text,
+                count=1,
+            )
+        if (
+            count != 1
+            and 'importlib.util.find_spec("debugpy") is not None' not in text
+            and '"metadata":' in text
+        ):
             raise RuntimeError("failed to patch ipykernel debugger metadata")
 
-        old = "    # stage resources\n    shutil.copytree(RESOURCES, path)\n"
-        new = (
-            "    # stage resources\n"
-            "    path = Path(path)\n"
+        if "Path(path)" in text and "_staticpython_resource_bytes" in text:
+            return text
+        text, count = re.subn(
+            r"(?ms)^(\s*# stage resources\n)\s*shutil\.copytree\(RESOURCES, path\)\n",
+            "\\1"
+            "    path_text = str(path)\n"
             "    if os.path.isdir(RESOURCES):\n"
-            "        shutil.copytree(RESOURCES, path)\n"
+            "        shutil.copytree(RESOURCES, path_text)\n"
             "    else:\n"
-            "        path.mkdir(parents=True, exist_ok=True)\n"
+            "        os.makedirs(path_text, exist_ok=True)\n"
             "        for resource_name in sorted(_STATICPYTHON_RESOURCES):\n"
-            "            (path / resource_name).write_bytes(_staticpython_resource_bytes(resource_name))\n"
+            "            with open(os.path.join(path_text, resource_name), 'wb') as resource_file:\n"
+            "                resource_file.write(_staticpython_resource_bytes(resource_name))\n",
+            text,
+            count=1,
         )
-        if old in text:
-            text = text.replace(old, new, 1)
-        elif "_staticpython_resource_bytes(resource_name)" not in text:
+        if count != 1:
             raise RuntimeError("failed to patch ipykernel resource staging")
         return text
 
@@ -73,11 +121,13 @@ def embed_ipykernel_resources(context) -> None:
 
 LIBRARY_INTEGRATION = simple_library(
     name="ipykernel",
-    overlay_entries=["Lib/ipykernel", "Lib/ipykernel_launcher.py"],
+    source_mapping={
+        "ipykernel": "Lib/ipykernel",
+    },
     materialized_paths=[
+        "Lib/ipykernel_launcher.py",
         "Lib/ipykernel/resources/logo-32x32.png",
         "Lib/ipykernel/resources/logo-64x64.png",
-        "Lib/ipykernel/resources/logo-svg.svg",
         "Lib/ipykernel/_static_resources.py",
     ],
     post_patch_hooks=[embed_ipykernel_resources],

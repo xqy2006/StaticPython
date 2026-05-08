@@ -5,8 +5,11 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from packaging.version import Version
 
 from libs import pypi_library, source_path, write_source_text
 from tools import (
@@ -19,9 +22,31 @@ from tools import (
 )
 
 
-PYZMQ_PROJECT_GUID = "{A2E3F81C-84B6-4A6D-905D-4D70D728A0A1}"
-PYZMQ_PROJECT_NAME = "zmq.backend.cython._zmq"
+PYZMQ_MODERN_PROJECT_GUID = "{A2E3F81C-84B6-4A6D-905D-4D70D728A0A1}"
+PYZMQ_MODERN_PROJECT_NAME = "zmq.backend.cython._zmq"
+PYZMQ_LEGACY_LIBZMQ_PROJECT_NAME = "pyzmq.libzmq-static"
 PYZMQ_CYTHON_REQUIREMENT = "Cython>=3.0.0,<4.0.0"
+
+PYZMQ_SYSTEM_LIBRARIES = [
+    "Advapi32.lib",
+    "ws2_32.lib",
+    "Iphlpapi.lib",
+    "Rpcrt4.lib",
+]
+
+PYZMQ_LEGACY_EXTENSION_SOURCES = [
+    ("zmq.backend.cython.constants", "Lib/zmq/backend/cython/constants.c"),
+    ("zmq.backend.cython.error", "Lib/zmq/backend/cython/error.c"),
+    ("zmq.backend.cython._poll", "Lib/zmq/backend/cython/_poll.c"),
+    ("zmq.backend.cython.utils", "Lib/zmq/backend/cython/utils.c"),
+    ("zmq.backend.cython.context", "Lib/zmq/backend/cython/context.c"),
+    ("zmq.backend.cython.message", "Lib/zmq/backend/cython/message.c"),
+    ("zmq.backend.cython.socket", "Lib/zmq/backend/cython/socket.c"),
+    ("zmq.backend.cython._device", "Lib/zmq/backend/cython/_device.c"),
+    ("zmq.backend.cython._proxy_steerable", "Lib/zmq/backend/cython/_proxy_steerable.c"),
+    ("zmq.backend.cython._version", "Lib/zmq/backend/cython/_version.c"),
+    ("zmq.devices.monitoredqueue", "Lib/zmq/devices/monitoredqueue.c"),
+]
 
 LIBSODIUM_ARCHIVE_URL_TEMPLATE = (
     "https://github.com/jedisct1/libsodium/releases/download/{version}-RELEASE/libsodium-{version}.tar.gz"
@@ -45,12 +70,50 @@ def _msbuild_path(path: str) -> str:
     return "..\\" + path.replace("/", "\\")
 
 
-def _render_pyzmq_project(generated_source: str, bundle_include_dir: str) -> str:
+def _object_name(source: str) -> str:
+    return "$(IntDir)" + source.replace("/", "_").replace("\\", "_") + ".obj"
+
+
+def _project_guid_for_name(name: str) -> str:
+    project_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"https://staticpython.dev/pyzmq/{name}")
+    return "{" + str(project_uuid).upper() + "}"
+
+
+def _compile_items(sources: list[str]) -> str:
+    blocks = []
+    for source in sources:
+        blocks.append(
+            "\n".join(
+                [
+                    f'    <ClCompile Include="{_msbuild_path(source)}">',
+                    f"      <ObjectFileName>{_object_name(source)}</ObjectFileName>",
+                    "    </ClCompile>",
+                ]
+            )
+        )
+    return "\n".join(blocks)
+
+
+def _render_static_library_project(
+    name: str,
+    guid: str,
+    sources: list[str],
+    include_dirs: list[str],
+    defines: list[str],
+    *,
+    disable_warnings: str = "4100;4127;4244;4267;4996",
+    additional_options: str = "/bigobj",
+    exception_handling: bool = False,
+) -> str:
+    include_text = ";".join(_msbuild_path(path) for path in include_dirs)
+    define_text = ";".join([*defines, "%(PreprocessorDefinitions)"])
+    exception_block = "      <ExceptionHandling>Sync</ExceptionHandling>\n" if exception_handling else ""
+    root_namespace = re.sub(r"[^A-Za-z0-9_]", "_", name)
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
 {_project_configurations()}  <PropertyGroup Label="Globals">
-    <ProjectGuid>{PYZMQ_PROJECT_GUID}</ProjectGuid>
-    <RootNamespace>zmq_backend_cython__zmq</RootNamespace>
+    <ProjectGuid>{guid}</ProjectGuid>
+    <RootNamespace>{root_namespace}</RootNamespace>
     <Keyword>Win32Proj</Keyword>
     <SupportPGO>false</SupportPGO>
     <WindowsTargetPlatformVersion>$(DefaultWindowsSDKVersion)</WindowsTargetPlatformVersion>
@@ -69,40 +132,125 @@ def _render_pyzmq_project(generated_source: str, bundle_include_dir: str) -> str
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <TargetName>{PYZMQ_PROJECT_NAME}</TargetName>
+    <TargetName>{name}</TargetName>
     <TargetExt>.lib</TargetExt>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>..\\Lib\\zmq\\utils;{bundle_include_dir};%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>Py_NO_ENABLE_SHARED;ZMQ_STATIC;SODIUM_STATIC;_CRT_SECURE_NO_WARNINGS;CYTHON_CLINE_IN_TRACEBACK=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <DisableSpecificWarnings>4100;4127;4244;4267;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>{include_text};%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>{define_text}</PreprocessorDefinitions>
+      <DisableSpecificWarnings>{disable_warnings};%(DisableSpecificWarnings)</DisableSpecificWarnings>
+{exception_block}      <AdditionalOptions>{additional_options} %(AdditionalOptions)</AdditionalOptions>
       <RuntimeLibrary Condition="'$(Configuration)|$(Platform)'=='Release|x64'">MultiThreaded</RuntimeLibrary>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="{_msbuild_path(generated_source)}" />
+{_compile_items(sources)}
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />
 </Project>
 """
 
 
-def _version_from_pyzmq_cmake(context, variable_name: str) -> str:
-    text = source_path(context, "pyzmq_builtin/CMakeLists.txt").read_text(encoding="utf-8")
+def pyzmq_build_metadata_path(context) -> Path:
+    return source_path(context, "pyzmq_builtin/build-metadata.txt")
+
+
+def _read_pyzmq_build_metadata(context) -> str:
+    return pyzmq_build_metadata_path(context).read_text(encoding="utf-8")
+
+
+def _pyzmq_native_build_mode(context) -> str | None:
+    if source_path(context, "Lib/zmq/backend/cython/_zmq.py").exists():
+        return "modern"
+    if any(source_path(context, relative).exists() for _, relative in PYZMQ_LEGACY_EXTENSION_SOURCES):
+        return "legacy"
+    return None
+
+
+def _version_from_pyzmq_metadata(
+    context,
+    variable_name: str,
+    *,
+    allow_missing: bool = False,
+) -> str | None:
+    text = _read_pyzmq_build_metadata(context)
     match = re.search(rf'set\({re.escape(variable_name)}\s+"([^"]+)"', text)
-    if match is None:
-        raise RuntimeError(f"could not detect {variable_name} from pyzmq_builtin/CMakeLists.txt")
-    return match.group(1)
+    legacy_names = {
+        "PYZMQ_LIBSODIUM_VERSION": "LIBSODIUM_BUNDLED_VERSION",
+        "PYZMQ_LIBZMQ_VERSION": "LIBZMQ_BUNDLED_VERSION",
+    }
+    if match is None and variable_name in legacy_names:
+        match = re.search(rf'set\({re.escape(legacy_names[variable_name])}\s+"([^"]+)"', text)
+    if match is not None:
+        return match.group(1)
+
+    if variable_name == "PYZMQ_LIBZMQ_VERSION":
+        tuple_match = re.search(r"bundled_version\s*=\s*\(([^)]*)\)", text)
+        if tuple_match is not None:
+            parts = [part.strip() for part in tuple_match.group(1).split(",") if part.strip()]
+            numeric = [str(int(part)) for part in parts[:3]]
+            if numeric:
+                return ".".join(numeric)
+        string_match = re.search(r'bundled_version\s*=\s*["\']([^"\']+)["\']', text)
+        if string_match is not None:
+            return string_match.group(1)
+
+    if variable_name == "PYZMQ_LIBSODIUM_VERSION":
+        string_match = re.search(r'bundled_libsodium_version\s*=\s*["\']([^"\']+)["\']', text)
+        if string_match is not None:
+            return string_match.group(1)
+
+    if allow_missing:
+        return None
+    raise RuntimeError(f"could not detect {variable_name} from {pyzmq_build_metadata_path(context)}")
 
 
 def libsodium_version(context) -> str:
-    return _version_from_pyzmq_cmake(context, "PYZMQ_LIBSODIUM_VERSION")
+    version = _version_from_pyzmq_metadata(context, "PYZMQ_LIBSODIUM_VERSION")
+    assert version is not None
+    return version
 
 
 def libzmq_version(context) -> str:
-    return _version_from_pyzmq_cmake(context, "PYZMQ_LIBZMQ_VERSION")
+    version = _version_from_pyzmq_metadata(context, "PYZMQ_LIBZMQ_VERSION")
+    assert version is not None
+    return version
+
+
+def pyzmq_version(context) -> str:
+    version_path = source_path(context, "Lib/zmq/sugar/version.py")
+    text = version_path.read_text(encoding="utf-8")
+    direct_match = re.search(r'__version__(?::\s*str)?\s*=\s*["\']([^"\']+)["\']', text)
+    if direct_match is not None:
+        raw_version = direct_match.group(1)
+        raw_version = re.sub(r"\.(a|b|rc)(?=\d)", r"\1", raw_version)
+        return str(Version(raw_version))
+
+    def _require_int(name: str) -> str:
+        match = re.search(rf"^{re.escape(name)}\s*=\s*(\d+)\s*$", text, flags=re.MULTILINE)
+        if match is None:
+            raise RuntimeError(f"could not detect {name} from {version_path}")
+        return match.group(1)
+
+    major = _require_int("VERSION_MAJOR")
+    minor = _require_int("VERSION_MINOR")
+    patch = _require_int("VERSION_PATCH")
+    extra_match = re.search(r'^VERSION_EXTRA\s*=\s*["\']([^"\']*)["\']\s*$', text, flags=re.MULTILINE)
+    extra = extra_match.group(1).lstrip(".") if extra_match is not None else ""
+    raw_version = f"{major}.{minor}.{patch}{extra}"
+    return str(Version(raw_version))
+
+
+def pyzmq_archive_path(context) -> Path:
+    version = pyzmq_version(context)
+    archive_root = context.download_cache_root / "pypi" / "pyzmq" / version
+    candidates: list[Path] = []
+    for pattern in ("*.tar.gz", "*.tgz", "*.zip", "*.tar"):
+        candidates.extend(sorted(archive_root.glob(pattern)))
+    if candidates:
+        return candidates[0]
+    raise RuntimeError(f"could not find cached pyzmq source archive under {archive_root}")
 
 
 def libsodium_source_dir(context) -> Path:
@@ -163,6 +311,167 @@ def libsodium_archive_path(context) -> Path:
 def libzmq_archive_path(context) -> Path:
     version = libzmq_version(context)
     return context.download_cache_root / "libzmq" / version / f"zeromq-{version}.tar.gz"
+
+
+def legacy_pyzmq_buildutils_dir(context) -> Path:
+    return source_path(context, "pyzmq_builtin/buildutils")
+
+
+def legacy_pyzmq_bundled_dir(context) -> Path:
+    return source_path(context, "pyzmq_builtin/bundled")
+
+
+def legacy_libzmq_root(context) -> Path:
+    return legacy_pyzmq_bundled_dir(context) / "zeromq"
+
+
+def _ensure_legacy_platform_hpp(context) -> None:
+    platform_hpp = legacy_libzmq_root(context) / "src" / "platform.hpp"
+    if platform_hpp.exists():
+        return
+
+    candidate_sources = [
+        legacy_pyzmq_buildutils_dir(context) / "include_win32" / "platform.hpp",
+        legacy_libzmq_root(context) / "builds" / "msvc" / "platform.hpp",
+    ]
+    for candidate in candidate_sources:
+        if not candidate.exists():
+            continue
+        platform_hpp.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(candidate, platform_hpp)
+        context.log(
+            f"staged {platform_hpp.relative_to(context.source_root)} from {candidate.relative_to(context.source_root)}"
+        )
+        return
+
+    searched = ", ".join(str(path) for path in candidate_sources)
+    raise RuntimeError(f"could not find a legacy pyzmq platform.hpp source; checked {searched}")
+
+
+def ensure_legacy_pyzmq_support_files(context) -> None:
+    buildutils_dir = legacy_pyzmq_buildutils_dir(context)
+    bundled_dir = legacy_pyzmq_bundled_dir(context)
+    if buildutils_dir.exists() and bundled_dir.exists():
+        _ensure_legacy_platform_hpp(context)
+        return
+
+    archive_path = pyzmq_archive_path(context)
+    extract_root = context.work_cache_root / "pypi" / "pyzmq" / pyzmq_version(context) / "legacy-support"
+    extracted_root = extract_source_archive(
+        context.log,
+        archive_path,
+        extract_root.parent,
+        final_name=extract_root.name,
+    )
+    extracted_buildutils = extracted_root / "buildutils"
+    extracted_bundled = extracted_root / "bundled"
+    if not extracted_buildutils.exists():
+        raise RuntimeError(f"legacy pyzmq archive is missing buildutils/: {archive_path}")
+    if not extracted_bundled.exists():
+        raise RuntimeError(f"legacy pyzmq archive is missing bundled/: {archive_path}")
+
+    _copy_directory_contents(extracted_buildutils, buildutils_dir)
+    _copy_directory_contents(extracted_bundled, bundled_dir)
+    context.log(
+        f"restored legacy pyzmq support files from {archive_path.name} into "
+        f"{buildutils_dir.relative_to(context.source_root).parent}"
+    )
+    _ensure_legacy_platform_hpp(context)
+
+
+def _discover_legacy_pyzmq_extensions(context) -> list[dict[str, str]]:
+    extensions: list[dict[str, str]] = []
+    for module_name, source_relative in PYZMQ_LEGACY_EXTENSION_SOURCES:
+        if not source_path(context, source_relative).exists():
+            continue
+        extensions.append(
+            {
+                "name": module_name,
+                "source": source_relative,
+                "project": f"{module_name}.vcxproj",
+                "guid": _project_guid_for_name(module_name),
+                "pyinit": f"PyInit_{module_name.rsplit('.', 1)[1]}",
+            }
+        )
+    return extensions
+
+
+def _legacy_extension_include_dirs(context) -> list[str]:
+    bundle_include = legacy_libzmq_root(context) / "include"
+    return [
+        "Lib/zmq/utils",
+        bundle_include.relative_to(context.source_root).as_posix(),
+    ]
+
+
+def _legacy_extension_defines() -> list[str]:
+    return [
+        "Py_NO_ENABLE_SHARED",
+        "ZMQ_STATIC",
+        "_CRT_SECURE_NO_WARNINGS",
+    ]
+
+
+def _discover_legacy_libzmq_project_inputs(context) -> tuple[list[str], list[str], list[str]]:
+    ensure_legacy_pyzmq_support_files(context)
+    root = legacy_libzmq_root(context)
+    source_root = context.source_root
+
+    sources = [
+        path.relative_to(source_root).as_posix()
+        for path in sorted((root / "src").glob("*.cpp"))
+        if not path.name.startswith(("ws_", "wss_"))
+    ]
+    if not sources:
+        raise RuntimeError(f"legacy pyzmq bundled libzmq sources are missing under {root / 'src'}")
+
+    include_dirs = [
+        (root / "include").relative_to(source_root).as_posix(),
+        (root / "src").relative_to(source_root).as_posix(),
+    ]
+
+    wepoll_source = root / "external" / "wepoll" / "wepoll.c"
+    if wepoll_source.exists():
+        sources.append(wepoll_source.relative_to(source_root).as_posix())
+
+    tweetnacl_source_root = root / "tweetnacl" / "src"
+    if tweetnacl_source_root.exists():
+        include_dirs.extend(
+            [
+                tweetnacl_source_root.relative_to(source_root).as_posix(),
+                (root / "tweetnacl" / "contrib" / "randombytes").relative_to(source_root).as_posix(),
+            ]
+        )
+        sources.extend(
+            path.relative_to(source_root).as_posix()
+            for path in sorted(tweetnacl_source_root.glob("*.c"))
+        )
+        winrandom_source = root / "tweetnacl" / "contrib" / "randombytes" / "winrandom.c"
+        if winrandom_source.exists():
+            sources.append(winrandom_source.relative_to(source_root).as_posix())
+    else:
+        bundled_tweetnacl = root / "src" / "tweetnacl.c"
+        if bundled_tweetnacl.exists():
+            sources.append(bundled_tweetnacl.relative_to(source_root).as_posix())
+
+    defines = [
+        "Py_NO_ENABLE_SHARED",
+        "_CRT_SECURE_NO_WARNINGS",
+        "FD_SETSIZE=16384",
+        "DLL_EXPORT=1",
+        "ZMQ_HAVE_CURVE=1",
+        "ZMQ_USE_TWEETNACL=1",
+        "ZMQ_USE_SELECT=1",
+    ]
+    if Version(libzmq_version(context)) >= Version("4.3"):
+        defines.extend(
+            [
+                "ZMQ_IOTHREADS_USE_SELECT=1",
+                "ZMQ_POLL_BASED_ON_SELECT=1",
+            ]
+        )
+
+    return sources, include_dirs, defines
 
 
 def _ensure_pyzmq_cython(context) -> Path:
@@ -457,7 +766,7 @@ def generate_pyzmq_c_source(context) -> str:
         "--output-file",
         str(generated_path),
         "--module-name",
-        "zmq.backend.cython._zmq",
+        PYZMQ_MODERN_PROJECT_NAME,
         str(source_path(context, "Lib/zmq/backend/cython/_zmq.py")),
     ]
     display = subprocess.list2cmdline([str(part) for part in command])
@@ -472,21 +781,100 @@ def generate_pyzmq_c_source(context) -> str:
     return generated_path.relative_to(context.source_root).as_posix()
 
 
-def prepare_pyzmq_project(context) -> None:
-    ensure_libsodium_source(context)
-    ensure_libzmq_source(context)
-    generated_source = generate_pyzmq_c_source(context)
-    bundle_include_dir = _msbuild_path(
-        pyzmq_bundle_include_dir(context).relative_to(context.source_root).as_posix()
+def _pyzmq_generated_source_relative_path(context) -> str:
+    return pyzmq_generated_c_path(context).relative_to(context.source_root).as_posix()
+
+
+def _render_modern_pyzmq_project(generated_source: str, bundle_include_dir: str) -> str:
+    return _render_static_library_project(
+        PYZMQ_MODERN_PROJECT_NAME,
+        PYZMQ_MODERN_PROJECT_GUID,
+        [generated_source],
+        [
+            "Lib/zmq/utils",
+            bundle_include_dir,
+        ],
+        [
+            "Py_NO_ENABLE_SHARED",
+            "ZMQ_STATIC",
+            "SODIUM_STATIC",
+            "_CRT_SECURE_NO_WARNINGS",
+            "CYTHON_CLINE_IN_TRACEBACK=0",
+        ],
     )
+
+
+def _write_legacy_pyzmq_projects(context, legacy_extensions: list[dict[str, str]]) -> None:
+    libzmq_sources, libzmq_include_dirs, libzmq_defines = _discover_legacy_libzmq_project_inputs(context)
     write_source_text(
         context,
-        f"PCbuild/{PYZMQ_PROJECT_NAME}.vcxproj",
-        _render_pyzmq_project(generated_source, bundle_include_dir),
+        f"PCbuild/{PYZMQ_LEGACY_LIBZMQ_PROJECT_NAME}.vcxproj",
+        _render_static_library_project(
+            PYZMQ_LEGACY_LIBZMQ_PROJECT_NAME,
+            _project_guid_for_name(PYZMQ_LEGACY_LIBZMQ_PROJECT_NAME),
+            libzmq_sources,
+            libzmq_include_dirs,
+            libzmq_defines,
+            exception_handling=True,
+            additional_options="/bigobj /EHsc",
+        ),
     )
+
+    include_dirs = _legacy_extension_include_dirs(context)
+    defines = _legacy_extension_defines()
+    for extension in legacy_extensions:
+        write_source_text(
+            context,
+            f"PCbuild/{extension['project']}",
+            _render_static_library_project(
+                extension["name"],
+                extension["guid"],
+                [extension["source"]],
+                include_dirs,
+                defines,
+            ),
+        )
+
+
+def prepare_pyzmq_project(context) -> None:
+    mode = _pyzmq_native_build_mode(context)
+    if mode == "modern":
+        _set_pyzmq_native_build_configuration("modern")
+        generated_source = _pyzmq_generated_source_relative_path(context)
+        bundle_include_dir = pyzmq_bundle_include_dir(context).relative_to(context.source_root).as_posix()
+        write_source_text(
+            context,
+            f"PCbuild/{PYZMQ_MODERN_PROJECT_NAME}.vcxproj",
+            _render_modern_pyzmq_project(generated_source, bundle_include_dir),
+        )
+        return
+
+    if mode == "legacy":
+        ensure_legacy_pyzmq_support_files(context)
+        legacy_extensions = _discover_legacy_pyzmq_extensions(context)
+        if not legacy_extensions:
+            context.log("legacy pyzmq layout detected but no pre-generated extension sources were found")
+            _set_pyzmq_native_build_configuration(None)
+            return
+        _set_pyzmq_native_build_configuration("legacy", legacy_extensions)
+        _write_legacy_pyzmq_projects(context, legacy_extensions)
+        return
+
+    context.log("pyzmq native build disabled because no supported source layout was detected")
+    _set_pyzmq_native_build_configuration(None)
+
+
+def prepare_pyzmq_native_build(context) -> None:
+    if _pyzmq_native_build_mode(context) != "modern":
+        return
+    ensure_libsodium_source(context)
+    ensure_libzmq_source(context)
+    generate_pyzmq_c_source(context)
 
 
 def stage_pyzmq_libraries(context) -> None:
+    if _pyzmq_native_build_mode(context) != "modern":
+        return
     output_dir = get_pcbuild_output_dir(context.source_root, context.platform)
     output_dir.mkdir(parents=True, exist_ok=True)
     for source in (ensure_static_libsodium(context), ensure_static_libzmq(context)):
@@ -498,38 +886,98 @@ def stage_pyzmq_libraries(context) -> None:
         context.log(f"staged {destination.relative_to(context.source_root)} from {source.relative_to(context.source_root)}")
 
 
+def _set_pyzmq_native_build_configuration(
+    mode: str | None,
+    legacy_extensions: list[dict[str, str]] | None = None,
+) -> None:
+    if mode == "modern":
+        LIBRARY_INTEGRATION.static_library_projects_release_x64 = [f"{PYZMQ_MODERN_PROJECT_NAME}.vcxproj"]
+        LIBRARY_INTEGRATION.native_static_projects = [
+            {
+                "project": f"{PYZMQ_MODERN_PROJECT_NAME}.vcxproj",
+                "guid": PYZMQ_MODERN_PROJECT_GUID,
+            }
+        ]
+        LIBRARY_INTEGRATION.builtin_module_registrations = [
+            {
+                "name": PYZMQ_MODERN_PROJECT_NAME,
+                "pyinit": "PyInit__zmq",
+            }
+        ]
+        LIBRARY_INTEGRATION.python_link_dependencies_release_x64 = [
+            f"{PYZMQ_MODERN_PROJECT_NAME}.lib",
+            "libzmq-static.lib",
+            "libsodium.lib",
+            *PYZMQ_SYSTEM_LIBRARIES,
+        ]
+        LIBRARY_INTEGRATION.pre_build_hooks = [prepare_pyzmq_native_build, stage_pyzmq_libraries]
+        return
+
+    if mode == "legacy":
+        legacy_extensions = legacy_extensions or []
+        static_projects = [extension["project"] for extension in legacy_extensions]
+        static_projects.append(f"{PYZMQ_LEGACY_LIBZMQ_PROJECT_NAME}.vcxproj")
+        LIBRARY_INTEGRATION.static_library_projects_release_x64 = static_projects
+        LIBRARY_INTEGRATION.native_static_projects = [
+            {
+                "project": extension["project"],
+                "guid": extension["guid"],
+            }
+            for extension in legacy_extensions
+        ]
+        LIBRARY_INTEGRATION.builtin_module_registrations = [
+            {
+                "name": extension["name"],
+                "pyinit": extension["pyinit"],
+            }
+            for extension in legacy_extensions
+        ]
+        LIBRARY_INTEGRATION.python_link_dependencies_release_x64 = [
+            *[f"{extension['name']}.lib" for extension in legacy_extensions],
+            f"{PYZMQ_LEGACY_LIBZMQ_PROJECT_NAME}.lib",
+            *PYZMQ_SYSTEM_LIBRARIES,
+        ]
+        LIBRARY_INTEGRATION.pre_build_hooks = []
+        return
+
+    LIBRARY_INTEGRATION.static_library_projects_release_x64 = []
+    LIBRARY_INTEGRATION.native_static_projects = []
+    LIBRARY_INTEGRATION.builtin_module_registrations = []
+    LIBRARY_INTEGRATION.python_link_dependencies_release_x64 = []
+    LIBRARY_INTEGRATION.pre_build_hooks = []
+
+
 LIBRARY_INTEGRATION = pypi_library(
     name="pyzmq",
     project_name="pyzmq",
     source_mapping={
         "zmq": "Lib/zmq",
-        "CMakeLists.txt": "pyzmq_builtin/CMakeLists.txt",
+        "CMakeLists.txt || buildutils/bundle.py": "pyzmq_builtin/build-metadata.txt",
     },
-    python_packages=["zmq"],
-    static_library_projects_release_x64=[
-        f"{PYZMQ_PROJECT_NAME}.vcxproj",
+    cleanup_paths=[
+        "pyzmq_builtin/buildutils",
+        "pyzmq_builtin/bundled",
     ],
+    python_packages=["zmq"],
+    static_library_projects_release_x64=[f"{PYZMQ_MODERN_PROJECT_NAME}.vcxproj"],
     native_static_projects=[
         {
-            "project": f"{PYZMQ_PROJECT_NAME}.vcxproj",
-            "guid": PYZMQ_PROJECT_GUID,
+            "project": f"{PYZMQ_MODERN_PROJECT_NAME}.vcxproj",
+            "guid": PYZMQ_MODERN_PROJECT_GUID,
         }
     ],
     builtin_module_registrations=[
         {
-            "name": "zmq.backend.cython._zmq",
+            "name": PYZMQ_MODERN_PROJECT_NAME,
             "pyinit": "PyInit__zmq",
         }
     ],
     python_link_dependencies_release_x64=[
-        f"{PYZMQ_PROJECT_NAME}.lib",
+        f"{PYZMQ_MODERN_PROJECT_NAME}.lib",
         "libzmq-static.lib",
         "libsodium.lib",
-        "Advapi32.lib",
-        "ws2_32.lib",
-        "Iphlpapi.lib",
-        "Rpcrt4.lib",
+        *PYZMQ_SYSTEM_LIBRARIES,
     ],
     prepare_source_hooks=[prepare_pyzmq_project],
-    pre_build_hooks=[stage_pyzmq_libraries],
+    pre_build_hooks=[prepare_pyzmq_native_build, stage_pyzmq_libraries],
 )

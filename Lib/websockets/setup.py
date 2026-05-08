@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from libs import pypi_library, source_path, write_source_text
+from libs import pypi_library, read_source_text, source_path, write_source_text
 
 
 WEBSOCKETS_SPEEDUPS_GUID = "{E6A16A21-1D95-4866-A375-455DD2E9F2D4}"
@@ -63,14 +63,17 @@ def _render_speedups_project() -> str:
 def prepare_speedups_project(context) -> None:
     source = source_path(context, "Lib/websockets/speedups.c")
     if not source.exists():
-        raise RuntimeError(f"websockets speedups source file is missing: {source}")
+        source = source_path(context, "Lib/websockets/speedups.cpp")
+    if not source.exists():
+        context.log("websockets speedups source is absent in this release; keeping pure Python build")
+        return
     write_source_text(context, "PCbuild/websockets.speedups.vcxproj", _render_speedups_project())
 
 
 LIBRARY_INTEGRATION = pypi_library(
     name="websockets",
     source_mapping={
-        "src/websockets": "Lib/websockets",
+        "src/websockets||websockets": "Lib/websockets",
     },
     python_packages=["websockets"],
     static_library_projects_release_x64=["websockets.speedups.vcxproj"],

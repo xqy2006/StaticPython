@@ -204,6 +204,11 @@ jobs:
                   remove_path(source_root / relative)
 
 
+          def cleanup_integrations(source_root: Path, integrations) -> None:
+              for integration in reversed(list(integrations)):
+                  cleanup_integration_paths(source_root, integration)
+
+
           def compatible_release_versions(integration, target_version) -> list[str]:
               project_name = integration.project_name or integration.name
               payload = libs._load_pypi_release_payload(project_name, None)
@@ -306,7 +311,8 @@ jobs:
                   write_summary()
                   source_root = None
                   try:
-                      integration = by_name.get(str(library_name).casefold())
+                      requested_name = str(library_name)
+                      integration = by_name.get(requested_name.casefold())
                       if integration is None:
                           raise RuntimeError(f"failed to resolve integration {library_name!r} for CPython {version_full}")
 
@@ -321,6 +327,17 @@ jobs:
                       if not release_versions:
                           print(f"[library-patch-matrix] {integration.name}: no compatible downloadable versions for CPython {version_full}")
                           continue
+
+                      selected_integrations = libs.load_integrations(
+                          build.LIB_PATCH_ROOT,
+                          [requested_name],
+                          target_version=target_version,
+                          library_catalog=third_party_catalog,
+                      )
+                      selected_by_name = {item.name.casefold(): item for item in selected_integrations}
+                      integration = selected_by_name.get(requested_name.casefold()) or selected_by_name.get(integration.name.casefold())
+                      if integration is None:
+                          raise RuntimeError(f"failed to resolve selected integration {library_name!r} for CPython {version_full}")
 
                       source_root = work_root / "sources" / safe_name(integration.name)
                       if source_root.exists():
@@ -342,18 +359,20 @@ jobs:
 
                       for index, raw_version in enumerate(release_versions, start=1):
                           try:
-                              integration.release_version = raw_version
-                              cleanup_integration_paths(source_root, integration)
-                              libs.run_prepare_source_hooks([integration], hook_context)
+                              for item in selected_integrations:
+                                  if item.name.casefold() == integration.name.casefold():
+                                      item.release_version = raw_version
+                              cleanup_integrations(source_root, selected_integrations)
+                              libs.run_prepare_source_hooks(selected_integrations, hook_context)
                               build.copy_overlay_entries(
                                   source_root,
                                   build.ASSET_ROOT,
                                   {"overlay_entries": []},
-                                  [integration],
+                                  selected_integrations,
                                   version_info,
                               )
-                              libs.run_pre_patch_hooks([integration], hook_context)
-                              libs.run_post_patch_hooks([integration], hook_context)
+                              libs.run_pre_patch_hooks(selected_integrations, hook_context)
+                              libs.run_post_patch_hooks(selected_integrations, hook_context)
                               assert_materialized_paths_exist(source_root, integration)
                               library_summary["passed_versions"].append(raw_version)
                               if index % 25 == 0 or index == len(release_versions):

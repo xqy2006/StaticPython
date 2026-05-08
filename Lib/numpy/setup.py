@@ -418,16 +418,33 @@ def _patch_numpy_meson_build(context) -> None:
 
 def _patch_numpy_top_level_imports(context) -> None:
     def patch(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "    from . import lib, matrixlib as _mat\n",
+        replacement = (
             "    from . import lib\n"
             "    try:\n"
             "        from . import matrixlib as _mat\n"
             "    except ImportError:\n"
-            "        _mat = None\n",
-            label="numpy optional matrixlib import",
+            "        _mat = None\n"
         )
+        if replacement not in text:
+            if "    from . import lib, matrixlib as _mat\n" in text:
+                text = replace_text_once(
+                    text,
+                    "    from . import lib, matrixlib as _mat\n",
+                    replacement,
+                    label="numpy optional matrixlib import",
+                )
+            elif "    from . import lib\n    from . import matrixlib as _mat\n" in text:
+                text = replace_text_once(
+                    text,
+                    "    from . import lib\n    from . import matrixlib as _mat\n",
+                    replacement,
+                    label="numpy optional matrixlib import",
+                )
+            else:
+                raise RuntimeError(
+                    "expected snippet not found in numpy optional matrixlib import: "
+                    "single-line or split import form"
+                )
         return replace_text_once(
             text,
             "        set(_mat.__all__) |\n",

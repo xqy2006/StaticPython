@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import re
 
 from libs import (
     pypi_library,
@@ -143,21 +144,51 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
             label="jupyter_server serverapp jinja imports",
         )
-        text = replace_text_once(
-            text,
-            "        env = Environment(  # noqa[S701]\n"
-            "            loader=FileSystemLoader(template_path), extensions=[\"jinja2.ext.i18n\"], **jenv_opt\n"
-            "        )\n",
-            "        env = Environment(  # noqa[S701]\n"
-            "            loader=ChoiceLoader([\n"
-            "                DictLoader(_staticpython_template_dict_for_package(\"jupyter_server\")),\n"
-            "                FileSystemLoader(template_path),\n"
-            "            ]),\n"
-            "            extensions=[\"jinja2.ext.i18n\"],\n"
-            "            **jenv_opt,\n"
-            "        )\n",
-            label="jupyter_server serverapp embedded template loader",
-        )
+        if "DictLoader(_staticpython_template_dict_for_package(\"jupyter_server\"))" not in text:
+            old_variants = [
+                (
+                    "        env = Environment(  # noqa: S701\n"
+                    "            loader=FileSystemLoader(template_path), extensions=[\"jinja2.ext.i18n\"], **jenv_opt\n"
+                    "        )\n"
+                ),
+                (
+                    "        env = Environment(  # noqa: S701\n"
+                    "            loader=FileSystemLoader(template_path),\n"
+                    "            extensions=[\"jinja2.ext.i18n\"],\n"
+                    "            **jenv_opt,\n"
+                    "        )\n"
+                ),
+                (
+                    "        env = Environment(  # noqa[S701]\n"
+                    "            loader=FileSystemLoader(template_path), extensions=[\"jinja2.ext.i18n\"], **jenv_opt\n"
+                    "        )\n"
+                ),
+                (
+                    "        env = Environment(  # noqa[S701]\n"
+                    "            loader=FileSystemLoader(template_path),\n"
+                    "            extensions=[\"jinja2.ext.i18n\"],\n"
+                    "            **jenv_opt,\n"
+                    "        )\n"
+                ),
+            ]
+            new = (
+                "        env = Environment(  # noqa[S701]\n"
+                "            loader=ChoiceLoader([\n"
+                "                DictLoader(_staticpython_template_dict_for_package(\"jupyter_server\")),\n"
+                "                FileSystemLoader(template_path),\n"
+                "            ]),\n"
+                "            extensions=[\"jinja2.ext.i18n\"],\n"
+                "            **jenv_opt,\n"
+                "        )\n"
+            )
+            for old in old_variants:
+                if old in text:
+                    text = text.replace(old, new, 1)
+                    break
+            else:
+                raise RuntimeError(
+                    "expected snippet not found in jupyter_server serverapp embedded template loader"
+                )
         return replace_text_once(
             text,
             "            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
@@ -177,52 +208,46 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
             label="jupyter_server extension application jinja imports",
         )
-        return replace_text_once(
+        if "DictLoader(_staticpython_template_dict_for_package(template_package))" in text:
+            return text
+        updated, count = re.subn(
+            r"(?ms)^(\s*)self\.jinja2_env = Environment\(\n\s*loader=FileSystemLoader\(self\.template_paths\),\n\s*extensions=\[\"jinja2\.ext\.i18n\"\],\n\s*autoescape=True,\n\s*\*\*self\.jinja2_options,\n\s*\)\n",
+            (
+                "        template_package = \"notebook\" if self.name == \"notebook\" else \"jupyterlab\" if self.name == \"lab\" else self.name\n"
+                "        self.jinja2_env = Environment(\n"
+                "            loader=ChoiceLoader([\n"
+                "                DictLoader(_staticpython_template_dict_for_package(template_package)),\n"
+                "                FileSystemLoader(self.template_paths),\n"
+                "            ]),\n"
+                "            extensions=[\"jinja2.ext.i18n\"],\n"
+                "            autoescape=True,\n"
+                "            **self.jinja2_options,\n"
+                "        )\n"
+            ),
             text,
-            "        self.jinja2_env = Environment(\n"
-            "            loader=FileSystemLoader(self.template_paths),\n"
-            "            extensions=[\"jinja2.ext.i18n\"],\n"
-            "            autoescape=True,\n"
-            "            **self.jinja2_options,\n"
-            "        )\n",
-            "        template_package = \"notebook\" if self.name == \"notebook\" else \"jupyterlab\" if self.name == \"lab\" else self.name\n"
-            "        self.jinja2_env = Environment(\n"
-            "            loader=ChoiceLoader([\n"
-            "                DictLoader(_staticpython_template_dict_for_package(template_package)),\n"
-            "                FileSystemLoader(self.template_paths),\n"
-            "            ]),\n"
-            "            extensions=[\"jinja2.ext.i18n\"],\n"
-            "            autoescape=True,\n"
-            "            **self.jinja2_options,\n"
-            "        )\n",
-            label="jupyter_server extension embedded template loader",
+            count=1,
         )
+        if count != 1:
+            raise RuntimeError("expected snippet not found in jupyter_server extension embedded template loader")
+        return updated
 
     def patch_base_handlers(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "from jupyter_server.utils import (\n"
-            "    ensure_async,\n"
-            "    filefind,\n"
-            "    url_escape,\n"
-            "    url_is_absolute,\n"
-            "    url_path_join,\n"
-            "    urldecode_unix_socket_path,\n"
-            ")\n",
-            "from jupyter_server.utils import (\n"
-            "    ensure_async,\n"
-            "    filefind,\n"
-            "    url_escape,\n"
-            "    url_is_absolute,\n"
-            "    url_path_join,\n"
-            "    urldecode_unix_socket_path,\n"
-            ")\n"
-            "from jupyter_server._staticpython_resources import resource_bytes_for_path as _staticpython_resource_bytes_for_path\n"
-            "from jupyter_server._staticpython_resources import resolve_resource_from_roots as _staticpython_resolve_resource_from_roots\n",
-            label="jupyter_server base handlers resource imports",
-        )
-        text = replace_text_once(
-            text,
+        if "_staticpython_resource_bytes_for_path" not in text:
+            anchor = "from jupyter_server.utils import (\n"
+            start = text.find(anchor)
+            if start == -1:
+                raise RuntimeError("expected snippet not found in jupyter_server base handlers resource imports")
+            end = text.find(")\n", start)
+            if end == -1:
+                raise RuntimeError("expected snippet not found in jupyter_server base handlers resource imports")
+            end += 2
+            text = (
+                text[:end]
+                + "from jupyter_server._staticpython_resources import resource_bytes_for_path as _staticpython_resource_bytes_for_path\n"
+                + "from jupyter_server._staticpython_resources import resolve_resource_from_roots as _staticpython_resolve_resource_from_roots\n"
+                + text[end:]
+            )
+        get_absolute_path_block = (
             "    @classmethod\n"
             "    def get_absolute_path(cls, roots, path):\n"
             "        \"\"\"locate a file to serve on our static file search path\"\"\"\n"
@@ -232,43 +257,25 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             "            try:\n"
             "                abspath = os.path.abspath(filefind(path, roots))\n"
             "            except OSError:\n"
-            "                # IOError means not found\n"
-            "                return \"\"\n"
+            "                abspath = _staticpython_resolve_resource_from_roots(roots, path) or \"\"\n"
             "\n"
             "            cls._static_paths[path] = abspath\n"
             "\n"
             "            log().debug(f\"Path {path} served from {abspath}\")\n"
-            "            return abspath\n",
-            "    @classmethod\n"
-            "    def get_absolute_path(cls, roots, path):\n"
-            "        \"\"\"locate a file to serve on our static file search path\"\"\"\n"
-            "        cache_key = (tuple(roots) if isinstance(roots, list) else roots, path)\n"
-            "        with cls._lock:\n"
-            "            if cache_key in cls._static_paths:\n"
-            "                return cls._static_paths[cache_key]\n"
-            "            try:\n"
-            "                abspath = os.path.abspath(filefind(path, roots))\n"
-            "            except OSError:\n"
-            "                abspath = _staticpython_resolve_resource_from_roots(roots, path) or \"\"\n"
+            "            return abspath\n"
             "\n"
-            "            cls._static_paths[cache_key] = abspath\n"
-            "\n"
-            "            log().debug(f\"Path {path} served from {abspath}\")\n"
-            "            return abspath\n",
-            label="jupyter_server filefind embedded resource lookup",
         )
-        text = replace_text_once(
-            text,
-            "    def validate_absolute_path(self, root, absolute_path):\n"
-            "        \"\"\"check if the file should be served (raises 404, 403, etc.)\"\"\"\n"
-            "        if not absolute_path:\n"
-            "            raise web.HTTPError(404)\n"
-            "\n"
-            "        for root in self.root:\n"
-            "            if (absolute_path + os.sep).startswith(root):\n"
-            "                break\n"
-            "\n"
-            "        return super().validate_absolute_path(root, absolute_path)\n",
+        if get_absolute_path_block not in text:
+            updated, count = re.subn(
+                r"(?ms)^    @classmethod\n    def get_absolute_path\(.*?(?=^    def validate_absolute_path\()",
+                get_absolute_path_block,
+                text,
+                count=1,
+            )
+            if count != 1:
+                raise RuntimeError("expected snippet not found in jupyter_server filefind embedded resource lookup")
+            text = updated
+        validate_absolute_path_block = (
             "    def validate_absolute_path(self, root, absolute_path):\n"
             "        \"\"\"check if the file should be served (raises 404, 403, etc.)\"\"\"\n"
             "        if not absolute_path:\n"
@@ -276,13 +283,27 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             "        if _staticpython_resource_bytes_for_path(absolute_path) is not None:\n"
             "            return absolute_path\n"
             "\n"
-            "        for root in self.root:\n"
-            "            if (absolute_path + os.sep).startswith(root):\n"
-            "                break\n"
+            "        abs_path = super().validate_absolute_path(root, absolute_path)\n"
+            "        abs_root = os.path.abspath(root)\n"
+            "        assert abs_path is not None\n"
+            "        if not self.contents_manager.allow_hidden and is_hidden(abs_path, abs_root):\n"
+            "            self.log.info(\n"
+            "                \"Refusing to serve hidden file, via 404 Error, use flag 'ContentsManager.allow_hidden' to enable\"\n"
+            "            )\n"
+            "            raise web.HTTPError(404)\n"
+            "        return abs_path\n"
             "\n"
-            "        return super().validate_absolute_path(root, absolute_path)\n",
-            label="jupyter_server filefind embedded resource validation",
         )
+        if validate_absolute_path_block not in text:
+            updated, count = re.subn(
+                r"(?ms)^    def validate_absolute_path\(.*?(?=^def json_errors\()",
+                validate_absolute_path_block,
+                text,
+                count=1,
+            )
+            if count != 1:
+                raise RuntimeError("expected snippet not found in jupyter_server filefind embedded resource validation")
+            text = updated
         addition = (
             "    @classmethod\n"
             "    def get_content(cls, abspath, start=None, end=None):\n"
@@ -311,32 +332,8 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
         if "def get_content(cls, abspath, start=None, end=None):\n        data = _staticpython_resource_bytes_for_path" not in text:
             text = replace_text_once(
                 text,
-                "    def validate_absolute_path(self, root, absolute_path):\n"
-                "        \"\"\"check if the file should be served (raises 404, 403, etc.)\"\"\"\n"
-                "        if not absolute_path:\n"
-                "            raise web.HTTPError(404)\n"
-                "        if _staticpython_resource_bytes_for_path(absolute_path) is not None:\n"
-                "            return absolute_path\n"
-                "\n"
-                "        for root in self.root:\n"
-                "            if (absolute_path + os.sep).startswith(root):\n"
-                "                break\n"
-                "\n"
-                "        return super().validate_absolute_path(root, absolute_path)\n",
-                "    def validate_absolute_path(self, root, absolute_path):\n"
-                "        \"\"\"check if the file should be served (raises 404, 403, etc.)\"\"\"\n"
-                "        if not absolute_path:\n"
-                "            raise web.HTTPError(404)\n"
-                "        if _staticpython_resource_bytes_for_path(absolute_path) is not None:\n"
-                "            return absolute_path\n"
-                "\n"
-                "        for root in self.root:\n"
-                "            if (absolute_path + os.sep).startswith(root):\n"
-                "                break\n"
-                "\n"
-                "        return super().validate_absolute_path(root, absolute_path)\n"
-                "\n"
-                + addition,
+                validate_absolute_path_block,
+                validate_absolute_path_block + addition,
                 label="jupyter_server filefind embedded resource methods",
             )
         return text

@@ -329,7 +329,12 @@ def extracted_source_root(
 
     archive_path: Path | None = None
     if version is not None:
-        archive_path = _find_cached_pypi_archive(download_root, info.normalized_name, version)
+        archive_path = _find_cached_pypi_archive(
+            download_root,
+            info.normalized_name,
+            version,
+            target_version,
+        )
 
     if archive_path is None and download_missing:
         version, file_info = _select_pypi_file(info.project_name, target_version, release_version)

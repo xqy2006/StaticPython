@@ -7,7 +7,7 @@ def patch_tinycss2_sources(context):
         updated = replace_text_all(updated, "_ε", "_EPSILON")
         return updated
 
-    transform_source_text(context, "Lib/tinycss2/color4.py", patch_color4)
+    transform_source_text(context, "Lib/tinycss2/color4.py", patch_color4, allow_missing=True)
 
 
 LIBRARY_INTEGRATION = simple_library(

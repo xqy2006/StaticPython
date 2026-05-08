@@ -149,14 +149,22 @@ def _parse_literal_module_attribute(path: Path, attribute_name: str) -> str | No
 
 
 def _parse_pillow_version(context) -> str:
-    for candidate in ("Lib/PIL/_version.py", "Lib/PIL/__init__.py"):
+    for candidate, attribute_names in (
+        ("Lib/PIL/_version.py", ("__version__",)),
+        ("Lib/PIL/version.py", ("__version__",)),
+        ("Lib/PIL/__init__.py", ("__version__", "PILLOW_VERSION", "VERSION")),
+    ):
         path = source_path(context, candidate)
         if not path.exists():
             continue
-        version = _parse_literal_module_attribute(path, "__version__")
-        if version:
-            return version
-    raise RuntimeError("could not find a literal Pillow __version__ in Lib/PIL/_version.py or Lib/PIL/__init__.py")
+        for attribute_name in attribute_names:
+            version = _parse_literal_module_attribute(path, attribute_name)
+            if version:
+                return version
+    raise RuntimeError(
+        "could not find a literal Pillow version in "
+        "Lib/PIL/_version.py, Lib/PIL/version.py, or Lib/PIL/__init__.py"
+    )
 
 
 def _discover_imaging_sources(context) -> list[str]:
@@ -215,12 +223,12 @@ LIBRARY_INTEGRATION = pypi_library(
     name="PIL",
     project_name="pillow",
     source_mapping={
-        "src/PIL": "Lib/PIL",
-        "src": "pillow_builtin/src",
+        "src/PIL||PIL": "Lib/PIL",
+        "src||.": "pillow_builtin/src",
     },
     materialized_paths=[
         "Lib/PIL/__init__.py",
-        "Lib/PIL/_version.py",
+        "Lib/PIL/version.py",
         "Lib/PIL/Image.py",
         "Lib/PIL/ImageFile.py",
         "Lib/PIL/BmpImagePlugin.py",

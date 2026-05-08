@@ -84,7 +84,7 @@ LIBRARY_INTEGRATION = pypi_library(
     source_mapping={
         "libui": "Lib/libui",
         "src/libui-ng": "libui_builtin/libui-ng",
-        "src/py_module": "libui_builtin/py_module",
+        "src/py_module || src/libui": "libui_builtin/py_module",
     },
     overlay_entries=[
         "Lib/test/test_libui.py",

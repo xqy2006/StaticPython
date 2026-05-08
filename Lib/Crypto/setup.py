@@ -499,7 +499,8 @@ def _patch_bignum_c(text: str) -> str:
 
 def patch_crypto_sources(context) -> None:
     transform_source_text(context, "Lib/Crypto/Util/_raw_api.py", _patch_raw_api)
-    transform_source_text(context, "pycryptodome_builtin/src/bignum.c", _patch_bignum_c)
+    if source_path(context, "pycryptodome_builtin/src/bignum.c").exists():
+        transform_source_text(context, "pycryptodome_builtin/src/bignum.c", _patch_bignum_c)
     transform_source_text(context, "pycryptodome_builtin/src/blake2b.c", _patch_blake2b_c)
     transform_source_text(context, "Lib/Crypto/Hash/BLAKE2b.py", _patch_blake2b_py)
     transform_source_text(context, "pycryptodome_builtin/src/blake2s.c", _patch_blake2s_c)

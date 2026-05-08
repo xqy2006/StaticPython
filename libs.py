@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import fnmatch
 import importlib.util
 import json
 import os
@@ -10,6 +11,7 @@ import sys
 import tarfile
 import time
 from pathlib import Path, PurePosixPath
+import tokenize
 from types import ModuleType
 from typing import Callable
 from urllib.request import Request, urlopen
@@ -30,6 +32,7 @@ _ensure_repo_packaging_on_path()
 from packaging.markers import default_environment
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
 
@@ -37,7 +40,20 @@ Hook = Callable[["LibraryHookContext"], None]
 PYPI_API_URL_TEMPLATE = "https://pypi.org/pypi/{project}/json"
 PYPI_VERSION_API_URL_TEMPLATE = "https://pypi.org/pypi/{project}/{version}/json"
 GITHUB_ARCHIVE_URL_TEMPLATE = "https://github.com/{repo}/archive/refs/{ref_kind}/{ref}.zip"
-SOURCE_ROOT_CANDIDATES = ("", "src", "lib", "python")
+SOURCE_ROOT_CANDIDATES = (
+    "",
+    "src",
+    "py_src",
+    "src_py",
+    "src_py2",
+    "src_py3",
+    "src-python",
+    "src_python",
+    "lib",
+    "lib64",
+    "python",
+    "py",
+)
 REPO_ROOT = Path(__file__).resolve().parent
 DOWNLOAD_CACHE_ROOT = REPO_ROOT / "downloads"
 SIMPLE_LIBRARY_PROJECT_ALIASES = {
@@ -84,6 +100,7 @@ class LibraryIntegration:
     staged_static_libraries_release_x64: list[dict] = field(default_factory=list)
     python_link_dependencies_release_x64: list[str] = field(default_factory=list)
     python_link_wholearchive_release_x64: list[str] = field(default_factory=list)
+    source_ignore_patterns: list[str] = field(default_factory=list)
     prepare_source_hooks: list[Hook] = field(default_factory=list)
     pre_patch_hooks: list[Hook] = field(default_factory=list)
     post_patch_hooks: list[Hook] = field(default_factory=list)
@@ -113,8 +130,31 @@ def source_path(context: LibraryHookContext, relative: str) -> Path:
     return context.source_root / _normalized_relpath(relative)
 
 
+def read_text_file(path: Path) -> str:
+    first_error: UnicodeDecodeError | None = None
+    encodings = ["utf-8", "utf-8-sig"]
+    try:
+        with path.open("rb") as handle:
+            detected_encoding, _ = tokenize.detect_encoding(handle.readline)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        detected_encoding = None
+    if detected_encoding:
+        encodings.append(detected_encoding)
+    encodings.extend(["cp1252", "latin-1"])
+    for encoding in _unique(encodings):
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError as exc:
+            if first_error is None:
+                first_error = exc
+            continue
+    if first_error is not None:
+        raise first_error
+    return path.read_text(encoding="utf-8")
+
+
 def read_source_text(context: LibraryHookContext, relative: str) -> str:
-    return source_path(context, relative).read_text(encoding="utf-8")
+    return read_text_file(source_path(context, relative))
 
 
 def write_source_text(context: LibraryHookContext, relative: str, text: str) -> None:
@@ -138,7 +178,7 @@ def transform_source_text(
         else:
             raise RuntimeError(f"source file not found for transformation: {path}")
     else:
-        original = path.read_text(encoding="utf-8")
+        original = read_text_file(path)
 
     updated = transform(original)
     if updated == original:
@@ -146,6 +186,30 @@ def transform_source_text(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(updated, encoding="utf-8", newline="\n")
     context.log(f"updated {path.relative_to(context.source_root)}")
+
+
+def transform_first_existing_source_text(
+    context: LibraryHookContext,
+    relatives: list[str] | tuple[str, ...],
+    transform: Callable[[str], str],
+    *,
+    allow_all_missing: bool = False,
+) -> str | None:
+    normalized_relatives = [_normalized_relpath(relative) for relative in relatives]
+    for relative in normalized_relatives:
+        path = source_path(context, relative)
+        if not path.exists():
+            continue
+        original = read_text_file(path)
+        updated = transform(original)
+        if updated != original:
+            path.write_text(updated, encoding="utf-8", newline="\n")
+            context.log(f"updated {path.relative_to(context.source_root)}")
+        return relative
+    if allow_all_missing:
+        return None
+    searched = ", ".join(str(source_path(context, relative)) for relative in normalized_relatives)
+    raise RuntimeError(f"source file not found for transformation: {searched}")
 
 
 def replace_text_once(text: str, old: str, new: str, *, label: str) -> str:
@@ -185,6 +249,32 @@ def replace_regex_once(text: str, pattern: str, repl: str, *, label: str, flags:
     if count != 1:
         raise RuntimeError(f"expected regex not found in {label}: {pattern}")
     return updated
+
+
+def replace_function_block_once(
+    text: str,
+    function_name: str,
+    replacement: str,
+    *,
+    label: str,
+    next_name: str | None = None,
+) -> str:
+    if replacement in text:
+        return text
+    start_match = re.search(rf"(?m)^def {re.escape(function_name)}\(", text)
+    if start_match is None:
+        raise RuntimeError(f"expected function not found in {label}: {function_name}")
+    start = start_match.start()
+    search_start = start_match.end()
+    if next_name is not None:
+        end_match = re.search(rf"(?m)^def {re.escape(next_name)}\(", text[search_start:])
+        if end_match is None:
+            raise RuntimeError(f"expected next function not found in {label}: {next_name}")
+        end = search_start + end_match.start()
+    else:
+        end_match = re.search(r"(?m)^(?:def|class)\s+", text[search_start:])
+        end = len(text) if end_match is None else search_start + end_match.start()
+    return text[:start] + replacement + text[end:]
 
 
 def ensure_package_markers(text: str, package_name: str) -> str:
@@ -269,30 +359,38 @@ def _safe_cache_component(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", value)
 
 
-def _copy_entry(src: Path, dst: Path) -> None:
+def _copy_entry(src: Path, dst: Path, ignore_patterns: list[str] | None = None) -> None:
     if dst.exists():
         if dst.is_dir() and not dst.is_symlink():
             _remove_tree(dst)
         else:
             dst.unlink()
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(_long_path(dst.parent), exist_ok=True)
     if src.is_dir():
-        shutil.copytree(
-            src,
-            dst,
-            ignore=shutil.ignore_patterns(
-                "__pycache__",
-                "*.pyc",
-                "*.pyo",
-                ".git",
-                ".github",
-                ".gitignore",
-                ".gitattributes",
-                ".gitmodules",
-            ),
-        )
+        patterns = [
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+            ".git",
+            ".github",
+            ".gitignore",
+            ".gitattributes",
+            ".gitmodules",
+        ]
+        patterns.extend(ignore_patterns or [])
+        os.makedirs(_long_path(dst), exist_ok=True)
+        for entry in os.listdir(_long_path(src)):
+            if any(fnmatch.fnmatch(entry, pattern) for pattern in patterns):
+                continue
+            source_entry = src / entry
+            dest_entry = dst / entry
+            if source_entry.is_dir():
+                _copy_entry(source_entry, dest_entry, ignore_patterns)
+            else:
+                os.makedirs(_long_path(dest_entry.parent), exist_ok=True)
+                shutil.copy2(_long_path(source_entry), _long_path(dest_entry))
     else:
-        shutil.copy2(src, dst)
+        shutil.copy2(_long_path(src), _long_path(dst))
 
 
 def _http_get_json(url: str) -> dict:
@@ -366,48 +464,165 @@ def _sorted_release_versions(releases: dict[str, list[dict]]) -> list[str]:
     return [raw_version for _, raw_version in [*stable, *prerelease]]
 
 
-def _select_pypi_file(
+def _sdist_filename_rank(filename: str) -> tuple[int, str]:
+    lower_name = filename.lower()
+    if lower_name.endswith((".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tar")):
+        return (0, lower_name)
+    if lower_name.endswith(".zip"):
+        return (1, lower_name)
+    return (2, lower_name)
+
+
+def _wheel_interpreter_rank(interpreter: str, target_version: Version) -> int:
+    major = target_version.release[0] if len(target_version.release) >= 1 else 0
+    minor = target_version.release[1] if len(target_version.release) >= 2 else 0
+    exact = f"cp{major}{minor}"
+    generic = f"py{major}"
+
+    if interpreter == exact:
+        return 0
+    if interpreter == generic:
+        return 1
+    if interpreter.startswith(generic):
+        return 2
+    if interpreter.startswith("cp"):
+        return 3
+    if interpreter.startswith("py"):
+        return 4
+    return 5
+
+
+def _wheel_abi_rank(abi: str) -> int:
+    if abi == "none":
+        return 0
+    if abi == "abi3":
+        return 1
+    if abi.startswith("cp"):
+        return 2
+    return 3
+
+
+def _wheel_kind_rank(platform: str, abi: str) -> int:
+    # sdist is the only true source artifact.
+    # For wheels, abi=none only means "no CPython ABI coupling"; it does not mean
+    # "source distribution". We still prefer pure universal wheels before any
+    # platform wheel because they are the least prebuilt/specialized fallback.
+    if platform == "any" and abi == "none":
+        return 0
+    if abi == "none":
+        return 1
+    if abi == "abi3":
+        return 2
+    return 3
+
+
+def _wheel_platform_rank(platform: str) -> int:
+    if platform == "any":
+        return 0
+    if platform == "win_amd64":
+        return 1
+    if platform.startswith("win_"):
+        return 2
+    if platform.startswith("manylinux") or platform.startswith("musllinux"):
+        return 3
+    if platform.startswith("macosx"):
+        return 4
+    return 5
+
+
+def _wheel_filename_rank(filename: str, target_version: Version) -> tuple[int, int, int, int, str]:
+    try:
+        _, _, _, tags = parse_wheel_filename(filename)
+    except InvalidWheelFilename:
+        return (9, 9, 9, 9, filename.lower())
+    tag_ranks = sorted(
+        (
+            _wheel_kind_rank(tag.platform, tag.abi),
+            _wheel_interpreter_rank(tag.interpreter, target_version),
+            _wheel_abi_rank(tag.abi),
+            _wheel_platform_rank(tag.platform),
+        )
+        for tag in tags
+    )
+    if not tag_ranks:
+        return (9, 9, 9, 9, filename.lower())
+    best_kind, best_interpreter, best_abi, best_platform = tag_ranks[0]
+    return (best_kind, best_interpreter, best_abi, best_platform, filename.lower())
+
+
+def _pypi_file_sort_key(file_info: dict, target_version: Version) -> tuple:
+    filename = str(file_info.get("filename") or "")
+    packagetype = file_info.get("packagetype")
+    if packagetype == "sdist":
+        return (0, *_sdist_filename_rank(filename))
+    if packagetype == "bdist_wheel":
+        return (1, *_wheel_filename_rank(filename, target_version))
+    return (2, filename.lower())
+
+
+def _compatible_pypi_files(
+    files: list[dict],
+    *,
+    project_requires_python: str | None,
+    target_version: Version,
+) -> list[dict]:
+    compatible: list[dict] = []
+    for file_info in files:
+        if file_info.get("yanked"):
+            continue
+        packagetype = file_info.get("packagetype")
+        if packagetype not in {"sdist", "bdist_wheel"}:
+            continue
+        requires_python = file_info.get("requires_python") or project_requires_python
+        if not _supports_target_python(requires_python, target_version):
+            continue
+        compatible.append(file_info)
+    return sorted(compatible, key=lambda file_info: _pypi_file_sort_key(file_info, target_version))
+
+
+def _iter_pypi_distribution_candidates(
     project_name: str,
     target_version: Version,
     release_version: str | None = None,
-) -> tuple[str, dict]:
+) -> list[tuple[str, dict]]:
     payload = _http_get_json(PYPI_API_URL_TEMPLATE.format(project=project_name))
     releases = payload.get("releases", {})
     project_requires_python = payload.get("info", {}).get("requires_python")
 
     candidate_versions = [release_version] if release_version else _sorted_release_versions(releases)
-
+    candidates: list[tuple[str, dict]] = []
     for raw_version in candidate_versions:
         if raw_version not in releases:
             continue
-        files = releases.get(raw_version, [])
-        compatible: list[dict] = []
-        for file_info in files:
-            if file_info.get("yanked"):
-                continue
-            packagetype = file_info.get("packagetype")
-            if packagetype not in {"sdist", "bdist_wheel"}:
-                continue
-            requires_python = file_info.get("requires_python") or project_requires_python
-            if not _supports_target_python(requires_python, target_version):
-                continue
-            compatible.append(file_info)
+        compatible = _compatible_pypi_files(
+            releases.get(raw_version, []),
+            project_requires_python=project_requires_python,
+            target_version=target_version,
+        )
+        for file_info in compatible:
+            candidates.append((raw_version, file_info))
+        if release_version and compatible:
+            break
+    return candidates
 
-        if not compatible:
-            continue
 
-        for packagetype in ("sdist", "bdist_wheel"):
-            for file_info in compatible:
-                if file_info.get("packagetype") == packagetype and file_info.get("url"):
-                    return raw_version, file_info
+def _select_pypi_file(
+    project_name: str,
+    target_version: Version,
+    release_version: str | None = None,
+) -> tuple[str, dict]:
+    candidates = _iter_pypi_distribution_candidates(project_name, target_version, release_version)
+    for raw_version, file_info in candidates:
+        if file_info.get("url"):
+            return raw_version, file_info
 
     if release_version is not None:
         raise RuntimeError(
-            f"could not find a compatible PyPI source artifact for {project_name!r} release {release_version!r} "
+            f"could not find a compatible PyPI distribution artifact for {project_name!r} release {release_version!r} "
             f"and target Python {target_version}"
         )
     raise RuntimeError(
-        f"could not find a compatible PyPI source artifact for {project_name!r} and target Python {target_version}"
+        f"could not find a compatible PyPI distribution artifact for {project_name!r} and target Python {target_version}"
     )
 
 
@@ -415,6 +630,7 @@ def _find_cached_pypi_archive(
     download_cache_root: Path,
     normalized_project_name: str,
     release_version: str,
+    target_version: Version,
 ) -> Path | None:
     release_root = download_cache_root / "pypi" / normalized_project_name / release_version
     if not release_root.exists():
@@ -428,17 +644,46 @@ def _find_cached_pypi_archive(
     if not candidates:
         return None
 
-    def sort_key(path: Path) -> tuple[int, str]:
-        lower_name = path.name.lower()
-        if lower_name.endswith((".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".zip", ".tar")):
-            priority = 0
-        elif lower_name.endswith(".whl"):
-            priority = 1
-        else:
-            priority = 2
-        return (priority, lower_name)
+    return sorted(
+        candidates,
+        key=lambda path: _pypi_file_sort_key(
+            {
+                "filename": path.name,
+                "packagetype": "bdist_wheel" if path.name.lower().endswith(".whl") else "sdist",
+            },
+            target_version,
+        ),
+    )[0]
 
-    return sorted(candidates, key=sort_key)[0]
+
+def _find_cached_pypi_archives(
+    download_cache_root: Path,
+    normalized_project_name: str,
+    release_version: str,
+    target_version: Version,
+) -> list[Path]:
+    release_root = download_cache_root / "pypi" / normalized_project_name / release_version
+    if not release_root.exists():
+        return []
+
+    candidates = [
+        path
+        for path in sorted(release_root.iterdir())
+        if path.is_file() and any(suffix in {".zip", ".whl", ".tar", ".gz", ".bz2", ".xz", ".tgz"} for suffix in path.suffixes)
+    ]
+    if not candidates:
+        return []
+
+    return sorted(
+        candidates,
+        key=lambda path: _pypi_file_sort_key(
+            {
+                "filename": path.name,
+                "packagetype": "bdist_wheel" if path.name.lower().endswith(".whl") else "sdist",
+            },
+            target_version,
+        ),
+    )
 
 
 def _resolve_extracted_root(destination_root: Path) -> Path:
@@ -570,7 +815,7 @@ def _extract_archive(
     started = time.monotonic()
     if log is not None:
         log(f"extracting {archive_path} -> {destination_root}")
-    if ".zip" in suffixes:
+    if ".zip" in suffixes or ".whl" in suffixes:
         _extract_zip_archive(archive_path, destination_root)
         _write_extract_cache_marker(destination_root, archive_path)
         if log is not None:
@@ -589,44 +834,239 @@ def _extract_archive(
 
 def _candidate_source_roots(extracted_root: Path) -> list[Path]:
     roots: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(candidate: Path) -> None:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        if resolved in seen or not candidate.exists():
+            return
+        seen.add(resolved)
+        roots.append(candidate)
+
     for rel in SOURCE_ROOT_CANDIDATES:
         candidate = extracted_root / rel if rel else extracted_root
-        if candidate.exists():
-            roots.append(candidate)
+        add(candidate)
+
+    try:
+        children = list(extracted_root.iterdir())
+    except OSError:
+        children = []
+    for child in children:
+        if not child.is_dir() or not child.name.endswith(".data"):
+            continue
+        add(child / "purelib")
+        add(child / "platlib")
+
     return roots
 
 
-def _resolve_source_entry(extracted_root: Path, selector: str) -> Path:
-    normalized = selector.replace("\\", "/")
-    explicit = extracted_root / normalized
-    if explicit.exists():
-        return explicit
+def _selector_variants(selector: str) -> list[str]:
+    normalized = selector.replace("\\", "/").strip("/")
+    variants = [normalized]
+    seen = {normalized}
+    pending = [normalized]
+    while pending:
+        current = pending.pop()
+        for prefix in SOURCE_ROOT_CANDIDATES:
+            if not prefix:
+                continue
+            prefix_text = prefix + "/"
+            if not current.startswith(prefix_text):
+                continue
+            stripped = current[len(prefix_text) :]
+            if not stripped or stripped in seen:
+                continue
+            seen.add(stripped)
+            variants.append(stripped)
+            pending.append(stripped)
+    return variants
 
+
+def _selector_lookup_keys(selector: str) -> set[str]:
+    normalized = selector.replace("\\", "/").strip("/")
+    basename = normalized.rsplit("/", 1)[-1]
+    if basename.endswith(".py"):
+        basename = basename[:-3]
+    if not basename:
+        return set()
+    canonical = _normalized_project_name(basename).replace("-", "_")
+    return {
+        basename.casefold(),
+        basename.casefold().replace("-", "_"),
+        canonical,
+    }
+
+
+def _entry_lookup_keys(path: Path) -> set[str]:
+    name = path.stem if path.is_file() else path.name
+    canonical = _normalized_project_name(name).replace("-", "_")
+    return {
+        name.casefold(),
+        name.casefold().replace("-", "_"),
+        canonical,
+    }
+
+
+def _top_level_declared_entries(root: Path) -> list[str]:
+    entries: list[str] = []
+    try:
+        top_level_files = sorted(root.rglob("top_level.txt"))
+    except OSError:
+        return entries
+    for path in top_level_files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            normalized = line.strip().replace("\\", "/").strip("/")
+            if not normalized:
+                continue
+            entries.append(normalized)
+    return _unique(entries)
+
+
+def _top_level_python_entries(root: Path) -> list[Path]:
+    entries: list[Path] = []
+    try:
+        children = sorted(root.iterdir(), key=lambda path: path.name.casefold())
+    except OSError:
+        return entries
+    for child in children:
+        if child.name.startswith("."):
+            continue
+        if child.is_dir():
+            if child.name.endswith((".egg-info", ".dist-info", "__pycache__")):
+                continue
+            if (child / "__init__.py").exists():
+                entries.append(child)
+            continue
+        if child.suffix == ".py" and child.stem not in {"setup", "conftest"}:
+            entries.append(child)
+    return entries
+
+
+def _resolve_declared_top_level_match(extracted_root: Path, selector: str) -> Path | None:
+    selector_keys = _selector_lookup_keys(selector)
+    matches: list[Path] = []
     for root in _candidate_source_roots(extracted_root):
-        direct = root / normalized
-        if direct.exists():
-            return direct
+        for entry in _top_level_declared_entries(root):
+            candidate = root / entry
+            if candidate.exists() and (_entry_lookup_keys(candidate) & selector_keys):
+                matches.append(candidate)
+            file_candidate = root / f"{entry}.py"
+            if file_candidate.exists() and (_entry_lookup_keys(file_candidate) & selector_keys):
+                matches.append(file_candidate)
+    unique_matches = _unique([str(path.resolve()) for path in matches])
+    if len(unique_matches) != 1:
+        return None
+    return Path(unique_matches[0])
 
-    if "/" not in normalized:
-        for root in _candidate_source_roots(extracted_root):
-            file_candidate = root / f"{normalized}.py"
-            if file_candidate.exists():
-                return file_candidate
+
+def _resolve_unique_top_level_python_entry(extracted_root: Path, selector: str) -> Path | None:
+    selector_keys = _selector_lookup_keys(selector)
+    matches: list[Path] = []
+    for root in _candidate_source_roots(extracted_root):
+        for entry in _top_level_python_entries(root):
+            if _entry_lookup_keys(entry) & selector_keys:
+                matches.append(entry)
+        if len(matches) > 1:
+            break
+    unique_matches = _unique([str(path.resolve()) for path in matches])
+    if len(unique_matches) != 1:
+        return None
+    return Path(unique_matches[0])
+
+
+def _resolve_unique_basename_match(extracted_root: Path, basename: str) -> Path | None:
+    matches: list[Path] = []
+    for root in _candidate_source_roots(extracted_root):
+        try:
+            for path in root.rglob(basename):
+                if path.name != basename:
+                    continue
+                matches.append(path)
+                if len(matches) > 1:
+                    return None
+        except OSError:
+            continue
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _resolve_single_source_entry(extracted_root: Path, selector: str) -> Path:
+    variants = _selector_variants(selector)
+    candidate_roots = _candidate_source_roots(extracted_root)
+
+    for normalized in variants:
+        explicit = extracted_root / normalized
+        if explicit.exists():
+            return explicit
+
+        for root in candidate_roots:
+            direct = root / normalized
+            if direct.exists():
+                return direct
+
+        if "/" not in normalized:
+            for root in candidate_roots:
+                file_candidate = root / f"{normalized}.py"
+                if file_candidate.exists():
+                    return file_candidate
+                if "-" in normalized:
+                    dashed_candidate = root / normalized.replace("-", "_")
+                    if dashed_candidate.exists():
+                        return dashed_candidate
+                if "_" in normalized:
+                    underscored_candidate = root / normalized.replace("_", "-")
+                    if underscored_candidate.exists():
+                        return underscored_candidate
+
+    if all("/" not in variant for variant in variants):
+        basename = variants[-1].rsplit("/", 1)[-1]
+        unique_match = _resolve_unique_basename_match(extracted_root, basename)
+        if unique_match is not None:
+            return unique_match
+        declared_top_level = _resolve_declared_top_level_match(extracted_root, selector)
+        if declared_top_level is not None:
+            return declared_top_level
+        unique_top_level = _resolve_unique_top_level_python_entry(extracted_root, selector)
+        if unique_top_level is not None:
+            return unique_top_level
 
     raise RuntimeError(f"could not resolve {selector!r} inside extracted source tree {extracted_root}")
+
+
+def _resolve_source_entry(extracted_root: Path, selector: str) -> Path:
+    alternatives = [part.strip() for part in selector.split("||") if part.strip()]
+    if not alternatives:
+        alternatives = [selector]
+    last_error: RuntimeError | None = None
+    for alternative in alternatives:
+        try:
+            return _resolve_single_source_entry(extracted_root, alternative)
+        except RuntimeError as exc:
+            last_error = exc
+    assert last_error is not None
+    raise last_error
 
 
 def _materialize_source_mapping(
     context: LibraryHookContext,
     source_mapping: dict[str, str],
     resolver: Callable[[str], Path],
+    ignore_patterns: list[str] | None = None,
 ) -> None:
     for selector, target_rel in source_mapping.items():
         src = resolver(selector)
         dst = context.source_root / _normalized_relpath(target_rel)
         started = time.monotonic()
         context.log(f"materializing {selector} -> {target_rel}")
-        _copy_entry(src, dst)
+        _copy_entry(src, dst, ignore_patterns)
         context.log(f"materialized {selector} -> {target_rel} in {time.monotonic() - started:.1f}s")
 
 
@@ -645,52 +1085,110 @@ def _build_pypi_source_hook(
     integration: LibraryIntegration,
     project_name: str,
     source_mapping: dict[str, str],
+    source_ignore_patterns: list[str] | None = None,
 ) -> Hook:
     normalized = _normalized_project_name(project_name)
 
     def prepare_source(context: LibraryHookContext) -> None:
         release_version = integration.release_version
         target_version = Version(".".join(str(part) for part in context.version_info))
-        cached_archive_path: Path | None = None
+        candidate_archives: list[tuple[str, Path, str | None, bool]] = []
         if release_version is not None:
-            cached_archive_path = _find_cached_pypi_archive(context.download_cache_root, normalized, release_version)
-            if cached_archive_path is not None:
-                context.log(f"reusing cached {project_name} {release_version} archive without refreshing PyPI metadata")
-                resolved_release_version = release_version
-                archive_path = cached_archive_path
+            cached_archive_paths = _find_cached_pypi_archives(
+                context.download_cache_root,
+                normalized,
+                release_version,
+                target_version,
+            )
+            if cached_archive_paths:
+                candidate_archives.extend(
+                    (release_version, archive_path, None, True) for archive_path in cached_archive_paths
+                )
             else:
-                resolved_release_version, file_info = _select_pypi_file(
+                for resolved_release_version, file_info in _iter_pypi_distribution_candidates(
                     project_name,
                     target_version,
                     release_version,
-                )
-                filename = file_info["filename"]
-                url = file_info["url"]
-                archive_path = context.download_cache_root / "pypi" / normalized / resolved_release_version / filename
+                ):
+                    filename = file_info["filename"]
+                    archive_path = (
+                        context.download_cache_root / "pypi" / normalized / resolved_release_version / filename
+                    )
+                    candidate_archives.append((resolved_release_version, archive_path, file_info["url"], False))
         else:
-            resolved_release_version, file_info = _select_pypi_file(
+            discovered_candidates = _iter_pypi_distribution_candidates(
                 project_name,
                 target_version,
                 release_version,
             )
-            filename = file_info["filename"]
-            url = file_info["url"]
-            archive_path = context.download_cache_root / "pypi" / normalized / resolved_release_version / filename
+            if discovered_candidates:
+                newest_version = discovered_candidates[0][0]
+                discovered_candidates = [
+                    (resolved_release_version, file_info)
+                    for resolved_release_version, file_info in discovered_candidates
+                    if resolved_release_version == newest_version
+                ]
+            for resolved_release_version, file_info in discovered_candidates:
+                filename = file_info["filename"]
+                archive_path = context.download_cache_root / "pypi" / normalized / resolved_release_version / filename
+                candidate_archives.append((resolved_release_version, archive_path, file_info["url"], archive_path.exists()))
 
-        extract_root = context.work_cache_root / "pypi" / normalized / resolved_release_version / "extracted"
+        if not candidate_archives:
+            raise RuntimeError(
+                f"could not find a compatible PyPI distribution artifact for {project_name!r}"
+                + (
+                    f" release {release_version!r}"
+                    if release_version is not None
+                    else ""
+                )
+                + f" and target Python {target_version}"
+            )
 
-        if not archive_path.exists():
-            context.log(f"downloading {project_name} {resolved_release_version} from PyPI")
-            _download_file(url, archive_path)
-        elif cached_archive_path is None:
-            context.log(f"reusing cached {project_name} {resolved_release_version} archive")
+        failures: list[str] = []
+        for resolved_release_version, archive_path, url, cached in candidate_archives:
+            extract_root = (
+                context.work_cache_root
+                / "pypi"
+                / normalized
+                / resolved_release_version
+                / "extracted"
+                / _safe_cache_component(archive_path.name)
+            )
 
-        extracted_root = _extract_archive(archive_path, extract_root, context.log)
-        context.log(f"using {project_name} {resolved_release_version} source from {extracted_root}")
-        _materialize_source_mapping(
-            context,
-            source_mapping,
-            lambda selector: _resolve_source_entry(extracted_root, selector),
+            if not archive_path.exists():
+                context.log(f"downloading {project_name} {resolved_release_version} from PyPI")
+                assert url is not None
+                _download_file(url, archive_path)
+            elif cached:
+                context.log(
+                    f"reusing cached {project_name} {resolved_release_version} archive without refreshing PyPI metadata"
+                )
+            else:
+                context.log(f"reusing cached {project_name} {resolved_release_version} archive")
+
+            try:
+                extracted_root = _extract_archive(archive_path, extract_root, context.log)
+                context.log(f"using {project_name} {resolved_release_version} source from {extracted_root}")
+                _materialize_source_mapping(
+                    context,
+                    source_mapping,
+                    lambda selector: _resolve_source_entry(extracted_root, selector),
+                    source_ignore_patterns,
+                )
+                return
+            except RuntimeError as exc:
+                failure = f"{archive_path.name}: {exc}"
+                failures.append(failure)
+                context.log(f"distribution candidate failed for {project_name} {resolved_release_version}: {failure}")
+
+        raise RuntimeError(
+            f"all compatible PyPI distribution artifacts failed for {project_name!r}"
+            + (
+                f" release {release_version!r}"
+                if release_version is not None
+                else ""
+            )
+            + f": {'; '.join(failures)}"
         )
 
     prepare_source.__name__ = f"prepare_{normalized}_source"
@@ -702,6 +1200,7 @@ def _build_github_source_hook(
     ref: str,
     ref_kind: str,
     source_mapping: dict[str, str],
+    source_ignore_patterns: list[str] | None = None,
     archive_url_template: str | None = None,
 ) -> Hook:
     normalized_repo = _safe_cache_component(repo.replace("/", "__"))
@@ -742,6 +1241,7 @@ def _build_github_source_hook(
             context,
             source_mapping,
             lambda selector: _resolve_source_entry(extracted_root, selector),
+            source_ignore_patterns,
         )
 
     prepare_source.__name__ = f"prepare_{normalized_repo}_source"
@@ -757,6 +1257,7 @@ def pypi_library(
     auto_resolve_dependencies: bool = True,
     source_entries: list[str] | None = None,
     source_mapping: dict[str, str] | None = None,
+    source_ignore_patterns: list[str] | None = None,
     overlay_entries: list[str] | None = None,
     python_packages: list[str] | None = None,
     static_library_projects_release_x64: list[str] | None = None,
@@ -802,13 +1303,14 @@ def pypi_library(
         staged_static_libraries_release_x64=list(staged_static_libraries_release_x64 or []),
         python_link_dependencies_release_x64=list(python_link_dependencies_release_x64 or []),
         python_link_wholearchive_release_x64=list(python_link_wholearchive_release_x64 or []),
+        source_ignore_patterns=list(source_ignore_patterns or []),
         prepare_source_hooks=[],
         pre_patch_hooks=list(pre_patch_hooks or []),
         post_patch_hooks=list(post_patch_hooks or []),
         pre_build_hooks=list(pre_build_hooks or []),
     )
     integration.prepare_source_hooks = [
-        _build_pypi_source_hook(integration, project_name or name, resolved_mapping),
+        _build_pypi_source_hook(integration, project_name or name, resolved_mapping, integration.source_ignore_patterns),
         *(prepare_source_hooks or []),
     ]
     return integration
@@ -825,6 +1327,7 @@ def github_library(
     auto_resolve_dependencies: bool = False,
     source_entries: list[str] | None = None,
     source_mapping: dict[str, str] | None = None,
+    source_ignore_patterns: list[str] | None = None,
     overlay_entries: list[str] | None = None,
     python_packages: list[str] | None = None,
     static_library_projects_release_x64: list[str] | None = None,
@@ -870,8 +1373,9 @@ def github_library(
         staged_static_libraries_release_x64=list(staged_static_libraries_release_x64 or []),
         python_link_dependencies_release_x64=list(python_link_dependencies_release_x64 or []),
         python_link_wholearchive_release_x64=list(python_link_wholearchive_release_x64 or []),
+        source_ignore_patterns=list(source_ignore_patterns or []),
         prepare_source_hooks=[
-            _build_github_source_hook(repo, ref, ref_kind, resolved_mapping, archive_url_template),
+            _build_github_source_hook(repo, ref, ref_kind, resolved_mapping, source_ignore_patterns, archive_url_template),
             *(prepare_source_hooks or []),
         ],
         pre_patch_hooks=list(pre_patch_hooks or []),
@@ -901,6 +1405,7 @@ def simple_library(
     auto_resolve_dependencies: bool | None = None,
     source_entries: list[str] | None = None,
     source_mapping: dict[str, str] | None = None,
+    source_ignore_patterns: list[str] | None = None,
     overlay_entries: list[str] | None = None,
     python_packages: list[str] | None = None,
     materialized_paths: list[str] | None = None,
@@ -926,6 +1431,7 @@ def simple_library(
         "dependencies": dependencies,
         "source_entries": source_entries,
         "source_mapping": resolved_mapping,
+        "source_ignore_patterns": source_ignore_patterns,
         "overlay_entries": passthrough_overlay_entries,
         "python_packages": python_packages,
         "materialized_paths": materialized_paths,
@@ -995,6 +1501,7 @@ def _integration_from_catalog_entry(entry: dict) -> LibraryIntegration:
         "auto_resolve_dependencies",
         "source_entries",
         "source_mapping",
+        "source_ignore_patterns",
         "overlay_entries",
         "python_packages",
         "materialized_paths",
