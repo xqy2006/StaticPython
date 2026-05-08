@@ -626,6 +626,20 @@ def _select_pypi_file(
     )
 
 
+def _effective_pypi_release_version(
+    project_name: str,
+    target_version: Version,
+    release_version: str | None,
+) -> str | None:
+    if release_version is not None:
+        return release_version
+
+    candidates = _iter_pypi_distribution_candidates(project_name, target_version, None)
+    if not candidates:
+        return None
+    return candidates[0][0]
+
+
 def _find_cached_pypi_archive(
     download_cache_root: Path,
     normalized_project_name: str,
@@ -684,6 +698,44 @@ def _find_cached_pypi_archives(
             target_version,
         ),
     )
+
+
+def _candidate_pypi_archives(
+    download_cache_root: Path,
+    project_name: str,
+    target_version: Version,
+    release_version: str | None,
+) -> list[tuple[str, Path, str | None, bool]]:
+    normalized = _normalized_project_name(project_name)
+    if release_version is not None:
+        cached_archive_paths = _find_cached_pypi_archives(
+            download_cache_root,
+            normalized,
+            release_version,
+            target_version,
+        )
+        if cached_archive_paths:
+            return [(release_version, path, None, True) for path in cached_archive_paths]
+
+    discovered_candidates = _iter_pypi_distribution_candidates(
+        project_name,
+        target_version,
+        release_version,
+    )
+    if release_version is None and discovered_candidates:
+        newest_version = discovered_candidates[0][0]
+        discovered_candidates = [
+            (resolved_release_version, file_info)
+            for resolved_release_version, file_info in discovered_candidates
+            if resolved_release_version == newest_version
+        ]
+
+    candidates: list[tuple[str, Path, str | None, bool]] = []
+    for resolved_release_version, file_info in discovered_candidates:
+        filename = file_info["filename"]
+        archive_path = download_cache_root / "pypi" / normalized / resolved_release_version / filename
+        candidates.append((resolved_release_version, archive_path, file_info["url"], False))
+    return candidates
 
 
 def _resolve_extracted_root(destination_root: Path) -> Path:
@@ -1092,46 +1144,12 @@ def _build_pypi_source_hook(
     def prepare_source(context: LibraryHookContext) -> None:
         release_version = integration.release_version
         target_version = Version(".".join(str(part) for part in context.version_info))
-        candidate_archives: list[tuple[str, Path, str | None, bool]] = []
-        if release_version is not None:
-            cached_archive_paths = _find_cached_pypi_archives(
-                context.download_cache_root,
-                normalized,
-                release_version,
-                target_version,
-            )
-            if cached_archive_paths:
-                candidate_archives.extend(
-                    (release_version, archive_path, None, True) for archive_path in cached_archive_paths
-                )
-            else:
-                for resolved_release_version, file_info in _iter_pypi_distribution_candidates(
-                    project_name,
-                    target_version,
-                    release_version,
-                ):
-                    filename = file_info["filename"]
-                    archive_path = (
-                        context.download_cache_root / "pypi" / normalized / resolved_release_version / filename
-                    )
-                    candidate_archives.append((resolved_release_version, archive_path, file_info["url"], False))
-        else:
-            discovered_candidates = _iter_pypi_distribution_candidates(
-                project_name,
-                target_version,
-                release_version,
-            )
-            if discovered_candidates:
-                newest_version = discovered_candidates[0][0]
-                discovered_candidates = [
-                    (resolved_release_version, file_info)
-                    for resolved_release_version, file_info in discovered_candidates
-                    if resolved_release_version == newest_version
-                ]
-            for resolved_release_version, file_info in discovered_candidates:
-                filename = file_info["filename"]
-                archive_path = context.download_cache_root / "pypi" / normalized / resolved_release_version / filename
-                candidate_archives.append((resolved_release_version, archive_path, file_info["url"], archive_path.exists()))
+        candidate_archives = _candidate_pypi_archives(
+            context.download_cache_root,
+            project_name,
+            target_version,
+            release_version,
+        )
 
         if not candidate_archives:
             raise RuntimeError(
@@ -1608,7 +1626,12 @@ def _pypi_requires_dist(
     target_version: Version,
 ) -> list[str]:
     project_name = integration.project_name or integration.name
-    payload = _load_pypi_release_payload(project_name, integration.release_version)
+    effective_release_version = _effective_pypi_release_version(
+        project_name,
+        target_version,
+        integration.release_version,
+    )
+    payload = _load_pypi_release_payload(project_name, effective_release_version)
     info = payload.get("info", {})
     raw_requirements = info.get("requires_dist") or []
     if not raw_requirements:

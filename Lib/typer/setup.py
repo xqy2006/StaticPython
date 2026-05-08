@@ -2,54 +2,42 @@ from packaging.version import Version
 
 from libs import (
     LibraryIntegration,
+    _candidate_pypi_archives,
     _copy_entry,
     _download_file,
     _extract_archive,
-    _find_cached_pypi_archives,
-    _iter_pypi_distribution_candidates,
+    _effective_pypi_release_version,
     _normalized_project_name,
     _resolve_source_entry,
 )
 
 
-def _candidate_archives(context, project_name: str, normalized: str, release_version: str) -> list[tuple[str, object, str | None, bool]]:
+def _candidate_archives(
+    context,
+    project_name: str,
+    release_version: str | None,
+) -> list[tuple[str, object, str | None, bool]]:
     target_version = Version(".".join(str(part) for part in context.version_info))
-    cached_archive_paths = _find_cached_pypi_archives(
+    return _candidate_pypi_archives(
         context.download_cache_root,
-        normalized,
-        release_version,
-        target_version,
-    )
-    if cached_archive_paths:
-        return [(release_version, path, None, True) for path in cached_archive_paths]
-
-    candidates: list[tuple[str, object, str | None, bool]] = []
-    for resolved_release_version, file_info in _iter_pypi_distribution_candidates(
         project_name,
         target_version,
         release_version,
-    ):
-        archive_path = (
-            context.download_cache_root
-            / "pypi"
-            / normalized
-            / resolved_release_version
-            / file_info["filename"]
-        )
-        candidates.append((resolved_release_version, archive_path, file_info["url"], False))
-    return candidates
+    )
 
 
 def _prepare_typer_source(context) -> None:
     integration = LIBRARY_INTEGRATION
     release_version = integration.release_version
-    if release_version is None:
-        raise RuntimeError("typer integration requires release_version")
+    target_version = Version(".".join(str(part) for part in context.version_info))
+    effective_release_version = _effective_pypi_release_version("typer", target_version, release_version)
+    if effective_release_version is None:
+        raise RuntimeError(f"could not find a compatible PyPI distribution artifact for 'typer' and target Python {target_version}")
 
-    candidates = _candidate_archives(context, "typer", "typer", release_version)
+    candidates = _candidate_archives(context, "typer", release_version)
     # typer 0.12.x split the real library into typer-slim.
-    if Version(release_version) >= Version("0.12.dev1") and Version(release_version) < Version("0.13"):
-        candidates.extend(_candidate_archives(context, "typer-slim", "typer-slim", release_version))
+    if Version(effective_release_version) >= Version("0.12.dev1") and Version(effective_release_version) < Version("0.13"):
+        candidates.extend(_candidate_archives(context, "typer-slim", effective_release_version))
 
     failures: list[str] = []
     for resolved_release_version, archive_path, url, cached in candidates:
@@ -80,8 +68,9 @@ def _prepare_typer_source(context) -> None:
             failures.append(f"{archive_path.name}: {exc}")
             context.log(f"distribution candidate failed for typer {resolved_release_version}: {archive_path.name}: {exc}")
 
+    target_description = f"release {release_version!r}" if release_version is not None else "all releases"
     raise RuntimeError(
-        f"all compatible PyPI distribution artifacts failed for 'typer' release {release_version!r}: " + "; ".join(failures)
+        f"all compatible PyPI distribution artifacts failed for 'typer' {target_description}: " + "; ".join(failures)
     )
 
 

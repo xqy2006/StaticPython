@@ -2,12 +2,10 @@ from packaging.version import Version
 
 from libs import (
     LibraryIntegration,
+    _candidate_pypi_archives,
     _copy_entry,
     _download_file,
     _extract_archive,
-    _find_cached_pypi_archives,
-    _iter_pypi_distribution_candidates,
-    _normalized_project_name,
     _resolve_source_entry,
     read_text_file,
     write_source_text,
@@ -15,46 +13,13 @@ from libs import (
 
 
 def _candidate_archives(context, project_name: str, release_version: str | None) -> list[tuple[str, object, str | None, bool]]:
-    normalized = _normalized_project_name(project_name)
     target_version = Version(".".join(str(part) for part in context.version_info))
-    if release_version is not None:
-        cached_archive_paths = _find_cached_pypi_archives(
-            context.download_cache_root,
-            normalized,
-            release_version,
-            target_version,
-        )
-        if cached_archive_paths:
-            return [(release_version, path, None, True) for path in cached_archive_paths]
-
-        candidates: list[tuple[str, object, str | None, bool]] = []
-        for resolved_release_version, file_info in _iter_pypi_distribution_candidates(
-            project_name,
-            target_version,
-            release_version,
-        ):
-            archive_path = (
-                context.download_cache_root
-                / "pypi"
-                / normalized
-                / resolved_release_version
-                / file_info["filename"]
-            )
-            candidates.append((resolved_release_version, archive_path, file_info["url"], False))
-        return candidates
-
-    candidates = []
-    payload = _iter_pypi_distribution_candidates(project_name, target_version, None)
-    for resolved_release_version, file_info in payload:
-        archive_path = (
-            context.download_cache_root
-            / "pypi"
-            / normalized
-            / resolved_release_version
-            / file_info["filename"]
-        )
-        candidates.append((resolved_release_version, archive_path, file_info["url"], False))
-    return candidates
+    return _candidate_pypi_archives(
+        context.download_cache_root,
+        project_name,
+        target_version,
+        release_version,
+    )
 
 
 def _copy_colorama_package(context, extracted_root, target_release_version: str) -> None:
@@ -106,8 +71,9 @@ def _prepare_colorama_source(context) -> None:
             failures.append(f"{archive_path.name}: {exc}")
             context.log(f"distribution candidate failed for colorama {resolved_release_version}: {archive_path.name}: {exc}")
 
+    target_description = f"release {release_version!r}" if release_version is not None else "all releases"
     raise RuntimeError(
-        f"all compatible PyPI distribution artifacts failed for 'colorama' release {release_version!r}: "
+        f"all compatible PyPI distribution artifacts failed for 'colorama' {target_description}: "
         + "; ".join(failures)
     )
 

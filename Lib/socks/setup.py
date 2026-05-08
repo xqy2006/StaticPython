@@ -2,14 +2,27 @@ from packaging.version import Version
 
 from libs import (
     LibraryIntegration,
+    _candidate_pypi_archives,
     _copy_entry,
     _download_file,
     _extract_archive,
-    _find_cached_pypi_archives,
-    _iter_pypi_distribution_candidates,
     _normalized_project_name,
     _resolve_source_entry,
 )
+
+
+def _candidate_archives(
+    context,
+    project_name: str,
+    release_version: str | None,
+) -> list[tuple[str, object, str | None, bool]]:
+    target_version = Version(".".join(str(part) for part in context.version_info))
+    return _candidate_pypi_archives(
+        context.download_cache_root,
+        project_name,
+        target_version,
+        release_version,
+    )
 
 
 def _prepare_socks_source(context) -> None:
@@ -17,32 +30,7 @@ def _prepare_socks_source(context) -> None:
     project_name = integration.project_name or integration.name
     normalized = _normalized_project_name(project_name)
     release_version = integration.release_version
-    target_version = Version(".".join(str(part) for part in context.version_info))
-
-    candidate_archives: list[tuple[str, object, str | None, bool]] = []
-    if release_version is not None:
-        cached_archive_paths = _find_cached_pypi_archives(
-            context.download_cache_root,
-            normalized,
-            release_version,
-            target_version,
-        )
-        if cached_archive_paths:
-            candidate_archives.extend((release_version, path, None, True) for path in cached_archive_paths)
-        else:
-            for resolved_release_version, file_info in _iter_pypi_distribution_candidates(
-                project_name,
-                target_version,
-                release_version,
-            ):
-                archive_path = (
-                    context.download_cache_root
-                    / "pypi"
-                    / normalized
-                    / resolved_release_version
-                    / file_info["filename"]
-                )
-                candidate_archives.append((resolved_release_version, archive_path, file_info["url"], False))
+    candidate_archives = _candidate_archives(context, project_name, release_version)
 
     failures: list[str] = []
     for resolved_release_version, archive_path, url, cached in candidate_archives:
@@ -78,8 +66,9 @@ def _prepare_socks_source(context) -> None:
             failures.append(f"{archive_path.name}: {exc}")
             context.log(f"distribution candidate failed for {project_name} {resolved_release_version}: {archive_path.name}: {exc}")
 
+    target_description = f"release {release_version!r}" if release_version is not None else "all releases"
     raise RuntimeError(
-        f"all compatible PyPI distribution artifacts failed for {project_name!r} release {release_version!r}: "
+        f"all compatible PyPI distribution artifacts failed for {project_name!r} {target_description}: "
         + "; ".join(failures)
     )
 

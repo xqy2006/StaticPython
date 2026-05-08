@@ -2,11 +2,10 @@ from packaging.version import Version
 
 from libs import (
     LibraryIntegration,
+    _candidate_pypi_archives,
     _copy_entry,
     _download_file,
     _extract_archive,
-    _find_cached_pypi_archives,
-    _iter_pypi_distribution_candidates,
     _normalized_project_name,
     _resolve_source_entry,
 )
@@ -19,45 +18,12 @@ def _prepare_rfc3986_validator_source(context) -> None:
     release_version = integration.release_version
 
     target_version = Version(".".join(str(part) for part in context.version_info))
-    if release_version is not None:
-        cached_archive_paths = _find_cached_pypi_archives(
-            context.download_cache_root,
-            normalized,
-            release_version,
-            target_version,
-        )
-        if cached_archive_paths:
-            candidates = [(release_version, path, None, True) for path in cached_archive_paths]
-        else:
-            candidates = []
-            for resolved_release_version, file_info in _iter_pypi_distribution_candidates(
-                project_name,
-                target_version,
-                release_version,
-            ):
-                archive_path = (
-                    context.download_cache_root
-                    / "pypi"
-                    / normalized
-                    / resolved_release_version
-                    / file_info["filename"]
-                )
-                candidates.append((resolved_release_version, archive_path, file_info["url"], False))
-    else:
-        candidates = []
-        for resolved_release_version, file_info in _iter_pypi_distribution_candidates(
-            project_name,
-            target_version,
-            None,
-        ):
-            archive_path = (
-                context.download_cache_root
-                / "pypi"
-                / normalized
-                / resolved_release_version
-                / file_info["filename"]
-            )
-            candidates.append((resolved_release_version, archive_path, file_info["url"], False))
+    candidates = _candidate_pypi_archives(
+        context.download_cache_root,
+        project_name,
+        target_version,
+        release_version,
+    )
 
     # PyPI sdist for 0.1.0 is missing the real module file; fall back to the upstream tag archive.
     if release_version in {None, "0.1.0"}:
@@ -109,8 +75,9 @@ def _prepare_rfc3986_validator_source(context) -> None:
                 f"distribution candidate failed for {project_name} {resolved_release_version}: {archive_path.name}: {exc}"
             )
 
+    target_description = f"release {release_version!r}" if release_version is not None else "all releases"
     raise RuntimeError(
-        f"all compatible source artifacts failed for {project_name!r} release {release_version!r}: "
+        f"all compatible source artifacts failed for {project_name!r} {target_description}: "
         + "; ".join(failures)
     )
 
