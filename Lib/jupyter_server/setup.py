@@ -5,6 +5,7 @@ import re
 
 from libs import (
     pypi_library,
+    replace_function_block_once,
     replace_regex_once,
     replace_text_once,
     source_path,
@@ -155,48 +156,88 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
 
     def patch_serverapp(text: str) -> str:
         if "_staticpython_template_dict_for_package" not in text:
-            text = replace_regex_once(
-                text,
-                r"(?m)^from jinja2 import ([^\n]+)\n",
-                "from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader\n"
-                "from jupyter_server._staticpython_resources import resource_text as _staticpython_resource_text\n"
-                "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
-                label="jupyter_server serverapp jinja imports",
-            )
+            if "from jinja2 import Environment, FileSystemLoader\n" in text:
+                text = replace_text_once(
+                    text,
+                    "from jinja2 import Environment, FileSystemLoader\n",
+                    "from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader\n"
+                    "from jupyter_server._staticpython_resources import resource_text as _staticpython_resource_text\n"
+                    "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
+                    label="jupyter_server serverapp jinja imports",
+                )
+            else:
+                text = replace_regex_once(
+                    text,
+                    r"(?m)^from jinja2 import ([^\n]+)\n",
+                    "from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader\n"
+                    "from jupyter_server._staticpython_resources import resource_text as _staticpython_resource_text\n"
+                    "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
+                    label="jupyter_server serverapp jinja imports",
+                )
         if "ChoiceLoader([" not in text and "FileSystemLoader(template_path)" in text:
-            text, count = re.subn(
-                r"(?ms)^(?P<indent>[ \t]*)env = Environment\(\s*(?:# noqa(?:\[S701\]|: ?S701))?\s*loader\s*=\s*FileSystemLoader\(template_path\)\s*,\s*extensions\s*=\s*\[(?:'|\")jinja2\.ext\.i18n(?:'|\")\]\s*,\s*\*\*jenv_opt\s*\)\s*",
-                (
-                    "\\g<indent>env = Environment(  # noqa[S701]\n"
-                    "\\g<indent>    loader=ChoiceLoader([\n"
-                    "\\g<indent>        DictLoader(_staticpython_template_dict_for_package(\"jupyter_server\")),\n"
-                    "\\g<indent>        FileSystemLoader(template_path),\n"
-                    "\\g<indent>    ]),\n"
-                    "\\g<indent>    extensions=[\"jinja2.ext.i18n\"],\n"
-                    "\\g<indent>    **jenv_opt,\n"
-                    "\\g<indent>)\n"
-                ),
-                text,
-                count=1,
+            exact_loader_block = (
+                "        env = Environment(  # noqa[S701]\n"
+                "            loader=FileSystemLoader(template_path), extensions=[\"jinja2.ext.i18n\"], **jenv_opt\n"
+                "        )\n"
             )
-            if count != 1:
-                raise RuntimeError("expected snippet not found in jupyter_server serverapp embedded template loader")
+            replacement_loader_block = (
+                "        env = Environment(  # noqa[S701]\n"
+                "            loader=ChoiceLoader([\n"
+                "                DictLoader(_staticpython_template_dict_for_package(\"jupyter_server\")),\n"
+                "                FileSystemLoader(template_path),\n"
+                "            ]),\n"
+                "            extensions=[\"jinja2.ext.i18n\"],\n"
+                "            **jenv_opt,\n"
+                "        )\n"
+            )
+            if exact_loader_block in text:
+                text = replace_text_once(
+                    text,
+                    exact_loader_block,
+                    replacement_loader_block,
+                    label="jupyter_server serverapp embedded template loader",
+                )
+            else:
+                text = replace_regex_once(
+                    text,
+                    r"(?m)^        env = Environment\([^\n]*\n"
+                    r"^            loader=FileSystemLoader\(template_path\), extensions=\[(?:'|\")jinja2\.ext\.i18n(?:'|\")\], \*\*jenv_opt\s*\n"
+                    r"^        \)\n",
+                    replacement_loader_block,
+                    label="jupyter_server serverapp embedded template loader",
+                    flags=re.MULTILINE,
+                )
         if (
             has_event_schema_resources
             and "register_event_schema(schema_text if schema_text is not None else schema_path)" not in text
         ):
-            text, count = re.subn(
-                r"(?ms)^(?P<indent>[ \t]*)schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n(?:(?P=indent)#.*\n|\s*#.*\n)*\s*self\.event_logger\.register_event_schema\(schema_path\)\n",
-                (
-                    "\\g<indent>schema_text = _staticpython_resource_text(\"jupyter_server\", f\"event_schemas/{rel_schema_path}\")\n"
-                    "\\g<indent>schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
-                    "\\g<indent>self.event_logger.register_event_schema(schema_text if schema_text is not None else schema_path)\n"
-                ),
-                text,
-                count=1,
+            exact_schema_block = (
+                "            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
+                "            # Use this pathlib object to register the schema\n"
+                "            self.event_logger.register_event_schema(schema_path)\n"
             )
-            if count != 1:
-                raise RuntimeError("expected snippet not found in jupyter_server embedded event schema registration")
+            replacement_schema_block = (
+                "            schema_text = _staticpython_resource_text(\"jupyter_server\", f\"event_schemas/{rel_schema_path}\")\n"
+                "            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
+                "            self.event_logger.register_event_schema(schema_text if schema_text is not None else schema_path)\n"
+            )
+            if exact_schema_block in text:
+                text = replace_text_once(
+                    text,
+                    exact_schema_block,
+                    replacement_schema_block,
+                    label="jupyter_server embedded event schema registration",
+                )
+            else:
+                text = replace_regex_once(
+                    text,
+                    r"(?m)^            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
+                    r"^(?:            #.*\n)?"
+                    r"^            self\.event_logger\.register_event_schema\(schema_path\)\n",
+                    replacement_schema_block,
+                    label="jupyter_server embedded event schema registration",
+                    flags=re.MULTILINE,
+                )
         return text
 
     def patch_extension_application(text: str) -> str:
@@ -242,6 +283,13 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
                 + "from jupyter_server._staticpython_resources import resolve_resource_from_roots as _staticpython_resolve_resource_from_roots\n"
                 + text[end:]
             )
+        class_start = text.find("class FileFindHandler(")
+        if class_start == -1:
+            raise RuntimeError("expected snippet not found in jupyter_server FileFindHandler class")
+        class_end = text.find("\n\nclass ", class_start)
+        if class_end == -1:
+            class_end = len(text)
+        class_block = text[class_start:class_end]
         get_absolute_path_block = (
             "    @classmethod\n"
             "    def get_absolute_path(cls, roots, path):\n"
@@ -260,15 +308,13 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             "            return abspath\n"
             "\n"
         )
-        updated, count = re.subn(
-            r"(?ms)^    @classmethod\n    def get_absolute_path\(.*?(?=^    def validate_absolute_path\()",
+        class_block = replace_function_block_once(
+            class_block,
+            "get_absolute_path",
             get_absolute_path_block,
-            text,
-            count=1,
+            label="jupyter_server filefind embedded resource lookup",
+            next_name="validate_absolute_path",
         )
-        if count != 1:
-            raise RuntimeError("expected snippet not found in jupyter_server filefind embedded resource lookup")
-        text = updated
         validate_absolute_path_block = (
             "    def validate_absolute_path(self, root, absolute_path):\n"
             "        \"\"\"check if the file should be served (raises 404, 403, etc.)\"\"\"\n"
@@ -287,17 +333,6 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             "            raise web.HTTPError(404)\n"
             "        return abs_path\n"
             "\n"
-        )
-        updated, count = re.subn(
-            r"(?ms)^    def validate_absolute_path\(.*?(?=^def json_errors\()",
-            validate_absolute_path_block,
-            text,
-            count=1,
-        )
-        if count != 1:
-            raise RuntimeError("expected snippet not found in jupyter_server filefind embedded resource validation")
-        text = updated
-        addition = (
             "    @classmethod\n"
             "    def get_content(cls, abspath, start=None, end=None):\n"
             "        data = _staticpython_resource_bytes_for_path(abspath)\n"
@@ -322,8 +357,13 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             "        return super().get_modified_time()\n"
             "\n"
         )
-        if "def get_content(cls, abspath, start=None, end=None):\n        data = _staticpython_resource_bytes_for_path" not in text:
-            text = text.replace(validate_absolute_path_block, validate_absolute_path_block + addition, 1)
+        class_block = replace_function_block_once(
+            class_block,
+            "validate_absolute_path",
+            validate_absolute_path_block,
+            label="jupyter_server filefind embedded resource validation",
+        )
+        text = text[:class_start] + class_block + text[class_end:]
         return text
 
     if serverapp_path.exists():
