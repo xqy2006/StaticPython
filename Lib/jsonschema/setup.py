@@ -55,14 +55,15 @@ def embed_jsonschema_schemas(context) -> None:
             else:
                 raise RuntimeError("expected jsonschema import anchor for deepcopy")
         if "from ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n" not in text:
-            text, count = re.subn(
-                r"(?m)^(?P<indent>[ \t]*)(?:from importlib import resources|import importlib\.resources as resources|import importlib_resources as resources(?:\s+# type: ignore)?)\n",
-                "\\g<indent>\\g<0>\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n",
-                text,
-                count=1,
-            )
-            if count != 1:
-                raise RuntimeError("expected jsonschema resources import anchor")
+            if "\n\nclass " in text:
+                text = ensure_text_before(
+                    text,
+                    "\n\nclass ",
+                    "\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS",
+                    label="jsonschema static schema import",
+                )
+            else:
+                raise RuntimeError("expected jsonschema class anchor for static schema import")
         return replace_function_block_once(
             text,
             "load_schema",

@@ -42,6 +42,7 @@ def embed_jupyter_server_resources(context) -> None:
         for path in sorted(resource_dir.rglob("*"))
         if path.is_file()
     }
+    has_event_schema_resources = any(path.startswith("event_schemas/") for path in byte_resources)
 
     write_source_text(
         context,
@@ -163,29 +164,39 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
                 label="jupyter_server serverapp jinja imports",
             )
         if "ChoiceLoader([" not in text and "FileSystemLoader(template_path)" in text:
-            text = replace_regex_once(
+            text, count = re.subn(
+                r"(?ms)^(?P<indent>[ \t]*)env = Environment\(\s*(?:# noqa(?:\[S701\]|: ?S701))?\s*loader\s*=\s*FileSystemLoader\(template_path\)\s*,\s*extensions\s*=\s*\[(?:'|\")jinja2\.ext\.i18n(?:'|\")\]\s*,\s*\*\*jenv_opt\s*\)\s*",
+                (
+                    "\\g<indent>env = Environment(  # noqa[S701]\n"
+                    "\\g<indent>    loader=ChoiceLoader([\n"
+                    "\\g<indent>        DictLoader(_staticpython_template_dict_for_package(\"jupyter_server\")),\n"
+                    "\\g<indent>        FileSystemLoader(template_path),\n"
+                    "\\g<indent>    ]),\n"
+                    "\\g<indent>    extensions=[\"jinja2.ext.i18n\"],\n"
+                    "\\g<indent>    **jenv_opt,\n"
+                    "\\g<indent>)\n"
+                ),
                 text,
-                r"(?ms)^(\s*)env = Environment\(\s*(?:# noqa(?:\[S701\]|: ?S701))?\s*loader=FileSystemLoader\(template_path\),\s*extensions=\[(?:'|\")jinja2\.ext\.i18n(?:'|\")\],\s*\*\*jenv_opt\s*\)\n",
-                "        env = Environment(  # noqa[S701]\n"
-                "            loader=ChoiceLoader([\n"
-                "                DictLoader(_staticpython_template_dict_for_package(\"jupyter_server\")),\n"
-                "                FileSystemLoader(template_path),\n"
-                "            ]),\n"
-                "            extensions=[\"jinja2.ext.i18n\"],\n"
-                "            **jenv_opt,\n"
-                "        )\n",
-                label="jupyter_server serverapp embedded template loader",
+                count=1,
             )
-        text = re.sub(
-            r"(?ms)^(\s*)schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n\s*# Use this pathlib object to register the schema\n\s*self\.event_logger\.register_event_schema\(schema_path\)\n",
-            (
-                "            schema_text = _staticpython_resource_text(\"jupyter_server\", f\"event_schemas/{rel_schema_path}\")\n"
-                "            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
-                "            self.event_logger.register_event_schema(schema_text if schema_text is not None else schema_path)\n"
-            ),
-            text,
-            count=1,
-        )
+            if count != 1:
+                raise RuntimeError("expected snippet not found in jupyter_server serverapp embedded template loader")
+        if (
+            has_event_schema_resources
+            and "register_event_schema(schema_text if schema_text is not None else schema_path)" not in text
+        ):
+            text, count = re.subn(
+                r"(?ms)^(?P<indent>[ \t]*)schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n(?:(?P=indent)#.*\n|\s*#.*\n)*\s*self\.event_logger\.register_event_schema\(schema_path\)\n",
+                (
+                    "\\g<indent>schema_text = _staticpython_resource_text(\"jupyter_server\", f\"event_schemas/{rel_schema_path}\")\n"
+                    "\\g<indent>schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
+                    "\\g<indent>self.event_logger.register_event_schema(schema_text if schema_text is not None else schema_path)\n"
+                ),
+                text,
+                count=1,
+            )
+            if count != 1:
+                raise RuntimeError("expected snippet not found in jupyter_server embedded event schema registration")
         return text
 
     def patch_extension_application(text: str) -> str:

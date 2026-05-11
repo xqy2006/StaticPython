@@ -1,4 +1,12 @@
-from libs import replace_regex_once, replace_text_once, simple_library, source_path, transform_source_text, write_source_text
+from libs import (
+    replace_function_block_once,
+    replace_regex_once,
+    replace_text_once,
+    simple_library,
+    source_path,
+    transform_source_text,
+    write_source_text,
+)
 
 
 def patch_nbconvert_sources(context) -> None:
@@ -154,20 +162,76 @@ def _iter_exporter_entries():
 """,
             label="nbconvert embedded template conf loader",
         )
-        text = replace_regex_once(
+        text = replace_function_block_once(
             text,
-            r"(?ms)^(\s+)if not found_at_least_one:\n(\s+)paths = \"\\n\\t\"\.join\(root_dirs\)\n(\s+)msg = f\"No template sub-directory with name \{base_template!r\} found in the following paths:\\n\\t\{paths\}\"\n(\s+)raise ValueError\(msg\)\n",
-            "                if not found_at_least_one:\n"
-            "                    static_conf_text = _STATICPYTHON_TEMPLATE_CONFS.get(base_template)\n"
-            "                    if static_conf_text is not None or base_template in _STATICPYTHON_TEMPLATE_NAMES:\n"
-            "                        found_at_least_one = True\n"
-            "                        if static_conf_text is not None:\n"
-            "                            conf = recursive_update(json.loads(static_conf_text), conf)\n"
-            "                if not found_at_least_one:\n"
-            "                    paths = \"\\n\\t\".join(root_dirs)\n"
-            "                    msg = f\"No template sub-directory with name {base_template!r} found in the following paths:\\n\\t{paths}\"\n"
-            "                    raise ValueError(msg)\n",
+            "get_template_names",
+            """    def get_template_names(self):  # noqa
+        \"\"\"Finds a list of template names where each successive template name is the base template\"\"\"
+        template_names = []
+        root_dirs = self.get_prefix_root_dirs()
+        base_template = self.template_name
+        merged_conf: dict = {}  # the configuration once all conf files are merged
+        while base_template is not None:
+            template_names.append(base_template)
+            conf: dict = {}
+            found_at_least_one = False
+            for base_dir in self.extra_template_basedirs:
+                template_dir = os.path.join(base_dir, base_template)
+                if os.path.exists(template_dir):
+                    found_at_least_one = True
+                conf_file = os.path.join(template_dir, "conf.json")
+                if os.path.exists(conf_file):
+                    with open(conf_file) as f:
+                        conf = recursive_update(json.load(f), conf)
+            for root_dir in root_dirs:
+                template_dir = os.path.join(root_dir, "nbconvert", "templates", base_template)
+                if os.path.exists(template_dir):
+                    found_at_least_one = True
+                conf_file = os.path.join(template_dir, "conf.json")
+                if os.path.exists(conf_file):
+                    with open(conf_file) as f:
+                        conf = recursive_update(json.load(f), conf)
+            if not found_at_least_one:
+                # Check for backwards compatibility template names
+                for root_dir in root_dirs:
+                    compatibility_file = base_template + ".tpl"
+                    compatibility_path = os.path.join(
+                        root_dir, "nbconvert", "templates", "compatibility", compatibility_file
+                    )
+                    if os.path.exists(compatibility_path):
+                        found_at_least_one = True
+                        warnings.warn(
+                            f"5.x template name passed '{self.template_name}'. Use 'lab' or 'classic' for new template usage.",
+                            DeprecationWarning,
+                            stacklevel=2,
+                        )
+                        self.template_file = compatibility_file
+                        conf = self.get_compatibility_base_template_conf(base_template)
+                        self.template_name = conf.get("base_template")
+                        break
+                if not found_at_least_one:
+                    static_conf_text = _STATICPYTHON_TEMPLATE_CONFS.get(base_template)
+                    if static_conf_text is not None or base_template in _STATICPYTHON_TEMPLATE_NAMES:
+                        found_at_least_one = True
+                        if static_conf_text is not None:
+                            conf = recursive_update(json.loads(static_conf_text), conf)
+                if not found_at_least_one:
+                    paths = "\\n\\t".join(root_dirs)
+                    msg = f"No template sub-directory with name {base_template!r} found in the following paths:\\n\\t{paths}"
+                    raise ValueError(msg)
+            merged_conf = recursive_update(dict(conf), merged_conf)
+            base_template = conf.get("base_template")
+        conf = merged_conf
+        mimetypes = [mimetype for mimetype, enabled in conf.get("mimetypes", {}).items() if enabled]
+        if self.output_mimetype and self.output_mimetype not in mimetypes and mimetypes:
+            supported_mimetypes = "\\n\\t".join(mimetypes)
+            msg = f"Unsupported mimetype {self.output_mimetype!r} for template {self.template_name!r}, mimetypes supported are: \\n\\t{supported_mimetypes}"
+            raise ValueError(msg)
+        return template_names
+
+""",
             label="nbconvert embedded template name discovery",
+            next_name="get_prefix_root_dirs",
         )
         return replace_regex_once(
             text,

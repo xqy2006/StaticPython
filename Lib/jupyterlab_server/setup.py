@@ -196,49 +196,74 @@ def patch_jupyterlab_server_resources(context) -> None:
                 next_name="get_static_page_config",
             )
         elif "def get_federated_extensions(" in text:
-            updated, count = re.subn(
-                r'(?m)^(?P<indent>[ \t]*)federated_extensions = (?P<ctor>\{\}|dict\(\))\s*$',
-                (
-                    '    federated_extensions = dict()\n'
-                    '    static_extensions = []\n'
-                    '    try:\n'
-                    '        from notebook._staticpython_resources import FEDERATED_EXTENSIONS as static_extensions\n'
-                    '    except Exception:\n'
-                    '        static_extensions = []\n'
-                    '    for static_entry in static_extensions:\n'
-                    '        pkgdata = static_entry["package"]\n'
-                    '        ext_dir = static_entry.get("ext_dir", "")\n'
-                    '        ext_path = static_entry.get("ext_path", "")\n'
-                    '        if pkgdata["name"] in federated_extensions:\n'
-                    '            continue\n'
-                    '        data = dict(\n'
-                    '            name=pkgdata["name"],\n'
-                    '            version=pkgdata["version"],\n'
-                    '            ext_dir=ext_dir,\n'
-                    '            ext_path=ext_path,\n'
-                    '            is_local=False,\n'
-                    '            dependencies=pkgdata.get("dependencies", dict()),\n'
-                    '            jupyterlab=pkgdata.get("jupyterlab", dict()),\n'
-                    '        )\n'
-                    '        description = pkgdata.get("description")\n'
-                    '        if description is not None:\n'
-                    '            data["description"] = description\n'
-                    '        package_url = globals().get("get_package_url")\n'
-                    '        if callable(package_url):\n'
-                    '            try:\n'
-                    '                data["url"] = package_url(pkgdata)\n'
-                    '            except Exception:\n'
-                    '                pass\n'
-                    '        install_data = static_entry.get("install")\n'
-                    '        if install_data is not None:\n'
-                    '            data["install"] = install_data\n'
-                    '        federated_extensions[data["name"]] = data'
-                ),
+            text = replace_function_block_once(
                 text,
-                count=1,
+                "get_federated_extensions",
+                'def get_federated_extensions(labextensions_path):\n'
+                '    """Get the metadata about federated extensions."""\n'
+                '    federated_extensions = dict()\n'
+                '    static_extensions = []\n'
+                '    try:\n'
+                '        from notebook._staticpython_resources import FEDERATED_EXTENSIONS as static_extensions\n'
+                '    except Exception:\n'
+                '        static_extensions = []\n'
+                '    for static_entry in static_extensions:\n'
+                '        pkgdata = static_entry["package"]\n'
+                '        ext_dir = static_entry.get("ext_dir", "")\n'
+                '        ext_path = static_entry.get("ext_path", "")\n'
+                '        if pkgdata["name"] in federated_extensions:\n'
+                '            continue\n'
+                '        data = dict(\n'
+                '            name=pkgdata["name"],\n'
+                '            version=pkgdata["version"],\n'
+                '            ext_dir=ext_dir,\n'
+                '            ext_path=ext_path,\n'
+                '            is_local=False,\n'
+                '            dependencies=pkgdata.get("dependencies", dict()),\n'
+                '            jupyterlab=pkgdata.get("jupyterlab", dict()),\n'
+                '        )\n'
+                '        description = pkgdata.get("description")\n'
+                '        if description is not None:\n'
+                '            data["description"] = description\n'
+                '        package_url = globals().get("get_package_url")\n'
+                '        if callable(package_url):\n'
+                '            try:\n'
+                '                data["url"] = package_url(pkgdata)\n'
+                '            except Exception:\n'
+                '                pass\n'
+                '        install_data = static_entry.get("install")\n'
+                '        if install_data is not None:\n'
+                '            data["install"] = install_data\n'
+                '        federated_extensions[data["name"]] = data\n'
+                '    for ext_dir in labextensions_path:\n'
+                '        # extensions are either top-level directories, or two-deep in @org directories\n'
+                '        for ext_path in chain(\n'
+                '            iglob(pjoin(ext_dir, "[!@]*", "package.json")),\n'
+                '            iglob(pjoin(ext_dir, "@*", "*", "package.json")),\n'
+                '        ):\n'
+                '            with open(ext_path, encoding="utf-8") as fid:\n'
+                '                pkgdata = json.load(fid)\n'
+                '            if pkgdata["name"] not in federated_extensions:\n'
+                '                data = dict(\n'
+                '                    name=pkgdata["name"],\n'
+                '                    version=pkgdata["version"],\n'
+                '                    description=pkgdata.get("description", ""),\n'
+                '                    url=get_package_url(pkgdata),\n'
+                '                    ext_dir=ext_dir,\n'
+                '                    ext_path=osp.dirname(ext_path),\n'
+                '                    is_local=False,\n'
+                '                    dependencies=pkgdata.get("dependencies", dict()),\n'
+                '                    jupyterlab=pkgdata.get("jupyterlab", dict()),\n'
+                '                )\n'
+                '                install_path = osp.join(osp.dirname(ext_path), "install.json")\n'
+                '                if osp.exists(install_path):\n'
+                '                    with open(install_path, encoding="utf-8") as fid:\n'
+                '                        data["install"] = json.load(fid)\n'
+                '                federated_extensions[data["name"]] = data\n'
+                '    return federated_extensions\n\n',
+                label="jupyterlab_server federated extension metadata fallback",
+                next_name="get_page_config",
             )
-            if count == 1:
-                text = updated
         if "def get_page_config(" in text and not is_modern_config:
             text = replace_function_block_once(
                 text,
@@ -342,33 +367,111 @@ def patch_jupyterlab_server_resources(context) -> None:
                 next_name="write_page_config",
             )
         elif "def get_page_config(" in text:
-            updated, count = re.subn(
-                r"(?ms)^(\s*)if app_settings_dir:\n\s*app_dir = osp\.dirname\(app_settings_dir\)\n\s*package_data_file = pjoin\(app_dir, \"static\", \"package\.json\"\)\n\s*if osp\.exists\(package_data_file\):\n\s*with open\(package_data_file, encoding=\"utf-8\"\) as fid:\n\s*app_data = json\.load\(fid\)\n\s*all_ext_data = app_data\[\"jupyterlab\"\]\.get\(\"extensionMetadata\", \{\}\)\n\s*for ext, ext_data in all_ext_data\.items\(\):\n\s*if ext in disabled_by_extensions_all:\n\s*continue\n\s*if ext_data\.get\(disabled_key\):\n\s*disabled_by_extensions_all\[ext\] = ext_data\[disabled_key\]\n",
-                (
-                    "    if app_settings_dir:\n"
-                    "        app_dir = osp.dirname(app_settings_dir)\n"
-                    "        package_data_file = pjoin(app_dir, \"static\", \"package.json\")\n"
-                    "        app_data = None\n"
-                    "        try:\n"
-                    "            from jupyterlab._staticpython_resources import STATIC_PACKAGE_DATA as app_data\n"
-                    "        except Exception:\n"
-                    "            app_data = None\n"
-                    "        if app_data is None and osp.exists(package_data_file):\n"
-                    "            with open(package_data_file, encoding=\"utf-8\") as fid:\n"
-                    "                app_data = json.load(fid)\n"
-                    "        if app_data is not None:\n"
-                    "            all_ext_data = app_data.get(\"jupyterlab\", {}).get(\"extensionMetadata\", {})\n"
-                    "            for ext, ext_data in all_ext_data.items():\n"
-                    "                if ext in disabled_by_extensions_all:\n"
-                    "                    continue\n"
-                    "                if ext_data.get(disabled_key):\n"
-                    "                    disabled_by_extensions_all[ext] = ext_data[disabled_key]\n"
-                ),
-                text,
-                count=1,
-            )
-            if count == 1:
-                text = updated
+            if "from jupyterlab._staticpython_resources import STATIC_PACKAGE_DATA as app_data" not in text:
+                text = replace_function_block_once(
+                    text,
+                    "get_page_config",
+                    'def get_page_config(labextensions_path, app_settings_dir=None, logger=None):\n'
+                    '    """Get the page config for the application handler."""\n'
+                    '    # Build up the full page config\n'
+                    '    page_config = {}\n'
+                    '\n'
+                    '    disabled_key = "disabledExtensions"\n'
+                    '\n'
+                    '    # Start with the app_settings_dir as lowest priority\n'
+                    '    if app_settings_dir:\n'
+                    '        app_page_config = pjoin(app_settings_dir, "page_config.json")\n'
+                    '        if osp.exists(app_page_config):\n'
+                    '            with open(app_page_config, encoding="utf-8") as fid:\n'
+                    '                data = json.load(fid)\n'
+                    '\n'
+                    '            # Convert lists to dicts\n'
+                    '            for key in [disabled_key, "deferredExtensions"]:\n'
+                    '                if key in data:\n'
+                    '                    data[key] = dict((key, True) for key in data[key])\n'
+                    '\n'
+                    '            recursive_update(page_config, data)\n'
+                    '\n'
+                    '    # Get the traitlets config\n'
+                    '    static_page_config = get_static_page_config(logger=logger, level="all")\n'
+                    '    recursive_update(page_config, static_page_config)\n'
+                    '\n'
+                    '    # Handle federated extensions that disable other extensions\n'
+                    '    disabled_by_extensions_all = dict()\n'
+                    '    extensions = page_config["federated_extensions"] = []\n'
+                    '\n'
+                    '    federated_exts = get_federated_extensions(labextensions_path)\n'
+                    '\n'
+                    '    # Ensure there is a disabled key\n'
+                    '    page_config.setdefault(disabled_key, {})\n'
+                    '\n'
+                    '    for (ext, ext_data) in federated_exts.items():\n'
+                    '        if not "_build" in ext_data["jupyterlab"]:\n'
+                    '            if logger is not None:\n'
+                    '                logger.warn("%s is not a valid extension" % ext_data["name"])\n'
+                    '            continue\n'
+                    '        extbuild = ext_data["jupyterlab"]["_build"]\n'
+                    '        extension = {\n'
+                    '            "name": ext_data["name"],\n'
+                    '            "load": extbuild["load"]\n'
+                    '        }\n'
+                    '\n'
+                    '        if "extension" in extbuild:\n'
+                    '            extension["extension"] = extbuild["extension"]\n'
+                    '        if "mimeExtension" in extbuild:\n'
+                    '            extension["mimeExtension"] = extbuild["mimeExtension"]\n'
+                    '        if "style" in extbuild:\n'
+                    '            extension["style"] = extbuild["style"]\n'
+                    '        extensions.append(extension)\n'
+                    '\n'
+                    '        if ext_data["jupyterlab"].get(disabled_key):\n'
+                    '            disabled_by_extensions_all[ext_data["name"]] = ext_data["jupyterlab"][disabled_key]\n'
+                    '\n'
+                    '    # Handle source extensions that disable other extensions\n'
+                    '    # Check for `jupyterlab`:`extensionMetadata` in the built application directory\'s package.json\n'
+                    '    if app_settings_dir:\n'
+                    '        app_dir = osp.dirname(app_settings_dir)\n'
+                    '        package_data_file = pjoin(app_dir, "static", "package.json")\n'
+                    '        app_data = None\n'
+                    '        try:\n'
+                    '            from jupyterlab._staticpython_resources import STATIC_PACKAGE_DATA as app_data\n'
+                    '        except Exception:\n'
+                    '            app_data = None\n'
+                    '        if app_data is None and osp.exists(package_data_file):\n'
+                    '            with open(package_data_file, encoding="utf-8") as fid:\n'
+                    '                app_data = json.load(fid)\n'
+                    '        if app_data is not None:\n'
+                    '            all_ext_data = app_data.get("jupyterlab", {}).get("extensionMetadata", {})\n'
+                    '            for (ext, ext_data) in all_ext_data.items():\n'
+                    '                if ext in disabled_by_extensions_all:\n'
+                    '                    continue\n'
+                    '                if ext_data.get(disabled_key):\n'
+                    '                    disabled_by_extensions_all[ext] = ext_data[disabled_key]\n'
+                    '\n'
+                    '    disabled_by_extensions = dict()\n'
+                    '    for name in sorted(disabled_by_extensions_all):\n'
+                    '        # skip if the extension itself is disabled by other config\n'
+                    '        if page_config[disabled_key].get(name) == True:\n'
+                    '            continue\n'
+                    '\n'
+                    '        disabled_list = disabled_by_extensions_all[name]\n'
+                    '        for item in disabled_list:\n'
+                    '            disabled_by_extensions[item] = True\n'
+                    '\n'
+                    '    rollup_disabled = disabled_by_extensions\n'
+                    '    rollup_disabled.update(page_config.get(disabled_key, []))\n'
+                    '    page_config[disabled_key] = rollup_disabled\n'
+                    '\n'
+                    '    # Convert dictionaries to lists to give to the front end\n'
+                    '    for (key, value) in page_config.items():\n'
+                    '\n'
+                    '        if isinstance(value, dict):\n'
+                    '            page_config[key] = [subkey for subkey in value if value[subkey]]\n'
+                    '\n'
+                    '    return page_config\n\n',
+                    label="jupyterlab_server embedded package metadata fallback",
+                    next_name="write_page_config",
+                )
         return text
 
     def patch_settings_utils(text: str) -> str:

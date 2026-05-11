@@ -280,7 +280,20 @@ def replace_function_block_once(
         raise RuntimeError(f"expected function not found in {label}: {function_name}")
     indent = start_match.group("indent")
     start = start_match.start()
-    search_start = start_match.end()
+    line_break = text.find("\n", start_match.start())
+    search_start = len(text) if line_break == -1 else line_break + 1
+    if indent:
+        replacement_lines = replacement.splitlines(keepends=True)
+        for line in replacement_lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if not line.startswith(indent):
+                replacement = "".join(
+                    indent + line if line.strip() else line
+                    for line in replacement_lines
+                )
+            break
     if next_name is not None:
         end_match = re.search(
             rf"(?m)^{re.escape(indent)}def {re.escape(next_name)}\(",

@@ -280,41 +280,43 @@ def _patch_raw_api(text: str) -> str:
             "        _PyBuffer_Release = None\n",
             label="Crypto.Util._raw_api.buffer-api",
         )
-    if "_buffer_as_ubyte_array" not in text and "class _Py_buffer" in text:
-        text = replace_regex_once(
-            text,
-            r"(?ms)^    def c_uint8_ptr\(data\):\n(?:        .*\n)+?(?=\n    # ---|\n    class VoidPointer_ctypes)",
-            "    def _buffer_as_ubyte_array(data):\n"
-            "        view = memoryview(data)\n"
-            "        if view.format not in (\"B\", \"b\", \"c\") or view.itemsize != 1:\n"
-            "            view = view.cast(\"B\")\n"
+    if "_buffer_as_ubyte_array" not in text and "except ImportError:\n" in text and "class _Py_buffer" in text:
+        head, tail = text.split("except ImportError:\n", 1)
+        tail = replace_function_block_once(
+            tail,
+            "c_uint8_ptr",
+            "def _buffer_as_ubyte_array(data):\n"
+            "    view = memoryview(data)\n"
+            "    if view.format not in (\"B\", \"b\", \"c\") or view.itemsize != 1:\n"
+            "        view = view.cast(\"B\")\n"
             "\n"
-            "        if view.readonly:\n"
-            "            return (ctypes.c_ubyte * view.nbytes).from_buffer_copy(view.tobytes())\n"
+            "    if view.readonly:\n"
+            "        return (ctypes.c_ubyte * view.nbytes).from_buffer_copy(view.tobytes())\n"
             "\n"
+            "    try:\n"
+            "        return (ctypes.c_ubyte * view.nbytes).from_buffer(data)\n"
+            "    except TypeError:\n"
+            "        return (ctypes.c_ubyte * view.nbytes).from_buffer(view)\n"
+            "\n"
+            "def c_uint8_ptr(data):\n"
+            "    if byte_string(data) or isinstance(data, _Array):\n"
+            "        return data\n"
+            "    elif isinstance(data, _buffer_type):\n"
+            "        if _PyObject_GetBuffer is None:\n"
+            "            return _buffer_as_ubyte_array(data)\n"
+            "        obj = _py_object(data)\n"
+            "        buf = _Py_buffer()\n"
+            "        _PyObject_GetBuffer(obj, byref(buf), _PyBUF_SIMPLE)\n"
             "        try:\n"
-            "            return (ctypes.c_ubyte * view.nbytes).from_buffer(data)\n"
-            "        except TypeError:\n"
-            "            return (ctypes.c_ubyte * view.nbytes).from_buffer(view)\n"
-            "\n"
-            "    def c_uint8_ptr(data):\n"
-            "        if byte_string(data) or isinstance(data, _Array):\n"
-            "            return data\n"
-            "        elif isinstance(data, _buffer_type):\n"
-            "            if _PyObject_GetBuffer is None:\n"
-            "                return _buffer_as_ubyte_array(data)\n"
-            "            obj = _py_object(data)\n"
-            "            buf = _Py_buffer()\n"
-            "            _PyObject_GetBuffer(obj, byref(buf), _PyBUF_SIMPLE)\n"
-            "            try:\n"
-            "                buffer_type = c_ubyte * buf.len\n"
-            "                return buffer_type.from_address(buf.buf)\n"
-            "            finally:\n"
-            "                _PyBuffer_Release(byref(buf))\n"
-            "        else:\n"
-            "            raise TypeError(\"Object type %s cannot be passed to C code\" % type(data))\n",
+            "            buffer_type = ctypes.c_ubyte * buf.len\n"
+            "            return buffer_type.from_address(buf.buf)\n"
+            "        finally:\n"
+            "            _PyBuffer_Release(byref(buf))\n"
+            "    else:\n"
+            "        raise TypeError(\"Object type %s cannot be passed to C code\" % type(data))\n",
             label="Crypto.Util._raw_api.c_uint8_ptr",
         )
+        text = head + "except ImportError:\n" + tail
     if "_load_embedded_process_lib" not in text:
         if "\n\ndef load_pycryptodome_raw_lib(name, cdecl):\n" in text:
             text = replace_text_once(

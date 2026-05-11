@@ -446,6 +446,32 @@ def _patch_numpy_top_level_imports(context) -> None:
                     ),
                     label="numpy optional matrixlib import",
                 )
+        if "from .matrixlib import (\n        asmatrix, bmat, matrix\n    )\n" in text:
+            text = replace_text_once(
+                text,
+                "    from .matrixlib import (\n        asmatrix, bmat, matrix\n    )\n",
+                "    if _mat is not None:\n"
+                "        from .matrixlib import (\n"
+                "            asmatrix, bmat, matrix\n"
+                "        )\n"
+                "    else:\n"
+                "        asmatrix = bmat = matrix = None\n",
+                label="numpy optional matrixlib symbol imports",
+            )
+        elif "from .matrixlib import" in text and "asmatrix = bmat = matrix = None" not in text:
+            text = replace_regex_once(
+                text,
+                r"(?ms)^    from \.matrixlib import \(\n(?P<body>(?:        .+\n)+)    \)\n",
+                (
+                    "    if _mat is not None:\n"
+                    "        from .matrixlib import (\n"
+                    "\\g<body>"
+                    "        )\n"
+                    "    else:\n"
+                    "        asmatrix = bmat = matrix = None\n"
+                ),
+                label="numpy optional matrixlib symbol imports",
+            )
         if "set(_mat.__all__) if _mat is not None else set()" in text:
             return text
         if "        set(_mat.__all__) |\n" in text:
