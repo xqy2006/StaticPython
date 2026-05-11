@@ -676,7 +676,7 @@
       {
         "name": "pybind11",
         "source_mapping": {
-          "include/pybind11": "pybind11_builtin/include/pybind11",
+          "pybind11/include/pybind11||include/pybind11": "pybind11_builtin/include/pybind11",
           "pybind11": "Lib/pybind11"
         },
         "source_provider": "pypi"
@@ -699,8 +699,8 @@
         "name": "pymongo",
         "source_mapping": {
           "pymongo": "Lib/pymongo",
-          "bson||pymongo/bson.py": "Lib/bson",
-          "gridfs": "Lib/gridfs"
+          "?bson||?pymongo/bson.py": "Lib/bson",
+          "?gridfs": "Lib/gridfs"
         },
         "python_packages": [
           "pymongo",

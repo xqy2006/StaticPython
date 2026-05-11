@@ -127,6 +127,14 @@ WINDOWS_SYSTEM_LIBRARY_NAMES = {
     "winspool.lib",
     "ws2_32.lib",
 }
+WINDOWS_SDK_LIBRARY_NAMES = {
+    "imm32.lib",
+    "msimg32.lib",
+    "netapi32.lib",
+    "oleacc.lib",
+    "setupapi.lib",
+    "windowscodecs.lib",
+}
 
 ET.register_namespace("", MSBUILD_NS)
 
@@ -206,6 +214,10 @@ def is_windows_system_library(library_name: str) -> bool:
     return normalize_library_name(library_name) in WINDOWS_SYSTEM_LIBRARY_NAMES
 
 
+def is_windows_sdk_library(library_name: str) -> bool:
+    return normalize_library_name(library_name) in WINDOWS_SDK_LIBRARY_NAMES
+
+
 def is_python_host_library(library_name: str) -> bool:
     stem = Path(normalize_library_name(library_name)).stem
     return stem in {"python", "python3", "pythoncore"} or re.fullmatch(r"python\d{2,3}", stem) is not None
@@ -217,6 +229,7 @@ def is_packaged_static_library(library_name: str) -> bool:
         normalized.endswith(".lib")
         and normalized != "%(additionaldependencies)"
         and not is_windows_system_library(normalized)
+        and not is_windows_sdk_library(normalized)
         and not is_python_host_library(normalized)
     )
 

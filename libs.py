@@ -116,10 +116,24 @@ def _build_materialized_paths(
     overlay_entries: list[str],
     extra_paths: list[str] | None = None,
 ) -> list[str]:
-    paths = [_normalized_relpath(path) for path in source_mapping.values()]
+    paths = [
+        _normalized_relpath(target)
+        for selector, target in source_mapping.items()
+        if not _parse_source_selector(selector)[1]
+    ]
     paths.extend(_normalized_relpath(path) for path in overlay_entries)
     paths.extend(_normalized_relpath(path) for path in (extra_paths or []))
     return _unique(paths)
+
+
+def _build_optional_source_cleanup_paths(source_mapping: dict[str, str]) -> list[str]:
+    return _unique(
+        [
+            _normalized_relpath(target)
+            for selector, target in source_mapping.items()
+            if _parse_source_selector(selector)[1]
+        ]
+    )
 
 
 def _build_cleanup_paths(paths: list[str] | None = None) -> list[str]:
@@ -261,18 +275,25 @@ def replace_function_block_once(
 ) -> str:
     if replacement in text:
         return text
-    start_match = re.search(rf"(?m)^def {re.escape(function_name)}\(", text)
+    start_match = re.search(rf"(?m)^(?P<indent>[ \t]*)def {re.escape(function_name)}\(", text)
     if start_match is None:
         raise RuntimeError(f"expected function not found in {label}: {function_name}")
+    indent = start_match.group("indent")
     start = start_match.start()
     search_start = start_match.end()
     if next_name is not None:
-        end_match = re.search(rf"(?m)^def {re.escape(next_name)}\(", text[search_start:])
+        end_match = re.search(
+            rf"(?m)^{re.escape(indent)}def {re.escape(next_name)}\(",
+            text[search_start:],
+        )
         if end_match is None:
             raise RuntimeError(f"expected next function not found in {label}: {next_name}")
         end = search_start + end_match.start()
     else:
-        end_match = re.search(r"(?m)^(?:def|class)\s+", text[search_start:])
+        end_match = re.search(
+            rf"(?m)^(?:{re.escape(indent)}(?:def|class)\s+|[ \t]{{0,{len(indent) - 1 if indent else 0}}}\S)",
+            text[search_start:],
+        )
         end = len(text) if end_match is None else search_start + end_match.start()
     return text[:start] + replacement + text[end:]
 
@@ -577,6 +598,11 @@ def _compatible_pypi_files(
         if not _supports_target_python(requires_python, target_version):
             continue
         compatible.append(file_info)
+    source_distributions = [
+        file_info for file_info in compatible if file_info.get("packagetype") == "sdist"
+    ]
+    if source_distributions:
+        compatible = source_distributions
     return sorted(compatible, key=lambda file_info: _pypi_file_sort_key(file_info, target_version))
 
 
@@ -1099,12 +1125,20 @@ def _resolve_source_entry(extracted_root: Path, selector: str) -> Path:
         alternatives = [selector]
     last_error: RuntimeError | None = None
     for alternative in alternatives:
+        alternative, _optional = _parse_source_selector(alternative)
         try:
             return _resolve_single_source_entry(extracted_root, alternative)
         except RuntimeError as exc:
             last_error = exc
     assert last_error is not None
     raise last_error
+
+
+def _parse_source_selector(selector: str) -> tuple[str, bool]:
+    stripped = selector.strip()
+    if stripped.startswith("?"):
+        return stripped[1:].strip(), True
+    return selector, False
 
 
 def _materialize_source_mapping(
@@ -1114,7 +1148,14 @@ def _materialize_source_mapping(
     ignore_patterns: list[str] | None = None,
 ) -> None:
     for selector, target_rel in source_mapping.items():
-        src = resolver(selector)
+        resolved_selector, optional = _parse_source_selector(selector)
+        try:
+            src = resolver(resolved_selector)
+        except RuntimeError as exc:
+            if optional:
+                context.log(f"skipping optional source mapping {selector} -> {target_rel}: {exc}")
+                continue
+            raise
         dst = context.source_root / _normalized_relpath(target_rel)
         started = time.monotonic()
         context.log(f"materializing {selector} -> {target_rel}")
@@ -1313,7 +1354,12 @@ def pypi_library(
             normalized_overlay_entries,
             materialized_paths,
         ),
-        cleanup_paths=_build_cleanup_paths(cleanup_paths),
+        cleanup_paths=_build_cleanup_paths(
+            [
+                *list(cleanup_paths or []),
+                *_build_optional_source_cleanup_paths(resolved_mapping),
+            ]
+        ),
         python_packages=list(python_packages or [name]),
         static_library_projects_release_x64=list(static_library_projects_release_x64 or []),
         native_static_projects=list(native_static_projects or []),
@@ -1383,7 +1429,12 @@ def github_library(
             normalized_overlay_entries,
             materialized_paths,
         ),
-        cleanup_paths=_build_cleanup_paths(cleanup_paths),
+        cleanup_paths=_build_cleanup_paths(
+            [
+                *list(cleanup_paths or []),
+                *_build_optional_source_cleanup_paths(resolved_mapping),
+            ]
+        ),
         python_packages=list(python_packages or [name]),
         static_library_projects_release_x64=list(static_library_projects_release_x64 or []),
         native_static_projects=list(native_static_projects or []),

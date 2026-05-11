@@ -800,6 +800,8 @@ def _write_mpl_toolkits_package_init(context) -> None:
 
 def _patch_matplotlib_backend_registry(context) -> None:
     path = source_path(context, "Lib/matplotlib/backends/registry.py")
+    if not path.exists():
+        return
     text = path.read_text(encoding="utf-8")
 
     builtin_anchor = '        "template": "headless",\n'
@@ -820,6 +822,8 @@ def _patch_matplotlib_backend_registry(context) -> None:
 
 def _patch_matplotlib_pyplot_autobackend(context) -> None:
     path = source_path(context, "Lib/matplotlib/pyplot.py")
+    if not path.exists():
+        return
     text = path.read_text(encoding="utf-8")
     old = '            "macosx", "qtagg", "gtk4agg", "gtk3agg", "tkagg", "wxagg"]\n'
     new = '            "macosx", "qtagg", "gtk4agg", "gtk3agg", "sdl2", "tkagg", "wxagg"]\n'
@@ -1481,11 +1485,14 @@ PYBIND11_MODULE(_backend_sdl, m)
 
 def _patch_matplotlib_sources(context) -> None:
     path = source_path(context, "matplotlib_builtin/source/src/_c_internal_utils.cpp")
-    text = path.read_text(encoding="utf-8")
-    patched = text.replace('LoadLibrary("user32.dll")', 'LoadLibraryA("user32.dll")')
-    if patched != text:
-        write_source_text(context, "matplotlib_builtin/source/src/_c_internal_utils.cpp", patched)
-    write_source_text(context, "matplotlib_builtin/source/src/_enums.h", PATCHED_MATPLOTLIB_ENUMS_HEADER)
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        patched = text.replace('LoadLibrary("user32.dll")', 'LoadLibraryA("user32.dll")')
+        if patched != text:
+            write_source_text(context, "matplotlib_builtin/source/src/_c_internal_utils.cpp", patched)
+    enums_path = source_path(context, "matplotlib_builtin/source/src")
+    if enums_path.exists():
+        write_source_text(context, "matplotlib_builtin/source/src/_enums.h", PATCHED_MATPLOTLIB_ENUMS_HEADER)
     _patch_matplotlib_backend_registry(context)
     _patch_matplotlib_pyplot_autobackend(context)
 
@@ -1496,36 +1503,88 @@ def _ensure_required_files(context, files: list[str]) -> None:
         raise RuntimeError("matplotlib source files are missing: " + ", ".join(missing))
 
 
+def _set_matplotlib_materialized_paths(context) -> None:
+    integration = LIBRARY_INTEGRATION
+    paths = [
+        "Lib/matplotlib/__init__.py",
+        "Lib/matplotlib/_version.py",
+        "Lib/pylab.py",
+        "matplotlib_builtin/source/PKG-INFO",
+    ]
+
+    optional_if_exists = [
+        "Lib/mpl_toolkits",
+        "Lib/mpl_toolkits/__init__.py",
+        "Lib/matplotlib/backends/backend_sdl2.py",
+        "Lib/matplotlib/pyplot.py",
+        "Lib/matplotlib/backends/registry.py",
+        "matplotlib_builtin/source/extern/agg24-svn/include/agg_basics.h",
+        "matplotlib_builtin/source/src/ft2font_wrapper.cpp",
+        "matplotlib_builtin/source/src/_backend_agg_wrapper.cpp",
+        "matplotlib_builtin/source/src/_image_wrapper.cpp",
+        "matplotlib_builtin/source/src/_path_wrapper.cpp",
+        "matplotlib_builtin/source/src/_qhull_wrapper.cpp",
+        "matplotlib_builtin/source/src/_c_internal_utils.cpp",
+        "matplotlib_builtin/source/src/tri/_tri.cpp",
+        "matplotlib_builtin/source/src/tri/_tri_wrapper.cpp",
+        f"matplotlib_builtin/SDL-{SDL2_VERSION}/include/SDL.h",
+        f"matplotlib_builtin/freetype-{FREETYPE_VERSION}/include/ft2build.h",
+        f"matplotlib_builtin/qhull-{QHULL_VERSION}/src/libqhull_r/qhull_ra.h",
+        "PCbuild/matplotlib_agg.vcxproj",
+        "PCbuild/matplotlib_freetype.vcxproj",
+        "PCbuild/matplotlib_qhull.vcxproj",
+        "PCbuild/matplotlib_sdl2.vcxproj",
+        "PCbuild/matplotlib.backends._backend_agg.vcxproj",
+        "PCbuild/matplotlib.backends._backend_sdl.vcxproj",
+        "PCbuild/matplotlib._c_internal_utils.vcxproj",
+        "PCbuild/matplotlib.ft2font.vcxproj",
+        "PCbuild/matplotlib._image.vcxproj",
+        "PCbuild/matplotlib._path.vcxproj",
+        "PCbuild/matplotlib._qhull.vcxproj",
+        "PCbuild/matplotlib._tri.vcxproj",
+    ]
+    paths.extend(path for path in optional_if_exists if source_path(context, path).exists())
+    integration.materialized_paths = list(dict.fromkeys(paths))
+
+
 def prepare_matplotlib_project(context) -> None:
     if context.platform != "x64":
         raise RuntimeError(f"matplotlib builtin integration currently supports only x64, not {context.platform}")
+
+    matplotlib_root = source_path(context, "Lib/matplotlib")
+    if not matplotlib_root.exists():
+        raise RuntimeError("matplotlib package source was not materialized")
 
     ensure_freetype_source(context)
     ensure_sdl2_source(context)
     ensure_qhull_source(context)
     _write_matplotlib_version_module(context)
-    _write_mpl_toolkits_package_init(context)
+    if source_path(context, "Lib/mpl_toolkits").exists():
+        _write_mpl_toolkits_package_init(context)
     _write_backend_sdl_module(context)
     _patch_matplotlib_sources(context)
 
-    _ensure_required_files(
-        context,
-        [
-            "Lib/matplotlib/__init__.py",
-            "Lib/matplotlib/backends/backend_sdl2.py",
-            "Lib/mpl_toolkits",
-            "Lib/mpl_toolkits/__init__.py",
-            "Lib/pylab.py",
-            "matplotlib_builtin/source/src/_backend_sdl.cpp",
-            "matplotlib_builtin/source/src/ft2font_wrapper.cpp",
-            "matplotlib_builtin/source/extern/agg24-svn/include/agg_basics.h",
-            f"matplotlib_builtin/SDL-{SDL2_VERSION}/include/SDL.h",
-            f"matplotlib_builtin/SDL-{SDL2_VERSION}/src/SDL.c",
-            f"matplotlib_builtin/freetype-{FREETYPE_VERSION}/include/ft2build.h",
-            f"matplotlib_builtin/qhull-{QHULL_VERSION}/src/libqhull_r/qhull_ra.h",
-            "pybind11_builtin/include/pybind11/pybind11.h",
-        ],
-    )
+    required_files = [
+        "Lib/matplotlib/__init__.py",
+        "Lib/matplotlib/backends/backend_sdl2.py",
+        "Lib/pylab.py",
+        "matplotlib_builtin/source/src/_backend_sdl.cpp",
+        f"matplotlib_builtin/SDL-{SDL2_VERSION}/include/SDL.h",
+        f"matplotlib_builtin/SDL-{SDL2_VERSION}/src/SDL.c",
+        f"matplotlib_builtin/freetype-{FREETYPE_VERSION}/include/ft2build.h",
+        f"matplotlib_builtin/qhull-{QHULL_VERSION}/src/libqhull_r/qhull_ra.h",
+        "pybind11_builtin/include/pybind11/pybind11.h",
+    ]
+    optional_required_if_present = [
+        "Lib/mpl_toolkits",
+        "Lib/mpl_toolkits/__init__.py",
+        "matplotlib_builtin/source/src/ft2font_wrapper.cpp",
+        "matplotlib_builtin/source/extern/agg24-svn/include/agg_basics.h",
+    ]
+    for relative in optional_required_if_present:
+        if source_path(context, relative).exists():
+            required_files.append(relative)
+    _ensure_required_files(context, required_files)
 
     write_source_text(
         context,
@@ -1602,6 +1661,7 @@ def prepare_matplotlib_project(context) -> None:
             f"PCbuild/{module_name}.vcxproj",
             _render_extension_project(module_name, spec),
         )
+    _set_matplotlib_materialized_paths(context)
 
 
 MATPLOTLIB_SUPPORT_PROJECT_ITEMS = _selected_support_project_items()
@@ -1625,10 +1685,10 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     source_mapping={
         "lib/matplotlib": "Lib/matplotlib",
-        "lib/mpl_toolkits": "Lib/mpl_toolkits",
+        "?lib/mpl_toolkits": "Lib/mpl_toolkits",
         "lib/pylab.py": "Lib/pylab.py",
         "src": "matplotlib_builtin/source/src",
-        "extern/agg24-svn": "matplotlib_builtin/source/extern/agg24-svn",
+        "?extern/agg24-svn||?agg24||?agg23": "matplotlib_builtin/source/extern/agg24-svn",
         "PKG-INFO": "matplotlib_builtin/source/PKG-INFO",
     },
     source_ignore_patterns=[

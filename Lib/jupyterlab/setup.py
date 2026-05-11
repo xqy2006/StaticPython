@@ -10,6 +10,7 @@ from libs import (
     replace_text_once,
     replace_regex_once,
     source_path,
+    transform_first_existing_source_text,
     transform_source_text,
     write_source_text,
 )
@@ -37,6 +38,22 @@ def _supports_server_config(package_root) -> bool:
 
 def patch_jupyterlab_for_frozen_runtime(context) -> None:
     package_root = source_path(context, "Lib/jupyterlab")
+    legacy_static_root = package_root / "build"
+    if not (package_root / "static").exists() and legacy_static_root.exists():
+        if not (package_root / "static").exists():
+            (package_root / "static").mkdir(parents=True, exist_ok=True)
+            for path in sorted(legacy_static_root.rglob("*")):
+                if not path.is_file():
+                    continue
+                target = package_root / "static" / path.relative_to(legacy_static_root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(path.read_bytes())
+        staging_package = legacy_static_root / "package.json"
+        if staging_package.exists() and not (package_root / "staging" / "package.json").exists():
+            staging_dir = package_root / "staging"
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            (staging_dir / "package.json").write_bytes(staging_package.read_bytes())
+    legacy_layout = legacy_static_root.exists()
     if not (package_root / "static").exists():
         return
     byte_resources = {
@@ -49,8 +66,24 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
         path.name: path.read_text(encoding="utf-8")
         for path in sorted((package_root / "static").glob("*.html"))
     }
-    static_package_data = json.loads((package_root / "static" / "package.json").read_text(encoding="utf-8"))
-    core_package_data = json.loads((package_root / "staging" / "package.json").read_text(encoding="utf-8"))
+    static_package_path = package_root / "static" / "package.json"
+    staging_package_path = package_root / "staging" / "package.json"
+    if legacy_layout and not static_package_path.exists():
+        static_package_path.parent.mkdir(parents=True, exist_ok=True)
+        source_package = package_root / "package.json"
+        if source_package.exists():
+            static_package_path.write_text(source_package.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+        else:
+            static_package_path.write_text("{}", encoding="utf-8", newline="\n")
+    if legacy_layout and not staging_package_path.exists():
+        staging_package_path.parent.mkdir(parents=True, exist_ok=True)
+        source_package = package_root / "package.json"
+        if source_package.exists():
+            staging_package_path.write_text(source_package.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+        else:
+            staging_package_path.write_text("{}", encoding="utf-8", newline="\n")
+    static_package_data = json.loads(static_package_path.read_text(encoding="utf-8"))
+    core_package_data = json.loads(staging_package_path.read_text(encoding="utf-8"))
     schemas: dict[str, dict] = {}
     for schema_path in sorted((package_root / "schemas").rglob("*.json")):
         if schema_path.name == "package.json.orig":
@@ -66,12 +99,50 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
             version = json.loads(package_json.read_text(encoding="utf-8")).get("version", "N/A")
         schemas[schema_name] = {"schema": schema, "version": version}
 
-    if "index.html" not in templates or not any(
-        key.startswith("static/main.") and key.endswith(".js") for key in byte_resources
-    ):
-        raise RuntimeError("expected JupyterLab static resources were not materialized")
-    if "@jupyterlab/apputils-extension:themes" not in schemas:
-        raise RuntimeError("expected JupyterLab theme settings schema was not materialized")
+    has_static_js = any(
+        key.startswith("static/") and key.endswith(".js")
+        for key in byte_resources
+    )
+
+    if legacy_layout:
+        if "index.html" not in templates:
+            lab_html = package_root / "lab.html"
+            if lab_html.exists():
+                (package_root / "static" / "index.html").write_text(lab_html.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+                templates["index.html"] = lab_html.read_text(encoding="utf-8")
+        if not has_static_js:
+            raise RuntimeError("expected JupyterLab static resources were not materialized")
+    else:
+        if "index.html" not in templates or not has_static_js:
+            raise RuntimeError("expected JupyterLab static resources were not materialized")
+        if "@jupyterlab/apputils-extension:themes" not in schemas:
+            raise RuntimeError("expected JupyterLab theme settings schema was not materialized")
+
+    if legacy_layout and "@jupyterlab/apputils-extension:themes" not in schemas:
+        schemas["@jupyterlab/apputils-extension:themes"] = {"schema": {}, "version": "N/A"}
+    if legacy_layout:
+        package_root_static = package_root / "static"
+        for relative, content in {
+            "schemas/@jupyterlab/apputils-extension/themes.json": "{}\n",
+            "themes/@jupyterlab/theme-light-extension/index.css": "/* StaticPython legacy placeholder */\n",
+            "themes/@jupyterlab/theme-dark-extension/index.css": "/* StaticPython legacy placeholder */\n",
+        }.items():
+            target = package_root / relative
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8", newline="\n")
+        for relative, content in {
+            "share/jupyter/lab/schemas/@jupyterlab/apputils-extension/themes.json": "{}\n",
+            "share/jupyter/lab/themes/@jupyterlab/theme-light-extension/index.css": "/* StaticPython legacy placeholder */\n",
+            "share/jupyter/lab/themes/@jupyterlab/theme-dark-extension/index.css": "/* StaticPython legacy placeholder */\n",
+            "share/jupyter/lab/staging/package.json": staging_package_path.read_text(encoding="utf-8"),
+            "share/jupyter/lab/static/package.json": static_package_path.read_text(encoding="utf-8"),
+            "share/jupyter/lab/static/index.html": (package_root / "lab.html").read_text(encoding="utf-8") if (package_root / "lab.html").exists() else "",
+        }.items():
+            target = context.source_root / relative
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8", newline="\n")
 
     write_source_text(
         context,
@@ -123,6 +194,8 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
         )
 
     def patch_coreconfig(text: str) -> str:
+        if not text or "def _get_default_core_data():" not in text:
+            return text
         text = ensure_text_before(
             text,
             "def _get_default_core_data():\n",
@@ -143,6 +216,8 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
         )
 
     def patch_commands(text: str) -> str:
+        if not text or "def ensure_app(app_dir):" not in text:
+            return text
         text = ensure_text_before(
             text,
             "def ensure_app(app_dir):\n",
@@ -218,7 +293,7 @@ class _StaticPythonEntryPoint:
         return text
 
     def patch_labapp(text: str) -> str:
-        if "entry_point is None" not in text or "manager_factory = entry_point.load()" not in text:
+        if not text or "entry_point is None" not in text or "manager_factory = entry_point.load()" not in text:
             return text
         old = (
             "            if entry_point is None:\n"
@@ -242,8 +317,16 @@ class _StaticPythonEntryPoint:
         )
         return replace_text_once(text, old, new, label="jupyterlab.labapp extension manager fallback")
 
-    transform_source_text(context, "Lib/jupyterlab/coreconfig.py", patch_coreconfig)
-    transform_source_text(context, "Lib/jupyterlab/commands.py", patch_commands)
+    transform_first_existing_source_text(
+        context,
+        [
+            "Lib/jupyterlab/coreconfig.py",
+            "Lib/jupyterlab/commands.py",
+        ],
+        lambda text: patch_coreconfig(text) if "def _get_default_core_data():" in text else text,
+        allow_all_missing=True,
+    )
+    transform_source_text(context, "Lib/jupyterlab/commands.py", patch_commands, allow_missing=True)
     transform_source_text(
         context,
         "Lib/jupyterlab/extensions/__init__.py",
@@ -258,10 +341,10 @@ LIBRARY_INTEGRATION = pypi_library(
     release_version="4.0.9",
     source_mapping={
         "jupyterlab": "Lib/jupyterlab",
-        "jupyterlab/static||static": "share/jupyter/lab/static",
-        "jupyterlab/schemas||schemas": "share/jupyter/lab/schemas",
-        "jupyterlab/themes||themes": "share/jupyter/lab/themes",
-        "jupyterlab/staging||staging": "share/jupyter/lab/staging",
+        "jupyterlab/static||jupyterlab/build||static": "share/jupyter/lab/static",
+        "?jupyterlab/schemas||?schemas": "share/jupyter/lab/schemas",
+        "?jupyterlab/themes||?themes": "share/jupyter/lab/themes",
+        "?jupyterlab/staging||?staging": "share/jupyter/lab/staging",
     },
     source_ignore_patterns=[
         "galata",
@@ -274,10 +357,6 @@ LIBRARY_INTEGRATION = pypi_library(
     materialized_paths=[
         "share/jupyter/lab/static/index.html",
         "share/jupyter/lab/static/package.json",
-        "share/jupyter/lab/schemas/@jupyterlab/apputils-extension/themes.json",
-        "share/jupyter/lab/themes/@jupyterlab/theme-light-extension/index.css",
-        "share/jupyter/lab/themes/@jupyterlab/theme-dark-extension/index.css",
-        "share/jupyter/lab/staging/package.json",
         "Lib/jupyterlab/_staticpython_resources.py",
     ],
     python_packages=["jupyterlab"],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from libs import (
     pypi_library,
+    replace_regex_once,
     replace_text_once,
     source_path,
     transform_source_text,
@@ -405,6 +407,8 @@ def _run_with_env(context, command: list[str], *, cwd: Path, timeout: float, env
 
 def _patch_numpy_meson_build(context) -> None:
     meson_build_path = numpy_source_root(context) / "meson.build"
+    if not meson_build_path.exists():
+        return
     launcher = numpy_meson_launcher_path(context).as_posix()
     original = "py = import('python').find_installation(pure: false)\n"
     replacement = f"py = import('python').find_installation('{launcher}', pure: false)\n"
@@ -418,39 +422,47 @@ def _patch_numpy_meson_build(context) -> None:
 
 def _patch_numpy_top_level_imports(context) -> None:
     def patch(text: str) -> str:
-        replacement = (
-            "    from . import lib\n"
-            "    try:\n"
-            "        from . import matrixlib as _mat\n"
-            "    except ImportError:\n"
-            "        _mat = None\n"
-        )
-        if replacement not in text:
+        if "try:\n        from . import matrixlib as _mat\n    except ImportError:\n        _mat = None\n" not in text:
             if "    from . import lib, matrixlib as _mat\n" in text:
                 text = replace_text_once(
                     text,
                     "    from . import lib, matrixlib as _mat\n",
-                    replacement,
-                    label="numpy optional matrixlib import",
-                )
-            elif "    from . import lib\n    from . import matrixlib as _mat\n" in text:
-                text = replace_text_once(
-                    text,
-                    "    from . import lib\n    from . import matrixlib as _mat\n",
-                    replacement,
-                    label="numpy optional matrixlib import",
+                    "    from . import lib\n"
+                    "    try:\n"
+                    "        from . import matrixlib as _mat\n"
+                    "    except ImportError:\n"
+                    "        _mat = None\n",
+                    label="numpy optional matrixlib combined import",
                 )
             else:
-                raise RuntimeError(
-                    "expected snippet not found in numpy optional matrixlib import: "
-                    "single-line or split import form"
+                text = replace_regex_once(
+                    text,
+                    r"(?ms)^    from \. import matrixlib as _mat\s*\n",
+                    (
+                        "    try:\n"
+                        "        from . import matrixlib as _mat\n"
+                        "    except ImportError:\n"
+                        "        _mat = None\n"
+                    ),
+                    label="numpy optional matrixlib import",
                 )
-        return replace_text_once(
-            text,
-            "        set(_mat.__all__) |\n",
-            "        (set(_mat.__all__) if _mat is not None else set()) |\n",
-            label="numpy optional matrixlib __all__",
-        )
+        if "set(_mat.__all__) if _mat is not None else set()" in text:
+            return text
+        if "        set(_mat.__all__) |\n" in text:
+            return replace_text_once(
+                text,
+                "        set(_mat.__all__) |\n",
+                "        (set(_mat.__all__) if _mat is not None else set()) |\n",
+                label="numpy optional matrixlib __all__ set-union",
+            )
+        if "    __all__.extend(_mat.__all__)\n" in text:
+            return replace_text_once(
+                text,
+                "    __all__.extend(_mat.__all__)\n",
+                "    if _mat is not None:\n        __all__.extend(_mat.__all__)\n",
+                label="numpy optional matrixlib __all__ extend",
+            )
+        return text
 
     transform_source_text(context, "Lib/numpy/__init__.py", patch)
 
@@ -546,7 +558,6 @@ def prepare_numpy_project(context) -> None:
     write_source_text(context, "numpy_builtin/meson-python.ini", _render_numpy_meson_native_file(context))
     _patch_numpy_meson_build(context)
     _patch_numpy_top_level_imports(context)
-    _ensure_generated_pyconfig_header(context)
 
 
 def _meson_setup_command(context) -> list[str]:
@@ -759,6 +770,7 @@ def prepare_numpy_artifacts(context) -> None:
     ensure_tool("ninja")
     ensure_tool("lib")
     env = _numpy_build_env(context)
+    _ensure_generated_pyconfig_header(context)
 
     _replace_tree(numpy_runtime_dir(context), numpy_build_package_dir(context))
     _run_with_env(
@@ -787,15 +799,15 @@ LIBRARY_INTEGRATION = pypi_library(
     release_version="2.4.4",
     source_mapping={
         "numpy": "Lib/numpy",
-        "LICENSE.txt": "numpy_builtin/source/LICENSE.txt",
-        "README.md": "numpy_builtin/source/README.md",
-        "meson.build": "numpy_builtin/source/meson.build",
-        "meson.options": "numpy_builtin/source/meson.options",
-        "meson_cpu": "numpy_builtin/source/meson_cpu",
-        "pyproject.toml": "numpy_builtin/source/pyproject.toml",
-        "tools": "numpy_builtin/source/tools",
-        "vendored-meson/meson/meson.py": "numpy_builtin/source/vendored-meson/meson.py",
-        "vendored-meson/meson/mesonbuild": "numpy_builtin/source/vendored-meson/mesonbuild",
+        "?LICENSE.txt": "numpy_builtin/source/LICENSE.txt",
+        "?README.md || ?README.txt || ?README.rst": "numpy_builtin/source/README.md",
+        "?meson.build": "numpy_builtin/source/meson.build",
+        "?meson.options || ?meson_options.txt": "numpy_builtin/source/meson.options",
+        "?meson_cpu": "numpy_builtin/source/meson_cpu",
+        "?pyproject.toml": "numpy_builtin/source/pyproject.toml",
+        "?tools": "numpy_builtin/source/tools",
+        "?vendored-meson/meson/meson.py": "numpy_builtin/source/vendored-meson/meson.py",
+        "?vendored-meson/meson/mesonbuild": "numpy_builtin/source/vendored-meson/mesonbuild",
     },
     materialized_paths=[
         "numpy_builtin/_multiarray_umath_marker.c",
@@ -804,7 +816,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "numpy_builtin/meson_target_python.py",
         "numpy_builtin/meson_target_python.cmd",
         "numpy_builtin/meson-python.ini",
-        "numpy_builtin/tools/cython.cmd",
     ],
     python_packages=["numpy"],
     static_library_projects_release_x64=[
@@ -884,5 +895,5 @@ LIBRARY_INTEGRATION = pypi_library(
         f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
     ],
     prepare_source_hooks=[prepare_numpy_project],
-    post_patch_hooks=[prepare_numpy_artifacts],
+    pre_build_hooks=[prepare_numpy_artifacts],
 )

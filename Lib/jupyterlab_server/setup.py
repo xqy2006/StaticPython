@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from libs import (
     ensure_text_before,
     pypi_library,
@@ -15,10 +17,17 @@ from libs import (
 
 def patch_jupyterlab_server_resources(context) -> None:
     package_root = source_path(context, "Lib/jupyterlab_server")
-    templates = {
-        path.name: path.read_text(encoding="utf-8")
-        for path in sorted((package_root / "templates").glob("*.html"))
-    }
+    templates_dir = package_root / "templates"
+    if templates_dir.exists():
+        templates = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in sorted(templates_dir.glob("*.html"))
+        }
+    else:
+        templates = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in sorted(package_root.glob("*.html"))
+        }
     if "index.html" not in templates:
         raise RuntimeError("expected jupyterlab_server templates were not materialized")
 
@@ -41,15 +50,20 @@ def patch_jupyterlab_server_resources(context) -> None:
             "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
             label="jupyterlab_server legacy handlers template imports",
         )
-        return replace_text_once(
+        updated, count = re.subn(
+            r"(?m)^        self\.file_loader = FileSystemLoader\(lab_config\.templates_dir\)\s*$",
+            (
+                "        self.file_loader = ChoiceLoader([\n"
+                "            DictLoader(_staticpython_template_dict_for_package(\"jupyterlab_server\")),\n"
+                "            FileSystemLoader(lab_config.templates_dir),\n"
+                "        ])"
+            ),
             text,
-            "        self.file_loader = FileSystemLoader(lab_config.templates_dir)\n",
-            "        self.file_loader = ChoiceLoader([\n"
-            "            DictLoader(_staticpython_template_dict_for_package(\"jupyterlab_server\")),\n"
-            "            FileSystemLoader(lab_config.templates_dir),\n"
-            "        ])\n",
-            label="jupyterlab_server legacy handlers template loader",
+            count=1,
         )
+        if count != 1:
+            return text
+        return updated
 
     def patch_config(text: str) -> str:
         if "from traitlets import Bool, HasTraits, List, Unicode, default\n" not in text:
@@ -61,71 +75,65 @@ def patch_jupyterlab_server_resources(context) -> None:
             "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
             label="jupyterlab_server config static import",
         )
-        text = replace_text_once(
+        text, count = re.subn(
+            r"(?ms)^    federated_extensions = \{\}\n\s*for ext_dir in labextensions_path:\n\s*# extensions are either top-level directories, or two-deep in @org directories\n\s*for ext_path in chain\(\n\s*iglob\(pjoin\(ext_dir, \"\[!@\]\*\", \"package\.json\"\)\),\n\s*iglob\(pjoin\(ext_dir, \"@\*\", \"\*\", \"package\.json\"\)\),\n\s*\):\n\s*with open\(ext_path, encoding=\"utf-8\"\) as fid:\n\s*pkgdata = json\.load\(fid\)\n",
+            (
+                "    federated_extensions = {}\n"
+                "    static_extensions = []\n"
+                "    try:\n"
+                "        from notebook._staticpython_resources import FEDERATED_EXTENSIONS as static_extensions\n"
+                "    except Exception:\n"
+                "        static_extensions = []\n"
+                "    for static_entry in static_extensions:\n"
+                "        pkgdata = static_entry[\"package\"]\n"
+                "        ext_dir = static_entry.get(\"ext_dir\", \"\")\n"
+                "        ext_path = static_entry.get(\"ext_path\", \"\")\n"
+                "        if pkgdata[\"name\"] not in federated_extensions:\n"
+                "            data = dict(\n"
+                "                name=pkgdata[\"name\"],\n"
+                "                version=pkgdata[\"version\"],\n"
+                "                description=pkgdata.get(\"description\", \"\"),\n"
+                "                url=get_package_url(pkgdata),\n"
+                "                ext_dir=ext_dir,\n"
+                "                ext_path=ext_path,\n"
+                "                is_local=False,\n"
+                "                dependencies=pkgdata.get(\"dependencies\", dict()),\n"
+                "                jupyterlab=pkgdata.get(\"jupyterlab\", dict()),\n"
+                "            )\n"
+                "            install_data = static_entry.get(\"install\")\n"
+                "            if install_data is not None:\n"
+                "                data[\"install\"] = install_data\n"
+                "            federated_extensions[data[\"name\"]] = data\n"
+                "    for ext_dir in labextensions_path:\n"
+                "        # extensions are either top-level directories, or two-deep in @org directories\n"
+                "        for ext_path in chain(\n"
+                "            iglob(pjoin(ext_dir, \"[!@]*\", \"package.json\")),\n"
+                "            iglob(pjoin(ext_dir, \"@*\", \"*\", \"package.json\")),\n"
+                "        ):\n"
+                "            with open(ext_path, encoding=\"utf-8\") as fid:\n"
+                "                pkgdata = json.load(fid)\n"
+            ),
             text,
-            "    federated_extensions = {}\n"
-            "    for ext_dir in labextensions_path:\n"
-            "        # extensions are either top-level directories, or two-deep in @org directories\n"
-            "        for ext_path in chain(\n"
-            "            iglob(pjoin(ext_dir, \"[!@]*\", \"package.json\")),\n"
-            "            iglob(pjoin(ext_dir, \"@*\", \"*\", \"package.json\")),\n"
-            "        ):\n"
-            "            with open(ext_path, encoding=\"utf-8\") as fid:\n"
-            "                pkgdata = json.load(fid)\n",
-            "    federated_extensions = {}\n"
-            "    static_extensions = []\n"
-            "    try:\n"
-            "        from notebook._staticpython_resources import FEDERATED_EXTENSIONS as static_extensions\n"
-            "    except Exception:\n"
-            "        static_extensions = []\n"
-            "    for static_entry in static_extensions:\n"
-            "        pkgdata = static_entry[\"package\"]\n"
-            "        ext_dir = static_entry.get(\"ext_dir\", \"\")\n"
-            "        ext_path = static_entry.get(\"ext_path\", \"\")\n"
-            "        if pkgdata[\"name\"] not in federated_extensions:\n"
-            "            data = dict(\n"
-            "                name=pkgdata[\"name\"],\n"
-            "                version=pkgdata[\"version\"],\n"
-            "                description=pkgdata.get(\"description\", \"\"),\n"
-            "                url=get_package_url(pkgdata),\n"
-            "                ext_dir=ext_dir,\n"
-            "                ext_path=ext_path,\n"
-            "                is_local=False,\n"
-            "                dependencies=pkgdata.get(\"dependencies\", dict()),\n"
-            "                jupyterlab=pkgdata.get(\"jupyterlab\", dict()),\n"
-            "            )\n"
-            "            install_data = static_entry.get(\"install\")\n"
-            "            if install_data is not None:\n"
-            "                data[\"install\"] = install_data\n"
-            "            federated_extensions[data[\"name\"]] = data\n"
-            "    for ext_dir in labextensions_path:\n"
-            "        # extensions are either top-level directories, or two-deep in @org directories\n"
-            "        for ext_path in chain(\n"
-            "            iglob(pjoin(ext_dir, \"[!@]*\", \"package.json\")),\n"
-            "            iglob(pjoin(ext_dir, \"@*\", \"*\", \"package.json\")),\n"
-            "        ):\n"
-            "            with open(ext_path, encoding=\"utf-8\") as fid:\n"
-            "                pkgdata = json.load(fid)\n",
-            label="jupyterlab_server federated extension metadata fallback",
+            count=1,
         )
-        return replace_text_once(
+        text, count = re.subn(
+            r"(?ms)^        package_data_file = pjoin\(app_dir, \"static\", \"package\.json\"\)\n\s*if osp\.exists\(package_data_file\):\n\s*with open\(package_data_file, encoding=\"utf-8\"\) as fid:\n\s*app_data = json\.load\(fid\)\n",
+            (
+                "        package_data_file = pjoin(app_dir, \"static\", \"package.json\")\n"
+                "        app_data = None\n"
+                "        try:\n"
+                "            from jupyterlab._staticpython_resources import STATIC_PACKAGE_DATA as app_data\n"
+                "        except Exception:\n"
+                "            app_data = None\n"
+                "        if app_data is None and osp.exists(package_data_file):\n"
+                "            with open(package_data_file, encoding=\"utf-8\") as fid:\n"
+                "                app_data = json.load(fid)\n"
+                "        if app_data is not None:\n"
+            ),
             text,
-            "        package_data_file = pjoin(app_dir, \"static\", \"package.json\")\n"
-            "        if osp.exists(package_data_file):\n"
-            "            with open(package_data_file, encoding=\"utf-8\") as fid:\n"
-            "                app_data = json.load(fid)\n",
-            "        package_data_file = pjoin(app_dir, \"static\", \"package.json\")\n"
-            "        app_data = None\n"
-            "        try:\n"
-            "            from jupyterlab._staticpython_resources import STATIC_PACKAGE_DATA as app_data\n"
-            "        except Exception:\n"
-            "            app_data = None\n"
-            "        if app_data is None and osp.exists(package_data_file):\n"
-            "            with open(package_data_file, encoding=\"utf-8\") as fid:\n"
-            "                app_data = json.load(fid)\n"
-            "        if app_data is not None:\n",
-            label="jupyterlab_server app package metadata fallback",
+            count=1,
         )
+        return text
 
     def patch_settings_utils(text: str) -> str:
         if "# The JupyterLab settings file extension.\n" not in text:
@@ -563,9 +571,6 @@ LIBRARY_INTEGRATION = pypi_library(
     },
     source_ignore_patterns=["test_data", "tests"],
     materialized_paths=[
-        "Lib/jupyterlab_server/templates/index.html",
-        "Lib/jupyterlab_server/templates/error.html",
-        "Lib/jupyterlab_server/templates/403.html",
         "Lib/jupyterlab_server/_staticpython_resources.py",
     ],
     python_packages=["jupyterlab_server"],

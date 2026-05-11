@@ -75,25 +75,27 @@ def _modern_multidict_sources() -> list[str]:
     return ["..\\Lib\\multidict\\_multidict.c"]
 
 
+def _present_sources(context) -> list[str]:
+    candidates = _legacy_multidict_sources()
+    return [
+        path
+        for path in candidates
+        if source_path(context, path.replace("..\\Lib\\", "Lib/").replace("\\", "/")).exists()
+    ]
+
+
 def prepare_multidict_project(context) -> None:
     source = source_path(context, "Lib/multidict/_multidict.c")
-    headers = source_path(context, "Lib/multidict/_multilib")
     if not source.exists():
-        raise RuntimeError(f"multidict C source file is missing: {source}")
-
-    if headers.exists():
+        pyx = source_path(context, "Lib/multidict/_multidict.pyx")
+        if not pyx.exists():
+            raise RuntimeError(f"multidict C source file is missing: {source}")
         source_files = _modern_multidict_sources()
     else:
-        source_files = _legacy_multidict_sources()
-        missing_legacy = [
-            path
-            for path in source_files[1:]
-            if not source_path(context, path.replace("..\\Lib\\", "Lib/").replace("\\", "/")).exists()
-        ]
-        if missing_legacy:
-            raise RuntimeError(
-                "multidict legacy native sources are missing: " + ", ".join(missing_legacy)
-            )
+        present_sources = _present_sources(context)
+        source_files = present_sources if present_sources else _modern_multidict_sources()
+        if "..\\Lib\\multidict\\_multidict.c" not in source_files:
+            source_files = ["..\\Lib\\multidict\\_multidict.c", *source_files]
 
     write_source_text(context, "PCbuild/multidict._multidict.vcxproj", _render_multidict_project(source_files))
 

@@ -2,10 +2,16 @@ from libs import LibraryHookContext, simple_library
 
 
 def embed_cacert_pem(context: LibraryHookContext) -> None:
-    certifi_dir = context.source_root / "Lib" / "certifi"
+    package_dir = context.source_root / "Lib" / "certifi"
+    certifi_dir = package_dir
     cacert_path = certifi_dir / "cacert.pem"
+    if not cacert_path.exists():
+        certifi_dir = context.source_root / "Lib"
+        cacert_path = certifi_dir / "cacert.pem"
+    if not cacert_path.exists():
+        raise RuntimeError("certifi cacert.pem was not materialized")
     weak_path = certifi_dir / "weak.pem"
-    core_path = certifi_dir / "core.py"
+    core_path = package_dir / "core.py"
     cacert_pem = cacert_path.read_bytes()
     weak_pem = weak_path.read_bytes() if weak_path.exists() else None
     embedded = repr(cacert_pem)
@@ -85,6 +91,10 @@ def contents() -> str:
 
 LIBRARY_INTEGRATION = simple_library(
     name='certifi',
-    overlay_entries=['Lib/certifi'],
+    source_mapping={
+        "certifi": "Lib/certifi",
+        "?cacert.pem": "Lib/certifi/cacert.pem",
+        "?weak.pem": "Lib/certifi/weak.pem",
+    },
     post_patch_hooks=[embed_cacert_pem],
 )

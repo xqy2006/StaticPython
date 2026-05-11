@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -8,7 +9,14 @@ import time
 from pathlib import Path
 
 from libs import (
-    pypi_library,
+    LibraryIntegration,
+    _candidate_pypi_archives,
+    _copy_entry,
+    _download_file,
+    _extract_archive,
+    _normalized_project_name,
+    _resolve_source_entry,
+    replace_regex_once,
     replace_text_once,
     source_path,
     transform_source_text,
@@ -73,6 +81,31 @@ PANDAS_DUPLICATE_OBJECT_SUFFIXES = {
 PANDAS_REQUIRED_OBJECT_SUFFIXES = {
     "pandas._libs.pandas_datetime": ("src_datetime_pd_datetime.c.obj",),
 }
+PANDAS_PROJECT_NAME = "pandas"
+
+
+def pandas_release_version(context) -> str | None:
+    return LIBRARY_INTEGRATION.release_version
+
+
+def pandas_uses_meson_layout(context) -> bool:
+    return (pandas_source_root(context) / "meson.build").exists()
+
+
+def _candidate_archives(
+    context,
+    project_name: str,
+    release_version: str | None,
+) -> list[tuple[str, object, str | None, bool]]:
+    from packaging.version import Version
+
+    target_version = Version(".".join(str(part) for part in context.version_info))
+    return _candidate_pypi_archives(
+        context.download_cache_root,
+        project_name,
+        target_version,
+        release_version,
+    )
 
 
 def pandas_source_root(context) -> Path:
@@ -152,6 +185,82 @@ def _replace_tree(source: Path, destination: Path) -> None:
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(source, destination)
+
+
+def _copy_optional_source_entry(extracted_root: Path, selector: str, destination: Path) -> bool:
+    try:
+        src = _resolve_source_entry(extracted_root, selector)
+    except RuntimeError:
+        return False
+    _copy_entry(src, destination)
+    return True
+
+
+def prepare_pandas_source(context) -> None:
+    project_name = PANDAS_PROJECT_NAME
+    normalized = _normalized_project_name(project_name)
+    release_version = pandas_release_version(context)
+    candidate_archives = _candidate_archives(context, project_name, release_version)
+
+    failures: list[str] = []
+    for resolved_release_version, archive_path, url, cached in candidate_archives:
+        extract_root = (
+            context.work_cache_root
+            / "pypi"
+            / normalized
+            / resolved_release_version
+            / "extracted"
+            / archive_path.name
+        )
+        if not archive_path.exists():
+            context.log(f"downloading {project_name} {resolved_release_version} from PyPI")
+            assert url is not None
+            _download_file(url, archive_path)
+        elif cached:
+            context.log(f"reusing cached {project_name} {resolved_release_version} archive without refreshing PyPI metadata")
+        else:
+            context.log(f"reusing cached {project_name} {resolved_release_version} archive")
+
+        try:
+            extracted_root = _extract_archive(archive_path, extract_root, context.log)
+            context.log(f"using {project_name} {resolved_release_version} source from {extracted_root}")
+
+            _copy_entry(_resolve_source_entry(extracted_root, "pandas"), context.source_root / "Lib" / "pandas")
+
+            has_meson = _copy_optional_source_entry(
+                extracted_root,
+                "meson.build",
+                pandas_source_root(context) / "meson.build",
+            )
+            _copy_optional_source_entry(
+                extracted_root,
+                "pyproject.toml",
+                pandas_source_root(context) / "pyproject.toml",
+            )
+            if has_meson:
+                _copy_entry(
+                    _resolve_source_entry(extracted_root, "generate_version.py"),
+                    pandas_source_root(context) / "generate_version.py",
+                )
+                _copy_entry(
+                    _resolve_source_entry(extracted_root, "generate_pxi.py"),
+                    pandas_source_root(context) / "generate_pxi.py",
+                )
+                _copy_optional_source_entry(
+                    extracted_root,
+                    "_version_meson.py",
+                    pandas_source_root(context) / "_version_meson.py",
+                )
+            return
+        except RuntimeError as exc:
+            failures.append(f"{archive_path.name}: {exc}")
+            context.log(f"distribution candidate failed for {project_name} {resolved_release_version}: {archive_path.name}: {exc}")
+
+    target_description = f" release {release_version!r}" if release_version is not None else ""
+    raise RuntimeError(
+        f"all compatible PyPI distribution artifacts failed for {project_name!r}{target_description}: "
+        + "; ".join(failures)
+    )
 
 
 def _render_meson_wrapper(context) -> str:
@@ -343,57 +452,40 @@ def _run_with_env(context, command: list[str], *, cwd: Path, timeout: float, env
 
 
 def _patch_pandas_python_probe(context) -> None:
+    if not pandas_uses_meson_layout(context):
+        return
     path = pandas_source_root(context) / "meson.build"
     launcher = pandas_meson_launcher_path(context).as_posix()
-    original = "py = import('python').find_installation(pure: false)\n"
-    replacement = f"py = import('python').find_installation('{launcher}', pure: false)\n"
     text = path.read_text(encoding="utf-8")
-    if replacement in text:
+    if launcher in text and "find_installation" in text:
         return
-    if original not in text:
-        raise RuntimeError(f"expected python installation probe not found in {path}")
-    path.write_text(text.replace(original, replacement, 1), encoding="utf-8", newline="\n")
+    updated = replace_regex_once(
+        text,
+        r"(?m)^py = import\('python'\)\.find_installation\((?:pure:\s*false)?\)\s*$",
+        f"py = import('python').find_installation('{launcher}', pure: false)",
+        label="pandas python installation probe",
+    )
+    path.write_text(updated, encoding="utf-8", newline="\n")
 
 
 def _patch_pandas_numpy_include(context) -> None:
+    if not pandas_uses_meson_layout(context):
+        return
     numpy_include = pandas_numpy_include_dir(context).as_posix()
     numpy_generated_include = pandas_numpy_generated_include_dir(context).as_posix()
 
     def patch(text: str) -> str:
-        original = """incdir_numpy = run_command(
-    py,
-    [
-        '-c',
-        '''
-import os
-import numpy as np
-try:
-    # Check if include directory is inside the pandas dir
-    # e.g. a venv created inside the pandas dir
-    # If so, convert it to a relative path
-    incdir = os.path.relpath(np.get_include())
-except Exception:
-    incdir = np.get_include()
-print(incdir)
-     ''',
-    ],
-    check: true,
-).stdout().strip()
-"""
-        replacement = (
-            f"incdir_numpy = '{numpy_include}'\n"
-            f"incdir_numpy_generated = '{numpy_generated_include}'\n"
-        )
-        text = replace_text_once(
+        replacement = f"incdir_numpy = '{numpy_include}'\nincdir_numpy_generated = '{numpy_generated_include}'\n"
+        text = replace_regex_once(
             text,
-            original,
+            r"(?ms)^incdir_numpy = run_command\(py,.*?^\)\.stdout\(\)\.strip\(\)\s*",
             replacement,
             label="pandas numpy include probe",
         )
-        return replace_text_once(
+        return replace_regex_once(
             text,
-            "inc_np = include_directories(incdir_numpy)\n",
-            "inc_np = include_directories(incdir_numpy, incdir_numpy_generated)\n",
+            r"(?m)^inc_np = include_directories\(incdir_numpy\)\s*$",
+            "inc_np = include_directories(incdir_numpy, incdir_numpy_generated)",
             label="pandas numpy generated include dir",
         )
 
@@ -401,6 +493,8 @@ print(incdir)
 
 
 def _patch_generate_version(context) -> None:
+    if not pandas_uses_meson_layout(context):
+        return
     def patch(text: str) -> str:
         text = replace_text_once(
             text,
@@ -442,41 +536,49 @@ def _patch_pandas_datetime_symbols(context) -> None:
         context,
         "pandas_builtin/source/pandas/_libs/include/pandas/vendored/numpy/datetime/np_datetime.h",
         replace_symbols,
+        allow_missing=True,
     )
     transform_source_text(
         context,
         "pandas_builtin/source/pandas/_libs/src/vendored/numpy/datetime/np_datetime.c",
         replace_symbols,
+        allow_missing=True,
     )
     transform_source_text(
         context,
         "pandas_builtin/source/pandas/_libs/src/vendored/numpy/datetime/np_datetime_strings.c",
         replace_symbols,
+        allow_missing=True,
     )
     transform_source_text(
         context,
         "pandas_builtin/source/pandas/_libs/tslibs/np_datetime.pyx",
         replace_symbols,
+        allow_missing=True,
     )
 
     def patch_pd_datetime(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "add_minutes_to_datetimestruct(out, -minutes_offset);",
-            "pandas_add_minutes_to_datetimestruct(out, -minutes_offset);",
-            label="pandas_datetime use renamed minute adjustment helper",
-        )
-        return replace_text_once(
-            text,
-            "  capi->get_datetime_metadata_from_dtype = get_datetime_metadata_from_dtype;\n",
-            "  capi->get_datetime_metadata_from_dtype = pandas_get_datetime_metadata_from_dtype;\n",
-            label="pandas_datetime export renamed datetime metadata helper",
-        )
+        if "add_minutes_to_datetimestruct(out, -minutes_offset);" in text:
+            text = replace_text_once(
+                text,
+                "add_minutes_to_datetimestruct(out, -minutes_offset);",
+                "pandas_add_minutes_to_datetimestruct(out, -minutes_offset);",
+                label="pandas_datetime use renamed minute adjustment helper",
+            )
+        if "  capi->get_datetime_metadata_from_dtype = get_datetime_metadata_from_dtype;\n" in text:
+            text = replace_text_once(
+                text,
+                "  capi->get_datetime_metadata_from_dtype = get_datetime_metadata_from_dtype;\n",
+                "  capi->get_datetime_metadata_from_dtype = pandas_get_datetime_metadata_from_dtype;\n",
+                label="pandas_datetime export renamed datetime metadata helper",
+            )
+        return text
 
     transform_source_text(
         context,
         "pandas_builtin/source/pandas/_libs/src/datetime/pd_datetime.c",
         patch_pd_datetime,
+        allow_missing=True,
     )
 
 
@@ -510,31 +612,41 @@ they can coexist with the standalone ujson builtin in the final static link.
     )
 
     def patch_ultrajson_header(text: str) -> str:
-        return replace_text_once(
-            text,
-            '#include "pandas/portable.h"\n',
-            '#include "pandas/portable.h"\n#include "pandas/vendored/ujson/lib/staticpython_rename.h"\n',
-            label="pandas vendored ujson rename header include",
-        )
+        if '#include "pandas/vendored/ujson/lib/staticpython_rename.h"\n' in text:
+            return text
+        if '#include "pandas/portable.h"\n' in text:
+            return replace_text_once(
+                text,
+                '#include "pandas/portable.h"\n',
+                '#include "pandas/portable.h"\n#include "pandas/vendored/ujson/lib/staticpython_rename.h"\n',
+                label="pandas vendored ujson rename header include",
+            )
+        return text
 
     transform_source_text(
         context,
         "pandas_builtin/source/pandas/_libs/include/pandas/vendored/ujson/lib/ultrajson.h",
         patch_ultrajson_header,
+        allow_missing=True,
     )
 
     def patch_ujson_module(text: str) -> str:
-        return replace_text_once(
-            text,
-            '#include "numpy/arrayobject.h"\n',
-            '#include "numpy/arrayobject.h"\n#include "pandas/vendored/ujson/lib/staticpython_rename.h"\n',
-            label="pandas vendored ujson module rename header include",
-        )
+        if '#include "pandas/vendored/ujson/lib/staticpython_rename.h"\n' in text:
+            return text
+        if '#include "numpy/arrayobject.h"\n' in text:
+            return replace_text_once(
+                text,
+                '#include "numpy/arrayobject.h"\n',
+                '#include "numpy/arrayobject.h"\n#include "pandas/vendored/ujson/lib/staticpython_rename.h"\n',
+                label="pandas vendored ujson module rename header include",
+            )
+        return text
 
     transform_source_text(
         context,
         "pandas_builtin/source/pandas/_libs/src/vendored/ujson/python/ujson.c",
         patch_ujson_module,
+        allow_missing=True,
     )
 
 
@@ -549,6 +661,8 @@ def prepare_pandas_project(context) -> None:
 
 
 def prepare_pandas_build_files(context) -> None:
+    if not pandas_uses_meson_layout(context):
+        return
     if not pandas_numpy_include_dir(context).exists():
         raise RuntimeError(
             "pandas requires the NumPy integration to be materialized first; "
@@ -852,12 +966,17 @@ def _copy_runtime_support_files(context) -> None:
     version_path = pandas_source_root(context) / "_version_meson.py"
     if version_path.exists():
         shutil.copy2(version_path, pandas_runtime_dir(context) / "_version_meson.py")
-    shutil.copy2(pandas_source_root(context) / "pyproject.toml", pandas_runtime_dir(context) / "pyproject.toml")
+    pyproject_path = pandas_source_root(context) / "pyproject.toml"
+    if pyproject_path.exists():
+        shutil.copy2(pyproject_path, pandas_runtime_dir(context) / "pyproject.toml")
 
 
 def prepare_pandas_artifacts(context) -> None:
     if context.platform != "x64":
         raise RuntimeError(f"pandas builtin integration currently supports only x64, not {context.platform}")
+    if not pandas_uses_meson_layout(context):
+        context.log("skip pandas Meson artifact preparation for legacy non-Meson source layout")
+        return
 
     ensure_tool("ninja")
     ensure_tool("lib")
@@ -881,32 +1000,23 @@ def prepare_pandas_artifacts(context) -> None:
         _archive_pandas_builtin(context, module_name)
 
 
-LIBRARY_INTEGRATION = pypi_library(
+LIBRARY_INTEGRATION = LibraryIntegration(
     name="pandas",
+    source_provider="pypi",
+    project_name=PANDAS_PROJECT_NAME,
     release_version="3.0.2",
-    source_mapping={
-        "pandas": "Lib/pandas",
-        "_version_meson.py": "pandas_builtin/source/_version_meson.py",
-        "generate_pxi.py": "pandas_builtin/source/generate_pxi.py",
-        "generate_version.py": "pandas_builtin/source/generate_version.py",
-        "meson.build": "pandas_builtin/source/meson.build",
-        "pyproject.toml": "pandas_builtin/source/pyproject.toml",
-    },
+    dependencies=["numpy"],
+    auto_resolve_dependencies=True,
+    overlay_entries=[],
     materialized_paths=[
         "Lib/pandas/__init__.py",
-        "Lib/pandas/_version.py",
-        "Lib/pandas/_version_meson.py",
-        "Lib/pandas/pyproject.toml",
         "Lib/pandas/core/frame.py",
-        "Lib/pandas/io/parsers/readers.py",
-        "Lib/pandas/_libs/lib.pyx",
-        "Lib/pandas/_libs/tslibs/timestamps.pyx",
-        "Lib/pandas/_libs/window/aggregations.pyx",
-        "pandas_builtin/source/meson.build",
-        "pandas_builtin/source/generate_pxi.py",
-        "pandas_builtin/source/generate_version.py",
+        "Lib/pandas/io/__init__.py",
     ],
+    cleanup_paths=[],
     python_packages=["pandas"],
+    static_library_projects_release_x64=[],
+    native_static_projects=[],
     builtin_module_registrations=[
         {
             "name": module_name,
@@ -922,7 +1032,8 @@ LIBRARY_INTEGRATION = pypi_library(
         f"{module_name}.lib"
         for module_name in PANDAS_EXTENSION_MODULES
     ],
-    prepare_source_hooks=[prepare_pandas_project],
+    prepare_source_hooks=[prepare_pandas_source, prepare_pandas_project],
+    pre_patch_hooks=[],
     post_patch_hooks=[
         prepare_pandas_build_files,
         _patch_pandas_python_probe,
@@ -930,6 +1041,6 @@ LIBRARY_INTEGRATION = pypi_library(
         _patch_generate_version,
         _patch_pandas_datetime_symbols,
         _patch_pandas_ujson_symbols,
-        prepare_pandas_artifacts,
     ],
+    pre_build_hooks=[prepare_pandas_artifacts],
 )

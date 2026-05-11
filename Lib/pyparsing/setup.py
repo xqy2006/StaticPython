@@ -1,4 +1,31 @@
-from libs import replace_text_all, simple_library, transform_source_text
+from libs import replace_text_all, simple_library, source_path, transform_first_existing_source_text
+
+
+def normalize_pyparsing_source(context) -> None:
+    package_root = source_path(context, "Lib/pyparsing")
+    init_py = package_root / "__init__.py"
+    legacy_py3 = source_path(context, "Lib/pyparsing_py3.py")
+
+    if package_root.is_file():
+        text = package_root.read_text(encoding="utf-8")
+        package_root.unlink()
+        package_root.mkdir(parents=True, exist_ok=True)
+        init_py.write_text(text, encoding="utf-8", newline="\n")
+        context.log("normalized legacy pyparsing.py module into Lib/pyparsing/__init__.py")
+        return
+
+    if package_root.is_dir():
+        if not init_py.exists() and legacy_py3.exists():
+            text = legacy_py3.read_text(encoding="utf-8")
+            init_py.write_text(text, encoding="utf-8", newline="\n")
+            context.log("restored missing Lib/pyparsing/__init__.py from legacy pyparsing_py3.py")
+        return
+
+    if legacy_py3.exists():
+        package_root.mkdir(parents=True, exist_ok=True)
+        text = legacy_py3.read_text(encoding="utf-8")
+        init_py.write_text(text, encoding="utf-8", newline="\n")
+        context.log("materialized legacy pyparsing_py3.py into Lib/pyparsing/__init__.py")
 
 
 def patch_pyparsing_unicode_identifiers(context) -> None:
@@ -105,11 +132,24 @@ def patch_pyparsing_unicode_identifiers(context) -> None:
             text = replace_text_all(text, old, new)
         return text
 
-    transform_source_text(context, "Lib/pyparsing/unicode.py", patch)
+    transform_first_existing_source_text(
+        context,
+        [
+            "Lib/pyparsing/unicode.py",
+            "Lib/pyparsing/__init__.py",
+        ],
+        patch,
+        allow_all_missing=True,
+    )
 
 
 LIBRARY_INTEGRATION = simple_library(
     name="pyparsing",
-    overlay_entries=["Lib/pyparsing"],
+    source_mapping={
+        "?pyparsing": "Lib/pyparsing",
+        "?pyparsing_py3.py": "Lib/pyparsing_py3.py",
+    },
+    materialized_paths=["Lib/pyparsing"],
+    prepare_source_hooks=[normalize_pyparsing_source],
     post_patch_hooks=[patch_pyparsing_unicode_identifiers],
 )

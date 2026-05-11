@@ -1,14 +1,21 @@
-from libs import replace_text_once, simple_library, transform_source_text
+import re
+
+from libs import simple_library, transform_source_text
 
 
 def patch_ipython_sources(context):
     def patch_skipdoctest_import(text: str) -> str:
-        return replace_text_once(
+        if "def skip_doctest(function):\n    return function\n" in text:
+            return text
+        updated, count = re.subn(
+            r"(?m)^from IPython\.testing\.skipdoctest import skip_doctest\s*$",
+            "def skip_doctest(function):\n    return function",
             text,
-            "from IPython.testing.skipdoctest import skip_doctest\n",
-            "def skip_doctest(function):\n    return function\n",
-            label="IPython skip_doctest fallback",
+            count=1,
         )
+        if count == 1:
+            return updated
+        return text
 
     ipython_root = context.source_root / "Lib" / "IPython"
     for path in sorted(ipython_root.rglob("*.py")):

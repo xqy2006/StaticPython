@@ -34,7 +34,7 @@ PYZMQ_SYSTEM_LIBRARIES = [
     "Rpcrt4.lib",
 ]
 
-PYZMQ_LEGACY_EXTENSION_SOURCES = [
+PYZMQ_SPLIT_LEGACY_EXTENSION_SOURCES = [
     ("zmq.backend.cython.constants", "Lib/zmq/backend/cython/constants.c"),
     ("zmq.backend.cython.error", "Lib/zmq/backend/cython/error.c"),
     ("zmq.backend.cython._poll", "Lib/zmq/backend/cython/_poll.c"),
@@ -46,6 +46,21 @@ PYZMQ_LEGACY_EXTENSION_SOURCES = [
     ("zmq.backend.cython._proxy_steerable", "Lib/zmq/backend/cython/_proxy_steerable.c"),
     ("zmq.backend.cython._version", "Lib/zmq/backend/cython/_version.c"),
     ("zmq.devices.monitoredqueue", "Lib/zmq/devices/monitoredqueue.c"),
+]
+
+PYZMQ_CORE_LEGACY_EXTENSION_SOURCES = [
+    ("zmq.core.constants", "Lib/zmq/core/constants.c"),
+    ("zmq.core.error", "Lib/zmq/core/error.c"),
+    ("zmq.core.poll", "Lib/zmq/core/poll.c"),
+    ("zmq.core.stopwatch", "Lib/zmq/core/stopwatch.c"),
+    ("zmq.core.context", "Lib/zmq/core/context.c"),
+    ("zmq.core.message", "Lib/zmq/core/message.c"),
+    ("zmq.core.socket", "Lib/zmq/core/socket.c"),
+    ("zmq.core.device", "Lib/zmq/core/device.c"),
+    ("zmq.core.version", "Lib/zmq/core/version.c"),
+    ("zmq.devices.monitoredqueue", "Lib/zmq/devices/monitoredqueue.c"),
+    ("zmq.utils.initthreads", "Lib/zmq/utils/initthreads.c"),
+    ("zmq.utils.rebuffer", "Lib/zmq/utils/rebuffer.c"),
 ]
 
 LIBSODIUM_ARCHIVE_URL_TEMPLATE = (
@@ -156,6 +171,14 @@ def pyzmq_build_metadata_path(context) -> Path:
     return source_path(context, "pyzmq_builtin/build-metadata.txt")
 
 
+def pyzmq_setup_path(context) -> Path:
+    return source_path(context, "pyzmq_builtin/setup.py")
+
+
+def _has_pyzmq_build_metadata(context) -> bool:
+    return pyzmq_build_metadata_path(context).exists()
+
+
 def _read_pyzmq_build_metadata(context) -> str:
     return pyzmq_build_metadata_path(context).read_text(encoding="utf-8")
 
@@ -163,8 +186,32 @@ def _read_pyzmq_build_metadata(context) -> str:
 def _pyzmq_native_build_mode(context) -> str | None:
     if source_path(context, "Lib/zmq/backend/cython/_zmq.py").exists():
         return "modern"
-    if any(source_path(context, relative).exists() for _, relative in PYZMQ_LEGACY_EXTENSION_SOURCES):
-        return "legacy"
+    if any(
+        source_path(context, relative).exists()
+        for relative in (
+            "Lib/zmq/backend/cython/constants.c",
+            "Lib/zmq/backend/cython/context.c",
+            "Lib/zmq/backend/cython/socket.c",
+            "Lib/zmq/backend/cython/_version.c",
+        )
+    ):
+        if _has_pyzmq_build_metadata(context):
+            return "legacy-split"
+        context.log("pyzmq split-legacy layout detected without bundled build metadata; native build disabled")
+        return None
+    if any(
+        source_path(context, relative).exists()
+        for relative in (
+            "Lib/zmq/core/constants.c",
+            "Lib/zmq/core/context.c",
+            "Lib/zmq/core/socket.c",
+            "Lib/zmq/core/version.c",
+        )
+    ):
+        if _has_pyzmq_build_metadata(context):
+            return "legacy-core"
+        context.log("pyzmq core-legacy layout detected without bundled build metadata; native build disabled")
+        return None
     return None
 
 
@@ -218,28 +265,67 @@ def libzmq_version(context) -> str:
     return version
 
 
-def pyzmq_version(context) -> str:
-    version_path = source_path(context, "Lib/zmq/sugar/version.py")
-    text = version_path.read_text(encoding="utf-8")
+def _parse_pyzmq_version_text(text: str, source_name: str) -> str:
     direct_match = re.search(r'__version__(?::\s*str)?\s*=\s*["\']([^"\']+)["\']', text)
     if direct_match is not None:
         raw_version = direct_match.group(1)
+        if "%" not in raw_version:
+            raw_version = re.sub(r"\.(a|b|rc)(?=\d)", r"\1", raw_version)
+            return str(Version(raw_version))
+    formatted_match = re.search(
+        r"__version__(?::\s*str)?\s*=\s*['\"]%i\.%i\.%i['\"]\s*%\s*\(\s*VERSION_MAJOR\s*,\s*VERSION_MINOR\s*,\s*VERSION_PATCH\s*\)",
+        text,
+    )
+    if formatted_match is not None:
+        extra_match = re.search(r'^VERSION_EXTRA\s*=\s*["\']([^"\']*)["\']\s*$', text, flags=re.MULTILINE)
+        extra = extra_match.group(1).lstrip(".") if extra_match is not None else ""
+        raw_version = (
+            f"{_require_int_from_text(text, 'VERSION_MAJOR')}."
+            f"{_require_int_from_text(text, 'VERSION_MINOR')}."
+            f"{_require_int_from_text(text, 'VERSION_PATCH')}"
+            f"{extra}"
+        )
         raw_version = re.sub(r"\.(a|b|rc)(?=\d)", r"\1", raw_version)
         return str(Version(raw_version))
 
-    def _require_int(name: str) -> str:
-        match = re.search(rf"^{re.escape(name)}\s*=\s*(\d+)\s*$", text, flags=re.MULTILINE)
-        if match is None:
-            raise RuntimeError(f"could not detect {name} from {version_path}")
-        return match.group(1)
+    if "VERSION_MAJOR" in text and "VERSION_MINOR" in text and "VERSION_PATCH" in text:
+        major = _require_int_from_text(text, "VERSION_MAJOR")
+        minor = _require_int_from_text(text, "VERSION_MINOR")
+        patch = _require_int_from_text(text, "VERSION_PATCH")
+        extra_match = re.search(r'^VERSION_EXTRA\s*=\s*["\']([^"\']*)["\']\s*$', text, flags=re.MULTILINE)
+        extra = extra_match.group(1).lstrip(".") if extra_match is not None else ""
+        return str(Version(f"{major}.{minor}.{patch}{extra}"))
 
-    major = _require_int("VERSION_MAJOR")
-    minor = _require_int("VERSION_MINOR")
-    patch = _require_int("VERSION_PATCH")
-    extra_match = re.search(r'^VERSION_EXTRA\s*=\s*["\']([^"\']*)["\']\s*$', text, flags=re.MULTILINE)
-    extra = extra_match.group(1).lstrip(".") if extra_match is not None else ""
-    raw_version = f"{major}.{minor}.{patch}{extra}"
-    return str(Version(raw_version))
+    raise RuntimeError(f"could not detect pyzmq __version__ from {source_name}")
+
+
+def pyzmq_version(context) -> str:
+    for version_path in (
+        source_path(context, "Lib/zmq/sugar/version.py"),
+        source_path(context, "Lib/zmq/core/version.py"),
+        source_path(context, "Lib/zmq/core/version.pyx"),
+    ):
+        if version_path.exists():
+            return _parse_pyzmq_version_text(version_path.read_text(encoding="utf-8"), str(version_path))
+
+    setup_path = pyzmq_setup_path(context)
+    if setup_path.exists():
+        setup_text = setup_path.read_text(encoding="utf-8")
+        version_match = re.search(r'(?m)^\s*version\s*=\s*["\']([^"\']+)["\']', setup_text)
+        if version_match is not None:
+            raw_version = re.sub(r"\.(a|b|rc)(?=\d)", r"\1", version_match.group(1))
+            return str(Version(raw_version))
+
+    raise RuntimeError("could not detect pyzmq version metadata from Lib/zmq or pyzmq_builtin/setup.py")
+
+
+def _require_int_from_text(text: str, name: str, version_path: Path | None = None) -> str:
+    match = re.search(rf"^{re.escape(name)}\s*=\s*(\d+)\s*$", text, flags=re.MULTILINE)
+    if match is None:
+        if version_path is None:
+            raise RuntimeError(f"could not detect {name} from version metadata")
+        raise RuntimeError(f"could not detect {name} from {version_path}")
+    return match.group(1)
 
 
 def pyzmq_archive_path(context) -> Path:
@@ -379,9 +465,17 @@ def ensure_legacy_pyzmq_support_files(context) -> None:
     _ensure_legacy_platform_hpp(context)
 
 
-def _discover_legacy_pyzmq_extensions(context) -> list[dict[str, str]]:
+def _legacy_extension_sources_for_mode(mode: str) -> list[tuple[str, str]]:
+    if mode == "legacy-split":
+        return PYZMQ_SPLIT_LEGACY_EXTENSION_SOURCES
+    if mode == "legacy-core":
+        return PYZMQ_CORE_LEGACY_EXTENSION_SOURCES
+    raise RuntimeError(f"unsupported pyzmq legacy mode: {mode}")
+
+
+def _discover_legacy_pyzmq_extensions(context, mode: str) -> list[dict[str, str]]:
     extensions: list[dict[str, str]] = []
-    for module_name, source_relative in PYZMQ_LEGACY_EXTENSION_SOURCES:
+    for module_name, source_relative in _legacy_extension_sources_for_mode(mode):
         if not source_path(context, source_relative).exists():
             continue
         extensions.append(
@@ -396,12 +490,19 @@ def _discover_legacy_pyzmq_extensions(context) -> list[dict[str, str]]:
     return extensions
 
 
-def _legacy_extension_include_dirs(context) -> list[str]:
+def _legacy_extension_include_dirs(context, mode: str) -> list[str]:
     bundle_include = legacy_libzmq_root(context) / "include"
-    return [
+    include_dirs = [
         "Lib/zmq/utils",
         bundle_include.relative_to(context.source_root).as_posix(),
     ]
+    if mode == "legacy-core":
+        include_dirs[:0] = [
+            "Lib/zmq",
+            "Lib/zmq/core",
+            "Lib/zmq/devices",
+        ]
+    return include_dirs
 
 
 def _legacy_extension_defines() -> list[str]:
@@ -804,7 +905,7 @@ def _render_modern_pyzmq_project(generated_source: str, bundle_include_dir: str)
     )
 
 
-def _write_legacy_pyzmq_projects(context, legacy_extensions: list[dict[str, str]]) -> None:
+def _write_legacy_pyzmq_projects(context, legacy_extensions: list[dict[str, str]], mode: str) -> None:
     libzmq_sources, libzmq_include_dirs, libzmq_defines = _discover_legacy_libzmq_project_inputs(context)
     write_source_text(
         context,
@@ -820,7 +921,7 @@ def _write_legacy_pyzmq_projects(context, legacy_extensions: list[dict[str, str]
         ),
     )
 
-    include_dirs = _legacy_extension_include_dirs(context)
+    include_dirs = _legacy_extension_include_dirs(context, mode)
     defines = _legacy_extension_defines()
     for extension in legacy_extensions:
         write_source_text(
@@ -849,15 +950,15 @@ def prepare_pyzmq_project(context) -> None:
         )
         return
 
-    if mode == "legacy":
+    if mode in {"legacy-split", "legacy-core"}:
         ensure_legacy_pyzmq_support_files(context)
-        legacy_extensions = _discover_legacy_pyzmq_extensions(context)
+        legacy_extensions = _discover_legacy_pyzmq_extensions(context, mode)
         if not legacy_extensions:
             context.log("legacy pyzmq layout detected but no pre-generated extension sources were found")
             _set_pyzmq_native_build_configuration(None)
             return
         _set_pyzmq_native_build_configuration("legacy", legacy_extensions)
-        _write_legacy_pyzmq_projects(context, legacy_extensions)
+        _write_legacy_pyzmq_projects(context, legacy_extensions, mode)
         return
 
     context.log("pyzmq native build disabled because no supported source layout was detected")
@@ -952,7 +1053,8 @@ LIBRARY_INTEGRATION = pypi_library(
     project_name="pyzmq",
     source_mapping={
         "zmq": "Lib/zmq",
-        "CMakeLists.txt || buildutils/bundle.py": "pyzmq_builtin/build-metadata.txt",
+        "?CMakeLists.txt || buildutils/bundle.py": "pyzmq_builtin/build-metadata.txt",
+        "?setup.py": "pyzmq_builtin/setup.py",
     },
     cleanup_paths=[
         "pyzmq_builtin/buildutils",

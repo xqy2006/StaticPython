@@ -54,7 +54,7 @@ def _prepare_html5lib_source(context) -> None:
         try:
             extracted_root = _extract_archive(archive_path, extract_root, context.log)
             context.log(f"using {project_name} {resolved_release_version} source from {extracted_root}")
-            package_src = _resolve_source_entry(extracted_root, "html5lib||src/html5lib")
+            package_src = _resolve_source_entry(extracted_root, "html5lib||src/html5lib||src")
             _copy_entry(package_src, context.source_root / "Lib" / "html5lib")
             return
         except RuntimeError as exc:

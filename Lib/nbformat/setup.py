@@ -36,6 +36,11 @@ def embed_nbformat_schemas(context) -> None:
                 )
             else:
                 return text
+        if "from copy import deepcopy\n" not in text:
+            if "import warnings\n" in text:
+                text = text.replace("import warnings\n", "import warnings\nfrom copy import deepcopy\n", 1)
+            elif "import json\n" in text:
+                text = text.replace("import json\n", "import json\nfrom copy import deepcopy\n", 1)
         if "schema_name = os.path.basename(schema_path)" in text:
             return text
         if "def _get_schema_json(" in text:
@@ -68,29 +73,33 @@ def embed_nbformat_schemas(context) -> None:
             )
         return replace_regex_once(
             text,
-            r"(?ms)\s+with open\(schema_path\) as f:\n\s+schema_json = json\.load\(f\)\n",
-            "    schema_name = os.path.basename(schema_path)\n"
-            "    if schema_name in _STATICPYTHON_SCHEMAS:\n"
-            "        return deepcopy(_STATICPYTHON_SCHEMAS[schema_name])\n"
-            "    with open(schema_path) as f:\n"
-            "        schema_json = json.load(f)\n",
+            r"(?m)^(?P<indent>[ \t]+)with (?P<open_stmt>open\(schema_path\)|Path\(schema_path\)\.open\(encoding=[\"']utf8[\"']\)) as f:\n(?P=indent)    schema_json = json\.load\(f\)\n",
+            "\\g<indent>schema_name = os.path.basename(schema_path)\n"
+            "\\g<indent>if schema_name in _STATICPYTHON_SCHEMAS:\n"
+            "\\g<indent>    schema_json = deepcopy(_STATICPYTHON_SCHEMAS[schema_name])\n"
+            "\\g<indent>else:\n"
+            "\\g<indent>    with \\g<open_stmt> as f:\n"
+            "\\g<indent>        schema_json = json.load(f)\n",
             label="nbformat schema loader",
         )
 
     def patch_version(text: str) -> str:
-        if "from importlib.metadata import version" not in text:
+        if "from importlib.metadata import" not in text or "PackageNotFoundError" in text:
             return text
-        if "PackageNotFoundError" in text:
+        version_match = re.search(r'(?m)^__version__ = version\((?P<arg>.+?)\)(?: or [\'"]0\.0\.0[\'"])?\n', text)
+        import_match = re.search(r"(?m)^from importlib\.metadata import (?P<names>.+)\n", text)
+        if version_match is None or import_match is None or "version" not in import_match.group("names"):
             return text
+        imported_names = import_match.group("names")
+        replacement_names = imported_names if "PackageNotFoundError" in imported_names else f"PackageNotFoundError, {imported_names}"
+        updated = text[: import_match.start()] + f"from importlib.metadata import {replacement_names}\n" + text[import_match.end() :]
         updated, count = re.subn(
-            r'from importlib\.metadata import version\n\n__version__ = version\("nbformat"\) or "0\.0\.0"\n',
-            'from importlib.metadata import PackageNotFoundError, version\n\ntry:\n    __version__ = version("nbformat")\nexcept PackageNotFoundError:\n    __version__ = "0.0.0"\n',
-            text,
+            r'(?m)^__version__ = version\((?P<arg>.+?)\)(?: or [\'"]0\.0\.0[\'"])?\n',
+            'try:\n    __version__ = version(\\g<arg>)\nexcept PackageNotFoundError:\n    __version__ = "0.0.0"\n',
+            updated,
             count=1,
         )
-        if count != 1:
-            raise RuntimeError("expected importlib.metadata version block in nbformat._version")
-        return updated
+        return updated if count == 1 else text
 
     transform_source_text(context, "Lib/nbformat/validator.py", patch_validator)
     transform_source_text(context, "Lib/nbformat/_version.py", patch_version)

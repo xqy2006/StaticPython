@@ -3,10 +3,12 @@ from libs import replace_regex_once, replace_text_once, simple_library, source_p
 
 def patch_nbconvert_sources(context) -> None:
     templates_root = source_path(context, "share/jupyter/nbconvert/templates")
+    if not templates_root.exists():
+        templates_root = source_path(context, "Lib/nbconvert/templates")
     templates = {
         path.relative_to(templates_root).as_posix(): path.read_text(encoding="utf-8")
         for path in sorted(templates_root.rglob("*"))
-        if path.is_file() and path.suffix.lower() in {".j2", ".json", ".tpl", ".css", ".md"}
+        if path.is_file() and path.suffix.lower() in {".j2", ".json", ".tpl", ".tplx", ".css", ".md"}
     }
     confs = {
         template_name: templates[f"{template_name}/conf.json"]
@@ -152,14 +154,9 @@ def _iter_exporter_entries():
 """,
             label="nbconvert embedded template conf loader",
         )
-        text = replace_text_once(
+        text = replace_regex_once(
             text,
-            "                if not found_at_least_one:\n"
-            "                    paths = \"\\n\\t\".join(root_dirs)\n"
-            "                    msg = f\"No template sub-directory with name {base_template!r} found in the following paths:\\n\\t{paths}\"\n"
-            "                    raise ValueError(msg)\n"
-            "            merged_conf = recursive_update(dict(conf), merged_conf)\n"
-            "            base_template = t.cast(t.Any, conf.get(\"base_template\"))\n",
+            r"(?ms)^(\s+)if not found_at_least_one:\n(\s+)paths = \"\\n\\t\"\.join\(root_dirs\)\n(\s+)msg = f\"No template sub-directory with name \{base_template!r\} found in the following paths:\\n\\t\{paths\}\"\n(\s+)raise ValueError\(msg\)\n",
             "                if not found_at_least_one:\n"
             "                    static_conf_text = _STATICPYTHON_TEMPLATE_CONFS.get(base_template)\n"
             "                    if static_conf_text is not None or base_template in _STATICPYTHON_TEMPLATE_NAMES:\n"
@@ -169,9 +166,7 @@ def _iter_exporter_entries():
             "                if not found_at_least_one:\n"
             "                    paths = \"\\n\\t\".join(root_dirs)\n"
             "                    msg = f\"No template sub-directory with name {base_template!r} found in the following paths:\\n\\t{paths}\"\n"
-            "                    raise ValueError(msg)\n"
-            "            merged_conf = recursive_update(dict(conf), merged_conf)\n"
-            "            base_template = t.cast(t.Any, conf.get(\"base_template\"))\n",
+            "                    raise ValueError(msg)\n",
             label="nbconvert embedded template name discovery",
         )
         return replace_regex_once(
@@ -227,7 +222,7 @@ LIBRARY_INTEGRATION = simple_library(
     name="nbconvert",
     source_mapping={
         "nbconvert": "Lib/nbconvert",
-        "share/templates": "share/jupyter/nbconvert/templates",
+        "share/templates || nbconvert/templates": "share/jupyter/nbconvert/templates",
     },
     materialized_paths=["Lib/nbconvert/_staticpython_templates.py"],
     post_patch_hooks=[patch_nbconvert_sources],

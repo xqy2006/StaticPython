@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 from libs import pypi_library, source_path, write_source_text
@@ -8,24 +9,6 @@ from libs import pypi_library, source_path, write_source_text
 
 CONTOURPY_CEXT_PROJECT_GUID = "{A0137B09-DC4A-432F-A4A3-3BD7838B7986}"
 CONTOURPY_RELEASE_VERSION = "1.3.3"
-
-CONTOURPY_SOURCES = [
-    "chunk_local.cpp",
-    "contour_generator.cpp",
-    "converter.cpp",
-    "fill_type.cpp",
-    "line_type.cpp",
-    "mpl2005_original.cpp",
-    "mpl2005.cpp",
-    "mpl2014.cpp",
-    "outer_or_hole.cpp",
-    "serial.cpp",
-    "threaded.cpp",
-    "util.cpp",
-    "wrap.cpp",
-    "z_interp.cpp",
-]
-
 
 def _project_configurations() -> str:
     return """  <ItemGroup Label="ProjectConfigurations">
@@ -37,11 +20,34 @@ def _project_configurations() -> str:
 """
 
 
-def _compile_items() -> str:
-    return "\n".join(
-        f'    <ClCompile Include="..\\contourpy_builtin\\src\\{name}" />'
-        for name in CONTOURPY_SOURCES
-    )
+def _parse_meson_src_files(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r"ext\s*=\s*py3\.extension_module\(\s*'_contourpy'\s*,\s*\[(?P<body>.*?)\]\s*,", text, re.S)
+    if match is None:
+        raise RuntimeError(f"could not locate contourpy extension module sources in {path}")
+    body = match.group("body")
+    sources = re.findall(r"'([^']+\.cpp)'", body)
+    if not sources:
+        raise RuntimeError(f"could not parse contourpy source list from {path}")
+    return sources
+
+
+def _parse_setup_py_src_files(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r"_contourpy\s*=\s*Pybind11Extension\(\s*['\"]contourpy\._contourpy['\"]\s*,\s*sources=\[(?P<body>.*?)\]\s*,", text, re.S)
+    if match is None:
+        raise RuntimeError(f"could not locate contourpy Pybind11Extension sources in {path}")
+    body = match.group("body")
+    sources = re.findall(r"['\"]([^'\"]+\.cpp)['\"]", body)
+    if not sources:
+        raise RuntimeError(f"could not parse contourpy setup.py source list from {path}")
+    normalized: list[str] = []
+    for source in sources:
+        if source.startswith("src/"):
+            normalized.append(source.removeprefix("src/"))
+        else:
+            normalized.append(source)
+    return normalized
 
 
 def _parse_literal_module_attribute(path: Path, attribute_name: str) -> str | None:
@@ -112,7 +118,11 @@ def build_config() -> dict[str, str]:
 """
 
 
-def _render_contourpy_project(version: str) -> str:
+def _render_contourpy_project(version: str, source_files: list[str]) -> str:
+    compile_items = "\n".join(
+        f'    <ClCompile Include="..\\contourpy_builtin\\src\\{name}" />'
+        for name in source_files
+    )
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
 {_project_configurations()}  <PropertyGroup Label="Globals">
@@ -151,7 +161,7 @@ def _render_contourpy_project(version: str) -> str:
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-{_compile_items()}
+{compile_items}
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />
 </Project>
@@ -160,11 +170,17 @@ def _render_contourpy_project(version: str) -> str:
 
 def prepare_contourpy_project(context) -> None:
     version = _parse_contourpy_version(context)
-    missing = [
-        source_path(context, f"contourpy_builtin/src/{name}")
-        for name in CONTOURPY_SOURCES
-        if not source_path(context, f"contourpy_builtin/src/{name}").exists()
-    ]
+    meson_path = source_path(context, "contourpy_builtin/src/meson.build")
+    if meson_path.exists():
+        source_files = _parse_meson_src_files(meson_path)
+    else:
+        setup_py_path = source_path(context, "contourpy_builtin/setup.py")
+        if not setup_py_path.exists():
+            raise RuntimeError(
+                f"could not find contourpy source list in either {meson_path} or {setup_py_path}"
+            )
+        source_files = _parse_setup_py_src_files(setup_py_path)
+    missing = [source_path(context, f"contourpy_builtin/src/{name}") for name in source_files if not source_path(context, f"contourpy_builtin/src/{name}").exists()]
     missing.extend(
         path
         for path in (
@@ -176,7 +192,7 @@ def prepare_contourpy_project(context) -> None:
     if missing:
         raise RuntimeError("contourpy source files are missing: " + ", ".join(str(path) for path in missing))
     write_source_text(context, "Lib/contourpy/util/_build_config.py", _render_build_config(context, version))
-    write_source_text(context, "PCbuild/contourpy._contourpy.vcxproj", _render_contourpy_project(version))
+    write_source_text(context, "PCbuild/contourpy._contourpy.vcxproj", _render_contourpy_project(version, source_files))
 
 
 LIBRARY_INTEGRATION = pypi_library(
@@ -186,6 +202,7 @@ LIBRARY_INTEGRATION = pypi_library(
     source_mapping={
         "lib/contourpy": "Lib/contourpy",
         "src": "contourpy_builtin/src",
+        "?setup.py": "contourpy_builtin/setup.py",
     },
     python_packages=["contourpy"],
     static_library_projects_release_x64=["contourpy._contourpy.vcxproj"],

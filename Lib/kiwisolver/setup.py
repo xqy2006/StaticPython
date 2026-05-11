@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+
 from libs import pypi_library, source_path, write_source_text
 
 
@@ -13,6 +15,15 @@ KIWISOLVER_SOURCES = [
     "strength.cpp",
     "term.cpp",
     "variable.cpp",
+]
+
+KIWISOLVER_LEGACY_STAGING_FILES = [
+    *KIWISOLVER_SOURCES,
+    "pythonhelpers.h",
+    "symbolics.h",
+    "types.h",
+    "util.h",
+    "version.h",
 ]
 
 
@@ -78,7 +89,39 @@ def _render_kiwisolver_project() -> str:
 """
 
 
+def _ensure_kiwisolver_package(context) -> None:
+    package_root = source_path(context, "Lib/kiwisolver")
+    package_root.mkdir(parents=True, exist_ok=True)
+    package_init = package_root / "__init__.py"
+    if package_init.exists():
+        return
+    write_source_text(
+        context,
+        "Lib/kiwisolver/__init__.py",
+        "from ._cext import *  # noqa: F401,F403\n",
+    )
+
+
+def _materialize_legacy_kiwisolver_sources(context) -> None:
+    legacy_root = source_path(context, "kiwisolver_builtin/legacy-root")
+    target_root = source_path(context, "kiwisolver_builtin/py/src")
+    copied_any = False
+    for relative in KIWISOLVER_LEGACY_STAGING_FILES:
+        source = legacy_root / relative
+        if not source.exists():
+            continue
+        destination = target_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        copied_any = True
+    if copied_any:
+        context.log("prepared legacy kiwisolver source layout")
+
+
 def prepare_kiwisolver_project(context) -> None:
+    _ensure_kiwisolver_package(context)
+    if not source_path(context, "kiwisolver_builtin/py/src/kiwisolver.cpp").exists():
+        _materialize_legacy_kiwisolver_sources(context)
     missing = [
         source_path(context, f"kiwisolver_builtin/py/src/{name}")
         for name in KIWISOLVER_SOURCES
@@ -101,10 +144,27 @@ LIBRARY_INTEGRATION = pypi_library(
     name="kiwisolver",
     dependencies=["cppy"],
     source_mapping={
-        "py/kiwisolver": "Lib/kiwisolver",
-        "py/src": "kiwisolver_builtin/py/src",
+        "?py": "Lib/kiwisolver",
+        "?py/src||py": "kiwisolver_builtin/py/src",
         "kiwi": "kiwisolver_builtin/kiwi",
+        "?constraint.cpp": "kiwisolver_builtin/legacy-root/constraint.cpp",
+        "?expression.cpp": "kiwisolver_builtin/legacy-root/expression.cpp",
+        "?kiwisolver.cpp": "kiwisolver_builtin/legacy-root/kiwisolver.cpp",
+        "?solver.cpp": "kiwisolver_builtin/legacy-root/solver.cpp",
+        "?strength.cpp": "kiwisolver_builtin/legacy-root/strength.cpp",
+        "?term.cpp": "kiwisolver_builtin/legacy-root/term.cpp",
+        "?variable.cpp": "kiwisolver_builtin/legacy-root/variable.cpp",
+        "?pythonhelpers.h": "kiwisolver_builtin/legacy-root/pythonhelpers.h",
+        "?symbolics.h": "kiwisolver_builtin/legacy-root/symbolics.h",
+        "?types.h": "kiwisolver_builtin/legacy-root/types.h",
+        "?util.h": "kiwisolver_builtin/legacy-root/util.h",
+        "?version.h": "kiwisolver_builtin/legacy-root/version.h",
     },
+    materialized_paths=[
+        "Lib/kiwisolver",
+        "kiwisolver_builtin/py/src",
+        "kiwisolver_builtin/kiwi",
+    ],
     python_packages=["kiwisolver"],
     static_library_projects_release_x64=["kiwisolver._cext.vcxproj"],
     native_static_projects=[

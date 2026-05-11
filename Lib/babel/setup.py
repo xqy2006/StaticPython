@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import base64
-import re
 
-from libs import simple_library, source_path, transform_source_text, write_source_text
+from libs import replace_function_block_once, simple_library, source_path, transform_source_text, write_source_text
+
+
+def _replace_block_before(text: str, marker: str, replacement: str, *, label: str) -> str:
+    if replacement in text:
+        return text
+    start = text.find(marker)
+    if start == -1:
+        raise RuntimeError(f"expected marker not found in {label}: {marker!r}")
+    block_start = text.rfind("\ndef ", 0, start)
+    if block_start == -1:
+        raise RuntimeError(f"expected function block before marker in {label}: {marker!r}")
+    return text[: block_start + 1] + replacement + text[start:]
 
 
 def embed_babel_data(context) -> None:
@@ -11,11 +22,12 @@ def embed_babel_data(context) -> None:
     locale_data_root = package_root / "locale-data"
     if not locale_data_root.exists():
         locale_data_root = package_root / "localedata"
+    global_data_path = package_root / "global.dat"
     locale_data = {
         path.stem: base64.b64encode(path.read_bytes()).decode("ascii")
         for path in sorted(locale_data_root.glob("*.dat"))
     }
-    global_data = base64.b64encode((package_root / "global.dat").read_bytes()).decode("ascii")
+    global_data = base64.b64encode(global_data_path.read_bytes()).decode("ascii") if global_data_path.exists() else ""
     if not locale_data or "root" not in locale_data:
         raise RuntimeError("expected Babel locale-data files were not materialized")
 
@@ -39,26 +51,35 @@ def embed_babel_data(context) -> None:
                 raise RuntimeError("expected 'from babel import localedata' in babel.core")
             text = text.replace(
                 anchor,
-                anchor + "from babel._staticpython_data import global_bytes as _staticpython_global_bytes\n",
+                anchor
+                + "try:\n"
+                + "    from babel._staticpython_data import global_bytes as _staticpython_global_bytes\n"
+                + "except Exception:\n"
+                + "    _staticpython_global_bytes = None\n",
                 1,
             )
-        if "pickle.loads(_staticpython_global_bytes())" in text:
+        if "pickle.loads(_staticpython_global_bytes())" in text or "_staticpython_global_bytes is None" in text:
             return text
-        updated, count = re.subn(
-            r"(?ms)^def get_global\(.*?(?=^LOCALE_ALIASES =)",
+        return _replace_block_before(
+            text,
+            "LOCALE_ALIASES =",
             "def get_global(key):\n"
             "    \"\"\"Return the dictionary for the given key in the global data.\"\"\"\n"
             "    global _global_data\n"
             "    if _global_data is None:\n"
-            "        _global_data = pickle.loads(_staticpython_global_bytes())\n"
+            "        if _staticpython_global_bytes is not None:\n"
+            "            _global_data = pickle.loads(_staticpython_global_bytes())\n"
+            "        else:\n"
+            "            filename = os.path.join(os.path.dirname(__file__), 'global.dat')\n"
+            "            fileobj = open(filename, 'rb')\n"
+            "            try:\n"
+            "                _global_data = pickle.load(fileobj)\n"
+            "            finally:\n"
+            "                fileobj.close()\n"
             "        assert _global_data is not None\n"
             "    return _global_data.get(key, {})\n\n",
-            text,
-            count=1,
+            label="babel.core get_global",
         )
-        if count != 1:
-            raise RuntimeError("expected get_global() implementation in babel.core")
-        return updated
 
     def patch_localedata(text: str) -> str:
         if "_STATICPYTHON_LOCALE_DATA" not in text:
@@ -89,8 +110,9 @@ def embed_babel_data(context) -> None:
                     + "from babel._staticpython_data import locale_bytes as _staticpython_locale_bytes\n",
                     1,
                 )
-        updated, count = re.subn(
-            r"(?ms)^def exists\(.*?(?=^(?:@lru_cache\(maxsize=None\)\n)?def (?:locale_identifiers|list)\()",
+        text = replace_function_block_once(
+            text,
+            "exists",
             "def exists(name):\n"
             "    \"\"\"Check whether locale data is available for the given locale.\"\"\"\n"
             "    if not name:\n"
@@ -108,15 +130,14 @@ def embed_babel_data(context) -> None:
             "    if callable(normalize):\n"
             "        return True if file_found else bool(normalize(name))\n"
             "    return file_found\n\n",
-            text,
-            count=1,
+            label="babel.localedata exists",
+            next_name="locale_identifiers" if "def locale_identifiers(" in text else "list",
         )
-        if count != 1:
-            raise RuntimeError("expected exists() implementation in babel.localedata")
-        text = updated
         if "def locale_identifiers(" in text:
-            updated, count = re.subn(
-                r"(?ms)^(?:@lru_cache\(maxsize=None\)\n)?def locale_identifiers\(.*?(?=^def _is_non_likely_script\()",
+            next_name = "_is_non_likely_script" if "def _is_non_likely_script(" in text else "load"
+            text = replace_function_block_once(
+                text,
+                "locale_identifiers",
                 "@lru_cache(maxsize=None)\n"
                 "def locale_identifiers():\n"
                 "    \"\"\"Return all locale identifiers that have data available.\"\"\"\n"
@@ -129,15 +150,13 @@ def embed_babel_data(context) -> None:
                 "        )\n"
                 "        if extension == '.dat' and stem != 'root'\n"
                 "    ]\n\n",
-                text,
-                count=1,
+                label="babel.localedata locale_identifiers",
+                next_name=next_name,
             )
-            if count != 1:
-                raise RuntimeError("expected locale_identifiers() implementation in babel.localedata")
-            text = updated
         else:
-            updated, count = re.subn(
-                r"(?ms)^def list\(.*?(?=^def load\()",
+            text = replace_function_block_once(
+                text,
+                "list",
                 "def list():\n"
                 "    \"\"\"Return all locale identifiers that have data available.\"\"\"\n"
                 "    if _STATICPYTHON_LOCALE_DATA:\n"
@@ -145,14 +164,12 @@ def embed_babel_data(context) -> None:
                 "    return [stem for stem, extension in [\n"
                 "        os.path.splitext(filename) for filename in os.listdir(_dirname)\n"
                 "    ] if extension == '.dat' and stem != 'root']\n\n",
-                text,
-                count=1,
+                label="babel.localedata list",
+                next_name="load",
             )
-            if count != 1:
-                raise RuntimeError("expected list() implementation in babel.localedata")
-            text = updated
-        updated, count = re.subn(
-            r"(?ms)^def load\(.*?(?=^def merge\()",
+        return replace_function_block_once(
+            text,
+            "load",
             "def load(name, merge_inherited=True):\n"
             "    \"\"\"Load the locale data for the given locale.\"\"\"\n"
             "    name = os.path.basename(name)\n"
@@ -202,12 +219,9 @@ def embed_babel_data(context) -> None:
             "        return data\n"
             "    finally:\n"
             "        _cache_lock.release()\n\n",
-            text,
-            count=1,
+            label="babel.localedata load",
+            next_name="merge",
         )
-        if count != 1:
-            raise RuntimeError("expected load() implementation in babel.localedata")
-        return updated
 
     transform_source_text(context, "Lib/babel/core.py", patch_core)
     transform_source_text(context, "Lib/babel/localedata.py", patch_localedata)
@@ -218,7 +232,6 @@ LIBRARY_INTEGRATION = simple_library(
     project_name="Babel",
     overlay_entries=["Lib/babel"],
     materialized_paths=[
-        "Lib/babel/global.dat",
         "Lib/babel/_staticpython_data.py",
     ],
     post_patch_hooks=[embed_babel_data],
