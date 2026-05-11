@@ -475,18 +475,20 @@ def _patch_pandas_numpy_include(context) -> None:
     numpy_generated_include = pandas_numpy_generated_include_dir(context).as_posix()
 
     def patch(text: str) -> str:
-        replacement = f"incdir_numpy = '{numpy_include}'\nincdir_numpy_generated = '{numpy_generated_include}'\n"
-        text = replace_regex_once(
-            text,
-            r"(?ms)^incdir_numpy = run_command\(py,.*?^\)\.stdout\(\)\.strip\(\)\s*",
-            replacement,
-            label="pandas numpy include probe",
-        )
+        if (
+            "incdir_numpy_generated =" in text
+            and "inc_np = include_directories(incdir_numpy, incdir_numpy_generated)" in text
+        ):
+            return text
         return replace_regex_once(
             text,
-            r"(?m)^inc_np = include_directories\(incdir_numpy\)\s*$",
-            "inc_np = include_directories(incdir_numpy, incdir_numpy_generated)",
-            label="pandas numpy generated include dir",
+            r"(?ms)^incdir_numpy = .*?^\s*inc_np = include_directories\(incdir_numpy\)\s*$",
+            (
+                f"incdir_numpy = '{numpy_include}'\n"
+                f"incdir_numpy_generated = '{numpy_generated_include}'\n"
+                "inc_np = include_directories(incdir_numpy, incdir_numpy_generated)"
+            ),
+            label="pandas numpy include probe",
         )
 
     transform_source_text(context, "pandas_builtin/source/pandas/meson.build", patch)

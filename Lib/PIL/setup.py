@@ -193,15 +193,17 @@ def _discover_imaging_sources(context) -> list[str]:
     return source_files
 
 
+def _has_optional_pillow_source(context, relative: str) -> bool:
+    return source_path(context, relative).exists()
+
+
 def prepare_pillow_projects(context) -> None:
     version = _parse_pillow_version(context)
     common_definitions = [f'PILLOW_VERSION=&quot;{version}&quot;']
-    imagingmath_source = "_imagingmath.c"
-    imagingmorph_source = "_imagingmorph.c"
-    if not source_path(context, f"pillow_builtin/src/{imagingmath_source}").exists():
-        imagingmath_source = "_imagingmath.c" if source_path(context, "pillow_builtin/src/_imagingmath.c").exists() else ""
-    if not source_path(context, f"pillow_builtin/src/{imagingmorph_source}").exists():
-        imagingmorph_source = ""
+    imagingmath_source = "_imagingmath.c" if _has_optional_pillow_source(context, "pillow_builtin/src/_imagingmath.c") else ""
+    imagingmorph_source = "_imagingmorph.c" if _has_optional_pillow_source(context, "pillow_builtin/src/_imagingmorph.c") else ""
+    imagingmath_project_path = source_path(context, "PCbuild/PIL._imagingmath.vcxproj")
+    imagingmorph_project_path = source_path(context, "PCbuild/PIL._imagingmorph.vcxproj")
     write_source_text(
         context,
         "PCbuild/PIL._imaging.vcxproj",
@@ -214,17 +216,20 @@ def prepare_pillow_projects(context) -> None:
             include_zlib=True,
         ),
     )
-    write_source_text(
-        context,
-        "PCbuild/PIL._imagingmath.vcxproj",
-        _render_pil_project(
-            project_guid=PIL_IMAGINGMATH_PROJECT_GUID,
-            root_namespace="PIL__imagingmath",
-            target_name="PIL._imagingmath",
-            source_files=[imagingmath_source] if imagingmath_source else ["_imagingmath.c"],
-            extra_definitions=common_definitions,
-        ),
-    )
+    if imagingmath_source:
+        write_source_text(
+            context,
+            "PCbuild/PIL._imagingmath.vcxproj",
+            _render_pil_project(
+                project_guid=PIL_IMAGINGMATH_PROJECT_GUID,
+                root_namespace="PIL__imagingmath",
+                target_name="PIL._imagingmath",
+                source_files=[imagingmath_source],
+                extra_definitions=common_definitions,
+            ),
+        )
+    elif imagingmath_project_path.exists():
+        imagingmath_project_path.unlink()
     if imagingmorph_source:
         write_source_text(
             context,
@@ -237,6 +242,8 @@ def prepare_pillow_projects(context) -> None:
                 extra_definitions=common_definitions,
             ),
         )
+    elif imagingmorph_project_path.exists():
+        imagingmorph_project_path.unlink()
 
 
 LIBRARY_INTEGRATION = pypi_library(
@@ -249,7 +256,6 @@ LIBRARY_INTEGRATION = pypi_library(
     materialized_paths=[
         "Lib/PIL/__init__.py",
         "pillow_builtin/src/_imaging.c",
-        "pillow_builtin/src/_imagingmath.c",
         "pillow_builtin/src/libImaging/Access.c",
         "pillow_builtin/src/libImaging/Storage.c",
     ],
