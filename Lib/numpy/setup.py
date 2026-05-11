@@ -446,7 +446,17 @@ def _patch_numpy_top_level_imports(context) -> None:
                     ),
                     label="numpy optional matrixlib import",
                 )
-        if "from .matrixlib import (\n        asmatrix, bmat, matrix\n    )\n" in text:
+        if "    from .matrixlib import *\n" in text and "asmatrix = bmat = mat = matrix = None\n" not in text:
+            text = replace_text_once(
+                text,
+                "    from .matrixlib import *\n",
+                "    if _mat is not None:\n"
+                "        from .matrixlib import *\n"
+                "    else:\n"
+                "        asmatrix = bmat = mat = matrix = None\n",
+                label="numpy optional matrixlib star import",
+            )
+        elif "from .matrixlib import (\n        asmatrix, bmat, matrix\n    )\n" in text:
             text = replace_text_once(
                 text,
                 "    from .matrixlib import (\n        asmatrix, bmat, matrix\n    )\n",
@@ -457,6 +467,16 @@ def _patch_numpy_top_level_imports(context) -> None:
                 "    else:\n"
                 "        asmatrix = bmat = matrix = None\n",
                 label="numpy optional matrixlib symbol imports",
+            )
+        elif re.search(r"(?m)^    from \.matrixlib import asmatrix,\s*bmat,\s*matrix\s*$", text) and "asmatrix = bmat = matrix = None\n" not in text:
+            text = replace_regex_once(
+                text,
+                r"(?m)^    from \.matrixlib import asmatrix,\s*bmat,\s*matrix\s*$",
+                "    if _mat is not None:\n"
+                "        from .matrixlib import asmatrix, bmat, matrix\n"
+                "    else:\n"
+                "        asmatrix = bmat = matrix = None\n",
+                label="numpy optional matrixlib single-line symbol imports",
             )
         elif "from .matrixlib import" in text and "asmatrix = bmat = matrix = None" not in text:
             text = replace_regex_once(
