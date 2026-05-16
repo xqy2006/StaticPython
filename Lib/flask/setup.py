@@ -33,19 +33,17 @@ def patch_flask_sources(context) -> None:
         _patch_flask_testing,
         allow_all_missing=True,
     )
-    sansio_init = context.source_root / "Lib" / "flask" / "sansio" / "__init__.py"
-    if sansio_init.exists():
-        write_source_text(
-            context,
-            "Lib/flask/sansio/__init__.py",
-            (
-                "from .app import App as App\n"
-                "from .blueprints import Blueprint as Blueprint\n"
-                "from .blueprints import BlueprintSetupState as BlueprintSetupState\n"
-                "from .scaffold import Scaffold as Scaffold\n"
-                "from .scaffold import _sentinel as _sentinel\n"
-            ),
-        )
+    write_source_text(
+        context,
+        "Lib/flask/sansio/__init__.py",
+        (
+            "from .app import App as App\n"
+            "from .blueprints import Blueprint as Blueprint\n"
+            "from .blueprints import BlueprintSetupState as BlueprintSetupState\n"
+            "from .scaffold import Scaffold as Scaffold\n"
+            "from .scaffold import _sentinel as _sentinel\n"
+        ),
+    )
 
 
 LIBRARY_INTEGRATION = simple_library(

@@ -341,7 +341,10 @@ LIBRARY_INTEGRATION = pypi_library(
     release_version="4.0.9",
     source_mapping={
         "jupyterlab": "Lib/jupyterlab",
-        "jupyterlab/static||jupyterlab/build||static": "share/jupyter/lab/static",
+        "?build": "Lib/jupyterlab/build",
+        "?lab.html": "Lib/jupyterlab/lab.html",
+        "?package.json": "Lib/jupyterlab/package.json",
+        "jupyterlab/static||jupyterlab/build||static||build": "share/jupyter/lab/static",
         "?jupyterlab/schemas||?schemas": "share/jupyter/lab/schemas",
         "?jupyterlab/themes||?themes": "share/jupyter/lab/themes",
         "?jupyterlab/staging||?staging": "share/jupyter/lab/staging",

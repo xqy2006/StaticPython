@@ -16,7 +16,7 @@ def _project_configurations() -> str:
 """
 
 
-def _render_msgpack_cmsgpack_project() -> str:
+def _render_msgpack_cmsgpack_project(source_file: str) -> str:
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
 {_project_configurations()}  <PropertyGroup Label="Globals">
@@ -53,7 +53,7 @@ def _render_msgpack_cmsgpack_project() -> str:
     </ClCompile>
   </ItemDefinitionGroup>
     <ItemGroup>
-    <ClCompile Include="..\\Lib\\msgpack\\_cmsgpack.cpp" />
+    <ClCompile Include="..\\Lib\\msgpack\\{source_file}" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />
 </Project>
@@ -61,11 +61,22 @@ def _render_msgpack_cmsgpack_project() -> str:
 
 
 def prepare_msgpack_cmsgpack_project(context) -> None:
-    source = source_path(context, "Lib/msgpack/_cmsgpack.cpp")
+    source_name = next(
+        (
+            candidate
+            for candidate in ("_cmsgpack.c", "_cmsgpack.cpp")
+            if source_path(context, f"Lib/msgpack/{candidate}").exists()
+        ),
+        None,
+    )
+    if source_name is None:
+        context.log("msgpack _cmsgpack source is absent in this release; keeping pure Python build")
+        return
+    source = source_path(context, f"Lib/msgpack/{source_name}")
     if not source.exists():
         context.log("msgpack _cmsgpack source is absent in this release; keeping pure Python build")
         return
-    write_source_text(context, "PCbuild/msgpack._cmsgpack.vcxproj", _render_msgpack_cmsgpack_project())
+    write_source_text(context, "PCbuild/msgpack._cmsgpack.vcxproj", _render_msgpack_cmsgpack_project(source_name))
 
 
 LIBRARY_INTEGRATION = pypi_library(

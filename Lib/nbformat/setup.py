@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 
 from libs import replace_function_block_once, replace_regex_once, simple_library, source_path, transform_source_text, write_source_text

@@ -490,6 +490,7 @@ LIBRARY_INTEGRATION = simple_library(
     name="plotly",
     source_mapping={
         "plotly": "Lib/plotly",
+        "_plotly_utils": "Lib/_plotly_utils",
     },
     materialized_paths=[
         "Lib/plotly/_staticpython_package_data.py",

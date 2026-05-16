@@ -254,10 +254,9 @@ LIBRARY_INTEGRATION = pypi_library(
         "src||.": "pillow_builtin/src",
     },
     materialized_paths=[
-        "Lib/PIL/__init__.py",
-        "pillow_builtin/src/_imaging.c",
-        "pillow_builtin/src/libImaging/Access.c",
-        "pillow_builtin/src/libImaging/Storage.c",
+        "Lib/PIL",
+        "pillow_builtin/src",
+        "pillow_builtin/src/libImaging",
     ],
     python_packages=["PIL"],
     static_library_projects_release_x64=[

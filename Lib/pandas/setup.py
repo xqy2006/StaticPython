@@ -19,6 +19,7 @@ from libs import (
     replace_regex_once,
     replace_text_once,
     source_path,
+    transform_first_existing_source_text,
     transform_source_text,
     write_source_text,
 )
@@ -480,18 +481,27 @@ def _patch_pandas_numpy_include(context) -> None:
             and "inc_np = include_directories(incdir_numpy, incdir_numpy_generated)" in text
         ):
             return text
-        return replace_regex_once(
-            text,
+        updated, count = re.subn(
             r"(?ms)^incdir_numpy = .*?^\s*inc_np = include_directories\(incdir_numpy\)\s*$",
             (
                 f"incdir_numpy = '{numpy_include}'\n"
                 f"incdir_numpy_generated = '{numpy_generated_include}'\n"
                 "inc_np = include_directories(incdir_numpy, incdir_numpy_generated)"
             ),
-            label="pandas numpy include probe",
+            text,
+            count=1,
         )
+        return updated if count == 1 else text
 
-    transform_source_text(context, "pandas_builtin/source/pandas/meson.build", patch)
+    transform_first_existing_source_text(
+        context,
+        [
+            "pandas_builtin/source/pandas/meson.build",
+            "pandas_builtin/source/meson.build",
+        ],
+        patch,
+        allow_all_missing=True,
+    )
 
 
 def _patch_generate_version(context) -> None:
