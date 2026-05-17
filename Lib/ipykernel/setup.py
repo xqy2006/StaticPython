@@ -42,14 +42,16 @@ def embed_ipykernel_resources(context) -> None:
             if count != 1:
                 raise RuntimeError("failed to patch ipykernel kernelspec imports")
 
+        debugger_marker = 'importlib.util.find_spec("debugpy") is not None'
         text, count = re.subn(
-            r'"metadata": \{"debugger": [^}]+\},',
-            '"metadata": {"debugger": importlib.util.find_spec("debugpy") is not None},',
+            r'(?m)^(\s*[\'"]metadata[\'"]\s*:\s*)\{[^}\n]*[\'"]debugger[\'"]\s*:\s*[^}\n]+(\}\s*,?\s*)$',
+            r'\1{"debugger": importlib.util.find_spec("debugpy") is not None}\2',
             text,
             count=1,
         )
-        if count != 1 and 'importlib.util.find_spec("debugpy") is not None' not in text:
-            raise RuntimeError("failed to patch ipykernel debugger metadata")
+        if count != 1 and debugger_marker not in text:
+            if re.search(r'(?m)^[^\n]*[\'"]debugger[\'"]\s*:', text):
+                raise RuntimeError("failed to patch ipykernel debugger metadata")
 
         text, count = re.subn(
             r"    # stage resources\n    shutil\.copytree\(RESOURCES, path\)\n",
