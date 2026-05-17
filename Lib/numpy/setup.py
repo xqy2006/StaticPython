@@ -945,38 +945,47 @@ LIBRARY_INTEGRATION = pypi_library(
         {
             "name": "numpy.random._bounded_integers",
             "pyinit": "PyInit__bounded_integers",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random._common",
             "pyinit": "PyInit__common",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random._philox",
             "pyinit": "PyInit__philox",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random._sfc64",
             "pyinit": "PyInit__sfc64",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random.bit_generator",
             "pyinit": "PyInit_bit_generator",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random._generator",
             "pyinit": "PyInit__generator",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random._mt19937",
             "pyinit": "PyInit__mt19937",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random._pcg64",
             "pyinit": "PyInit__pcg64",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random.mtrand",
             "pyinit": "PyInit_mtrand",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
     ],
     python_link_dependencies_release_x64=[

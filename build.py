@@ -323,10 +323,24 @@ def iter_builtin_module_registrations(source_root: Path, manifest: dict, integra
     integration_candidates = collect_builtin_module_registrations(integrations)
 
     available_projects = {Path(project).stem for project in iter_static_library_projects(source_root, manifest, integrations)}
+    available_libraries = {
+        Path(library).stem
+        for library in [
+            *iter_python_link_dependencies(source_root, manifest, integrations),
+            *iter_python_link_wholearchive_libraries(source_root, manifest, integrations),
+        ]
+    }
+
+    def builtin_is_available(builtin: dict) -> bool:
+        library = builtin.get("library")
+        if library and Path(library).stem in available_libraries:
+            return True
+        return builtin["name"] in available_projects or builtin["name"] in available_libraries
+
     filtered = []
     seen: set[str] = set()
     for builtin in manifest_candidates:
-        if builtin["name"] in available_projects:
+        if builtin_is_available(builtin):
             filtered.append(builtin)
             seen.add(builtin["name"])
         else:
@@ -337,7 +351,7 @@ def iter_builtin_module_registrations(source_root: Path, manifest: dict, integra
     for builtin in integration_candidates:
         if builtin["name"] in seen:
             continue
-        if builtin["name"] not in available_projects:
+        if not builtin_is_available(builtin):
             log(
                 f"skip builtin registration {builtin['name']} because the corresponding integration project is unavailable "
                 "in this CPython version"
