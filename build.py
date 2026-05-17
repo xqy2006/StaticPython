@@ -820,11 +820,16 @@ def resolve_static_lib_sdk_records(
     library_index = index_library_files(source_root, platform)
     records: list[dict] = []
     missing: list[str] = []
+    skipped_link_only: list[str] = []
 
     for spec in collect_static_lib_sdk_library_specs(source_root, platform, manifest, integrations):
         logical_name = spec["logical_name"]
         candidates = library_index.get(logical_name, [])
         if not candidates:
+            reasons = set(spec["reasons"])
+            if reasons.issubset({"link_dependency", "wholearchive"}):
+                skipped_link_only.append(logical_name)
+                continue
             missing.append(logical_name)
             continue
         source_path = candidates[0]
@@ -837,6 +842,14 @@ def resolve_static_lib_sdk_records(
                 "reasons": list(spec["reasons"]),
                 "source_path": source_path,
             }
+        )
+
+    if skipped_link_only:
+        preview = ", ".join(skipped_link_only[:12])
+        suffix = " ..." if len(skipped_link_only) > 12 else ""
+        log(
+            "skip static library SDK export for unresolved link-only libraries that do not have packaged build "
+            f"artifacts: {preview}{suffix}"
         )
 
     if missing:
