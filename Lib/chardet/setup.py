@@ -1,3 +1,5 @@
+import re
+
 from libs import (
     replace_regex_once,
     replace_text_once,
@@ -42,10 +44,15 @@ def patch_chardet_sources(context) -> None:
                     label="chardet embedded model resources",
                 )
             else:
-                anchor = "NON_ASCII_BIGRAM_WEIGHT: int = 8\n\n"
-                if anchor not in text:
+                updated, count = re.subn(
+                    r"(?m)^(?P<anchor>NON_ASCII_BIGRAM_WEIGHT[^\n]*\n(?:#.*\n)*)",
+                    "\\g<anchor>\n" + constants,
+                    text,
+                    count=1,
+                )
+                if count != 1:
                     raise RuntimeError("expected anchor not found in chardet embedded model resources")
-                text = text.replace(anchor, anchor + constants, 1)
+                text = updated
         text = replace_regex_once(
             text,
             r'(?m)^(?P<indent>[ \t]*)ref = importlib\.resources\.files\("chardet\.models"\)\.joinpath\("models\.bin"\)\n(?P=indent)data = ref\.read_bytes\(\)\n',

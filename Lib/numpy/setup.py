@@ -911,6 +911,9 @@ LIBRARY_INTEGRATION = pypi_library(
         "numpy_builtin/meson_target_python.cmd",
         "numpy_builtin/meson-python.ini",
     ],
+    cleanup_paths=[
+        "numpy_builtin/source",
+    ],
     python_packages=["numpy"],
     static_library_projects_release_x64=[
         f"{NUMPY_CORE_PROJECT_NAME}.vcxproj",

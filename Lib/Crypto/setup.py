@@ -270,7 +270,9 @@ def _patch_raw_api(text: str) -> str:
     if "_PyObject_GetBuffer = None" not in text and "_PyObject_GetBuffer = ctypes.pythonapi.PyObject_GetBuffer" in text:
         text = replace_regex_once(
             text,
-            r"(?m)^    _PyBUF_SIMPLE = 0\n    _PyObject_GetBuffer = ctypes\.pythonapi\.PyObject_GetBuffer\n    _PyBuffer_Release = ctypes\.pythonapi\.PyBuffer_Release\n",
+            r"(?m)^    _PyBUF_SIMPLE = 0\n"
+            r"    _PyObject_GetBuffer = ctypes\.pythonapi\.PyObject_GetBuffer\n"
+            r"(?:    _PyBuffer_Release = ctypes\.pythonapi\.PyBuffer_Release\n)?",
             "    _PyBUF_SIMPLE = 0\n"
             "    try:\n"
             "        _PyObject_GetBuffer = ctypes.pythonapi.PyObject_GetBuffer\n"
@@ -311,7 +313,8 @@ def _patch_raw_api(text: str) -> str:
             "            buffer_type = ctypes.c_ubyte * buf.len\n"
             "            return buffer_type.from_address(buf.buf)\n"
             "        finally:\n"
-            "            _PyBuffer_Release(byref(buf))\n"
+            "            if _PyBuffer_Release is not None:\n"
+            "                _PyBuffer_Release(byref(buf))\n"
             "    else:\n"
             "        raise TypeError(\"Object type %s cannot be passed to C code\" % type(data))\n",
             label="Crypto.Util._raw_api.c_uint8_ptr",
@@ -378,13 +381,6 @@ def _patch_raw_api(text: str) -> str:
             )
         else:
             return text
-    next_name = None
-    for candidate in ("is_buffer", "expect_byte_string", "make_byte_string"):
-        if f"def {candidate}(" in text:
-            next_name = candidate
-            break
-    if next_name is None:
-        return text
     text = replace_function_block_once(
         text,
         "load_pycryptodome_raw_lib",
@@ -418,7 +414,7 @@ def _patch_raw_api(text: str) -> str:
         "            attempts.append(\"Cannot load '%s': %s\" % (filename, str(exp)))\n"
         "    raise OSError(\"Cannot load native module '%s': %s\" % (name, \", \".join(attempts)))\n\n",
         label="Crypto.Util._raw_api.load-function",
-        next_name=next_name,
+        next_name=None,
     )
     return text
 

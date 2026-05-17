@@ -790,7 +790,7 @@
         "name": "rapidfuzz",
         "project_name": "RapidFuzz",
         "source_mapping": {
-          "src/rapidfuzz": "Lib/rapidfuzz"
+          "src/rapidfuzz || rapidfuzz || python/src": "Lib/rapidfuzz"
         },
         "source_provider": "pypi"
       },

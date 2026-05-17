@@ -10,6 +10,19 @@ from libs import (
 )
 
 
+def _set_jupyter_lsp_materialized_paths(context) -> None:
+    integration = LIBRARY_INTEGRATION
+    paths = ["Lib/jupyter_lsp"]
+    optional_if_exists = [
+        "Lib/jupyter_lsp/schema/schema.json",
+        "Lib/jupyter_lsp/schema/_staticpython_schema.py",
+        "Lib/jupyter_lsp/specs/config/_staticpython_config_schemas.py",
+        "Lib/jupyter_lsp/_staticpython_spec_fallback.py",
+    ]
+    paths.extend(path for path in optional_if_exists if source_path(context, path).exists())
+    integration.materialized_paths = list(dict.fromkeys(paths))
+
+
 def _embed_modern_jupyter_lsp_schema(context) -> None:
     schema_path = source_path(context, "Lib/jupyter_lsp/schema/schema.json")
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -187,19 +200,15 @@ def _embed_legacy_jupyter_lsp_specs(context) -> None:
 def patch_jupyter_lsp_sources(context) -> None:
     if source_path(context, "Lib/jupyter_lsp/schema/schema.json").exists():
         _embed_modern_jupyter_lsp_schema(context)
-        return
-    _embed_legacy_jupyter_lsp_specs(context)
+    else:
+        _embed_legacy_jupyter_lsp_specs(context)
+    _set_jupyter_lsp_materialized_paths(context)
 
 
 LIBRARY_INTEGRATION = simple_library(
     name="jupyter_lsp",
     project_name="jupyter-lsp",
     overlay_entries=["Lib/jupyter_lsp"],
-    materialized_paths=[
-        "Lib/jupyter_lsp/schema/schema.json",
-        "Lib/jupyter_lsp/schema/_staticpython_schema.py",
-        "Lib/jupyter_lsp/specs/config/_staticpython_config_schemas.py",
-        "Lib/jupyter_lsp/_staticpython_spec_fallback.py",
-    ],
+    materialized_paths=["Lib/jupyter_lsp"],
     post_patch_hooks=[patch_jupyter_lsp_sources],
 )

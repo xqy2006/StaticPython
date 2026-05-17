@@ -135,6 +135,53 @@ def embed_parso_grammars(context) -> None:
             label="Parso legacy load_grammar function",
         )
 
+    def patch_legacy_grammar_module(text: str) -> str:
+        text = ensure_text_after(
+            text,
+            "from parso.cache import parser_cache, load_module, save_module\n",
+            "from parso._staticpython_grammars import GRAMMARS as _STATICPYTHON_GRAMMARS\n",
+            label="Parso legacy grammar module static import",
+        )
+        return replace_function_block_once(
+            text,
+            "load_python_grammar",
+            """def load_python_grammar(version=None):
+    \"""
+    Loads a Python grammar. The default version is always the latest.
+
+    If you need support for a specific version, please use e.g.
+    `version='3.3'`.
+    \"""
+    if version is None:
+        version = '3.6'
+
+    if version in ('3.2', '3.3'):
+        version = '3.4'
+    elif version == '2.6':
+        version = '2.7'
+
+    file = 'python/grammar' + version + '.txt'
+
+    global _loaded_grammars
+    path = os.path.join(os.path.dirname(__file__), file)
+    try:
+        return _loaded_grammars[path]
+    except KeyError:
+        try:
+            grammar_key = file.replace(os.sep, '/')
+            bnf_text = _STATICPYTHON_GRAMMARS.get(grammar_key)
+            if bnf_text is None:
+                with open(path) as f:
+                    bnf_text = f.read()
+            grammar = create_grammar(bnf_text, parser=PythonParser)
+            return _loaded_grammars.setdefault(path, grammar)
+        except FileNotFoundError:
+            # Just load the default if the file does not exist.
+            return load_python_grammar()
+""",
+            label="Parso legacy load_python_grammar function",
+        )
+
     legacy_python_init = source_path(context, "Lib/parso/python/__init__.py")
     grammar_py = source_path(context, "Lib/parso/grammar.py")
     if legacy_python_init.exists() and not grammar_py.exists():
@@ -146,7 +193,9 @@ def embed_parso_grammars(context) -> None:
         return
 
     def patch_detected_grammar(text: str) -> str:
-        if "def load_python_grammar(" in text or "def load_grammar(**kwargs):" in text:
+        if "def load_python_grammar(" in text:
+            return patch_legacy_grammar_module(text)
+        if "def load_grammar(**kwargs):" in text:
             return patch_modern_grammar(text)
         if "def load_grammar(*, version:" in text or "def load_grammar(*, version: str = None" in text:
             return patch_modern_grammar(text)

@@ -1,4 +1,4 @@
-from libs import replace_regex_once, simple_library, transform_first_existing_source_text, write_source_text
+from libs import replace_regex_once, simple_library, source_path, transform_first_existing_source_text, write_source_text
 
 
 def _patch_flask_testing(text: str) -> str:
@@ -33,6 +33,10 @@ def patch_flask_sources(context) -> None:
         _patch_flask_testing,
         allow_all_missing=True,
     )
+    package_root = source_path(context, "Lib/flask")
+    sansio_root = package_root / "sansio"
+    if not package_root.is_dir() or not sansio_root.exists():
+        return
     write_source_text(
         context,
         "Lib/flask/sansio/__init__.py",

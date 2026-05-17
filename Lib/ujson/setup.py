@@ -18,8 +18,9 @@ def _project_configurations() -> str:
 """
 
 
-def _render_ujson_project(source_files: list[str]) -> str:
+def _render_ujson_project(source_files: list[str], include_dirs: list[str]) -> str:
     compile_items = "\n".join(f'    <ClCompile Include="..\\ujson_builtin\\{name}" />' for name in source_files)
+    include_directories = ";".join(f"..\\ujson_builtin\\{name}" for name in include_dirs)
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
 {_project_configurations()}  <PropertyGroup Label="Globals">
@@ -48,7 +49,7 @@ def _render_ujson_project(source_files: list[str]) -> str:
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>..\\ujson_builtin\\python;..\\ujson_builtin\\lib;..\\ujson_builtin\\deps\\double-conversion\\double-conversion;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>{include_directories};%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>Py_NO_ENABLE_SHARED;_GNU_SOURCE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DisableSpecificWarnings>4244;4267;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
@@ -63,24 +64,29 @@ def _render_ujson_project(source_files: list[str]) -> str:
 """
 
 
-def _discover_ujson_sources(context) -> list[str]:
+def _discover_ujson_build_layout(context) -> tuple[list[str], list[str]]:
     root = source_path(context, "ujson_builtin")
+    source_files = [
+        "python/ujson.c",
+        "python/objToJSON.c",
+        "python/JSONtoObj.c",
+        "lib/ultrajsonenc.c",
+        "lib/ultrajsondec.c",
+    ]
+    include_dirs = [
+        "python",
+        "lib",
+    ]
     double_conversion_dir = root / "deps" / "double-conversion" / "double-conversion"
-    source_files = [path.relative_to(root).as_posix() for path in sorted(double_conversion_dir.glob("*.cc"))]
-    source_files.extend(
-        [
-            "lib/dconv_wrapper.cc",
-            "python/ujson.c",
-            "python/objToJSON.c",
-            "python/JSONtoObj.c",
-            "lib/ultrajsonenc.c",
-            "lib/ultrajsondec.c",
-        ]
-    )
+    dconv_wrapper = root / "lib" / "dconv_wrapper.cc"
+    if dconv_wrapper.exists() and double_conversion_dir.exists():
+        include_dirs.append("deps/double-conversion/double-conversion")
+        source_files.append("lib/dconv_wrapper.cc")
+        source_files.extend(path.relative_to(root).as_posix() for path in sorted(double_conversion_dir.glob("*.cc")))
     missing = [name for name in source_files if not (root / name).exists()]
     if missing:
         raise RuntimeError("ujson source files are missing: " + ", ".join(missing))
-    return source_files
+    return source_files, include_dirs
 
 
 def _ensure_version_header(context) -> None:
@@ -97,7 +103,8 @@ def _ensure_version_header(context) -> None:
 
 def prepare_ujson_project(context) -> None:
     _ensure_version_header(context)
-    write_source_text(context, "PCbuild/ujson.vcxproj", _render_ujson_project(_discover_ujson_sources(context)))
+    source_files, include_dirs = _discover_ujson_build_layout(context)
+    write_source_text(context, "PCbuild/ujson.vcxproj", _render_ujson_project(source_files, include_dirs))
 
 
 LIBRARY_INTEGRATION = pypi_library(
