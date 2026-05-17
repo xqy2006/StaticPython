@@ -1,5 +1,6 @@
 from libs import (
     replace_function_block_once,
+    replace_regex_once,
     replace_text_once,
     simple_library,
     source_path,
@@ -65,16 +66,42 @@ def patch_lark_sources(context) -> None:
                 label="lark package-resource loader block",
             )
 
-        old = """        for import_path in import_paths:
-            with suppress(IOError):
-                joined_path = os.path.join(import_path, grammar_path)
-                with open(joined_path, encoding='utf8') as f:
-                    text = f.read()
-                grammar = self.load_grammar(text, joined_path)
-                _imported_grammars[grammar_path] = grammar
-                break
-"""
-        new = """        for import_path in import_paths:
+        if "def import_grammar(" in text and "embedded_key = joined_path.replace('\\\\', '/')" not in text:
+            return replace_function_block_once(
+                text,
+                "import_grammar",
+                """def import_grammar(self, grammar_path, base_paths=[]):
+        if grammar_path not in _imported_grammars:
+            import_paths = base_paths + IMPORT_PATHS
+            for import_path in import_paths:
+                with suppress(IOError):
+                    joined_path = os.path.join(import_path, grammar_path)
+                    embedded_key = joined_path.replace('\\\\', '/')
+                    embedded_name = os.path.basename(embedded_key)
+                    text = _STATICPYTHON_EMBEDDED_GRAMMARS.get(embedded_key)
+                    if text is None:
+                        text = _STATICPYTHON_EMBEDDED_GRAMMARS.get(embedded_name)
+                    if text is None:
+                        with open(joined_path, encoding='utf8') as f:
+                            text = f.read()
+                    grammar = self.load_grammar(text, joined_path)
+                    _imported_grammars[grammar_path] = grammar
+                    break
+            else:
+                open(grammar_path, encoding='utf8') # Force a file not found error
+                assert False
+
+        return _imported_grammars[grammar_path]
+
+""",
+                label="lark filesystem grammar loader block",
+                next_name="load_grammar",
+            )
+
+        return replace_regex_once(
+            text,
+            r"(?ms)^        for import_path in import_paths:\n(?:            .*\n)+?                break\n",
+            """        for import_path in import_paths:
             with suppress(IOError):
                 joined_path = os.path.join(import_path, grammar_path)
                 embedded_key = joined_path.replace('\\\\', '/')
@@ -88,11 +115,7 @@ def patch_lark_sources(context) -> None:
                 grammar = self.load_grammar(text, joined_path)
                 _imported_grammars[grammar_path] = grammar
                 break
-"""
-        return replace_text_once(
-            text,
-            old,
-            new,
+""",
             label="lark filesystem grammar loader block",
         )
 

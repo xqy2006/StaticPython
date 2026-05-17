@@ -1,8 +1,21 @@
 from __future__ import annotations
 
 import base64
+import re
+from packaging.version import Version
 
-from libs import replace_function_block_once, simple_library, source_path, transform_source_text, write_source_text
+from libs import (
+    _candidate_pypi_archives,
+    _copy_entry,
+    _download_file,
+    _extract_archive,
+    _resolve_source_entry,
+    replace_function_block_once,
+    simple_library,
+    source_path,
+    transform_source_text,
+    write_source_text,
+)
 
 
 def _replace_block_before(text: str, marker: str, replacement: str, *, label: str) -> str:
@@ -17,11 +30,77 @@ def _replace_block_before(text: str, marker: str, replacement: str, *, label: st
     return text[: block_start + 1] + replacement + text[start:]
 
 
+def _infer_babel_release_version(package_root) -> str | None:
+    init_path = package_root / "__init__.py"
+    if not init_path.exists():
+        return None
+    match = re.search(r"""__version__\s*=\s*['"]([^'"]+)['"]""", init_path.read_text(encoding="utf-8"))
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _materialize_babel_data_from_pure_wheel(context, package_root) -> bool:
+    release_version = _infer_babel_release_version(package_root)
+    if not release_version:
+        return False
+
+    candidates = _candidate_pypi_archives(
+        context.download_cache_root,
+        "Babel",
+        Version(context.version_full),
+        release_version,
+    )
+    for resolved_release_version, archive_path, url, _cached in candidates:
+        if archive_path.suffix.lower() != ".whl":
+            continue
+        if not archive_path.exists():
+            assert url is not None
+            context.log(f"downloading Babel {resolved_release_version} fallback wheel from PyPI")
+            _download_file(url, archive_path)
+        extracted_root = _extract_archive(
+            archive_path,
+            context.work_cache_root / "pypi" / "babel" / resolved_release_version / "fallback-wheel" / archive_path.stem,
+            context.log,
+        )
+        try:
+            locale_src = _resolve_source_entry(extracted_root, "babel/locale-data")
+        except RuntimeError:
+            try:
+                locale_src = _resolve_source_entry(extracted_root, "babel/localedata")
+            except RuntimeError:
+                locale_src = None
+        try:
+            global_src = _resolve_source_entry(extracted_root, "babel/global.dat")
+        except RuntimeError:
+            global_src = None
+
+        if locale_src is not None:
+            target_name = "locale-data" if locale_src.name == "locale-data" else locale_src.name
+            _copy_entry(locale_src, package_root / target_name)
+            context.log(
+                f"materialized Babel locale data from fallback wheel {archive_path.name}"
+            )
+        if global_src is not None:
+            _copy_entry(global_src, package_root / "global.dat")
+            context.log(
+                f"materialized Babel global.dat from fallback wheel {archive_path.name}"
+            )
+        if locale_src is not None:
+            return True
+    return False
+
+
 def embed_babel_data(context) -> None:
     package_root = source_path(context, "Lib/babel")
     locale_data_root = package_root / "locale-data"
     if not locale_data_root.exists():
         locale_data_root = package_root / "localedata"
+    if not locale_data_root.exists():
+        _materialize_babel_data_from_pure_wheel(context, package_root)
+        locale_data_root = package_root / "locale-data"
+        if not locale_data_root.exists():
+            locale_data_root = package_root / "localedata"
     global_data_path = package_root / "global.dat"
     locale_data = {
         path.stem: base64.b64encode(path.read_bytes()).decode("ascii")

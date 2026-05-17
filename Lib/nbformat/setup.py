@@ -37,6 +37,13 @@ def embed_nbformat_schemas(context) -> None:
                 )
             else:
                 return text
+        if re.search(r"(?m)^import os(?:\s|$)", text) is None:
+            if "import json\n" in text:
+                text = text.replace("import json\n", "import json\nimport os\n", 1)
+            elif "import warnings\n" in text:
+                text = text.replace("import warnings\n", "import warnings\nimport os\n", 1)
+            elif "from pathlib import Path\n" in text:
+                text = text.replace("from pathlib import Path\n", "import os\nfrom pathlib import Path\n", 1)
         if "from copy import deepcopy\n" not in text:
             if "import warnings\n" in text:
                 text = text.replace("import warnings\n", "import warnings\nfrom copy import deepcopy\n", 1)

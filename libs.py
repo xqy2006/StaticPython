@@ -594,6 +594,15 @@ def _pypi_file_sort_key(file_info: dict, target_version: Version) -> tuple:
     return (2, filename.lower())
 
 
+def _is_pure_universal_wheel(file_info: dict) -> bool:
+    filename = str(file_info.get("filename") or "")
+    try:
+        _dist, _version, _build, tags = parse_wheel_filename(filename)
+    except InvalidWheelFilename:
+        return False
+    return any(tag.platform == "any" and tag.abi == "none" for tag in tags)
+
+
 def _compatible_pypi_files(
     files: list[dict],
     *,
@@ -614,8 +623,13 @@ def _compatible_pypi_files(
     source_distributions = [
         file_info for file_info in compatible if file_info.get("packagetype") == "sdist"
     ]
+    pure_universal_wheels = [
+        file_info
+        for file_info in compatible
+        if file_info.get("packagetype") == "bdist_wheel" and _is_pure_universal_wheel(file_info)
+    ]
     if source_distributions:
-        compatible = source_distributions
+        compatible = [*source_distributions, *pure_universal_wheels]
     return sorted(compatible, key=lambda file_info: _pypi_file_sort_key(file_info, target_version))
 
 

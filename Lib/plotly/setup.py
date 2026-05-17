@@ -99,6 +99,44 @@ def patch_plotly_sources(context):
             f"PLOTLY_PACKAGE_DATA = {package_data!r}\n",
         )
 
+    def patch_version_metadata(text: str) -> str:
+        if "PackageNotFoundError" in text and "__version__" in text:
+            return text
+        if '__version__ = importlib.metadata.version("plotly")' in text:
+            return text.replace(
+                '__version__ = importlib.metadata.version("plotly")',
+                "try:\n"
+                '    __version__ = importlib.metadata.version("plotly")\n'
+                "except importlib.metadata.PackageNotFoundError:\n"
+                '    __version__ = "0+staticpython"',
+                1,
+            )
+        import_match = re.search(r"(?m)^from importlib\.metadata import (?P<names>.+)\n", text)
+        version_match = re.search(r'(?m)^__version__ = version\((?P<arg>.+?)\)\n', text)
+        if import_match is None or version_match is None or "version" not in import_match.group("names"):
+            return text
+        imported_names = import_match.group("names")
+        replacement_names = imported_names if "PackageNotFoundError" in imported_names else f"PackageNotFoundError, {imported_names}"
+        updated = text[: import_match.start()] + f"from importlib.metadata import {replacement_names}\n" + text[import_match.end() :]
+        updated, count = re.subn(
+            r'(?m)^__version__ = version\((?P<arg>.+?)\)\n',
+            'try:\n    __version__ = version(\\g<arg>)\nexcept PackageNotFoundError:\n    __version__ = "0+staticpython"\n',
+            updated,
+            count=1,
+        )
+        return updated if count == 1 else text
+
+    transform_first_existing_source_text(
+        context,
+        [
+            "Lib/plotly/__init__.py",
+            "Lib/plotly/_version.py",
+            "Lib/plotly/version.py",
+        ],
+        patch_version_metadata,
+        allow_all_missing=True,
+    )
+
     def patch_templates(text):
         if not text:
             return text
