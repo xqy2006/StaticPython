@@ -46,7 +46,7 @@ def patch_chardet_sources(context) -> None:
             else:
                 updated, count = re.subn(
                     r"(?m)^(?P<anchor>NON_ASCII_BIGRAM_WEIGHT[^\n]*\n(?:#.*\n)*)",
-                    "\\g<anchor>\n" + constants,
+                    lambda match: match.group("anchor") + "\n" + constants,
                     text,
                     count=1,
                 )

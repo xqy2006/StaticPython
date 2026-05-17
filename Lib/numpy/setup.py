@@ -410,14 +410,18 @@ def _patch_numpy_meson_build(context) -> None:
     if not meson_build_path.exists():
         return
     launcher = numpy_meson_launcher_path(context).as_posix()
-    original = "py = import('python').find_installation(pure: false)\n"
-    replacement = f"py = import('python').find_installation('{launcher}', pure: false)\n"
     text = meson_build_path.read_text(encoding="utf-8")
-    if replacement in text:
+    if launcher in text and "find_installation" in text:
         return
-    if original not in text:
+    updated, count = re.subn(
+        r"(?m)^py\s*=\s*import\('python'\)\.find_installation\([^)]*\)\s*$",
+        f"py = import('python').find_installation('{launcher}', pure: false)",
+        text,
+        count=1,
+    )
+    if count != 1:
         raise RuntimeError(f"expected python installation probe not found in {meson_build_path}")
-    meson_build_path.write_text(text.replace(original, replacement, 1), encoding="utf-8", newline="\n")
+    meson_build_path.write_text(updated, encoding="utf-8", newline="\n")
 
 
 def _patch_numpy_top_level_imports(context) -> None:
