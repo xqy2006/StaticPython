@@ -232,8 +232,8 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
                 text = replace_regex_once(
                     text,
                     r"(?m)^            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
-                    r"^(?:            #.*\n)?"
-                    r"^            self\.event_logger\.register_event_schema\(schema_path\)\n",
+                    r"(?:            #.*\n)*"
+                    r"            self\.event_logger\.register_event_schema\(schema_path\)\n",
                     replacement_schema_block,
                     label="jupyter_server embedded event schema registration",
                     flags=re.MULTILINE,

@@ -28,7 +28,11 @@ def _project_configurations() -> str:
 """
 
 
-def _render_regex_project() -> str:
+def _render_regex_project(source_files: list[str]) -> str:
+    compile_items = "\n".join(
+        f'    <ClCompile Include="..\\\\regex_builtin\\\\src\\\\{source_file}" />'
+        for source_file in source_files
+    )
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
 {_project_configurations()}  <PropertyGroup Label="Globals">
@@ -65,8 +69,7 @@ def _render_regex_project() -> str:
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\\regex_builtin\\src\\_regex.c" />
-    <ClCompile Include="..\\regex_builtin\\src\\_regex_unicode.c" />
+{compile_items}
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />
 </Project>
@@ -74,17 +77,13 @@ def _render_regex_project() -> str:
 
 
 def prepare_regex_project(context) -> None:
-    missing = [
-        path
-        for path in (
-            source_path(context, "regex_builtin/src/_regex.c"),
-            source_path(context, "regex_builtin/src/_regex_unicode.c"),
-        )
-        if not path.exists()
-    ]
-    if missing:
-        raise RuntimeError("regex source files are missing: " + ", ".join(str(path) for path in missing))
-    write_source_text(context, "PCbuild/regex._regex.vcxproj", _render_regex_project())
+    required_source = source_path(context, "regex_builtin/src/_regex.c")
+    if not required_source.exists():
+        raise RuntimeError(f"regex source file is missing: {required_source}")
+    source_files = ["_regex.c"]
+    if source_path(context, "regex_builtin/src/_regex_unicode.c").exists():
+        source_files.append("_regex_unicode.c")
+    write_source_text(context, "PCbuild/regex._regex.vcxproj", _render_regex_project(source_files))
 
 
 def prepare_regex_source(context) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from libs import (
     pypi_library,
     replace_text_once,
@@ -162,15 +164,15 @@ def patch_jupyterlab_server_resources(context) -> None:
                 label="jupyterlab_server direct schema fallback",
             )
         if "    if not os.path.exists(schemas_dir):\n" in text and "for static_schema_name in _staticpython_schema_names()" not in text:
-            text = replace_text_once(
+            text = replace_regex_once(
                 text,
-                "    if not os.path.exists(schemas_dir):\n"
-                "        warnings = [\"Settings directory does not exist at %s\" % schemas_dir]\n"
-                "        return ([], warnings)\n"
-                "\n"
-                "    schema_pattern = schemas_dir + \"/**/*\" + extension\n"
-                "    schema_paths = [path for path in glob(schema_pattern, recursive=True)]\n"
-                "    schema_paths.sort()\n",
+                r"(?ms)^    if not os\.path\.exists\(schemas_dir\):\n"
+                r"^        warnings = \[\"Settings directory does not exist at %s\" % schemas_dir\]\n"
+                r"^        return \(\[\], warnings\)\n"
+                r"^\n"
+                r"^    schema_pattern = schemas_dir \+ \"/\*\*/\*\" \+ extension\n"
+                r"^    schema_paths = \[path for path in glob\(schema_pattern, recursive=True\)\](?:\s*#.*)?\n"
+                r"^    schema_paths\.sort\(\)\n",
                 "    schema_paths = []\n"
                 "    if os.path.exists(schemas_dir):\n"
                 "        schema_pattern = schemas_dir + \"/**/*\" + extension\n"
@@ -189,6 +191,7 @@ def patch_jupyterlab_server_resources(context) -> None:
                 "                warnings.append(user_settings.pop(\"warning\"))\n"
                 "            settings[static_schema_name] = dict(id=static_schema_name, schema=schema, version=version, **user_settings)\n",
                 label="jupyterlab_server list embedded schemas",
+                flags=re.MULTILINE | re.DOTALL,
             )
         return text
 

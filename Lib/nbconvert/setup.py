@@ -1,3 +1,5 @@
+import re
+
 from libs import (
     replace_function_block_once,
     replace_regex_once,
@@ -114,13 +116,12 @@ def _iter_exporter_entries():
         )
         if "def _get_conf(" not in text:
             return text
-        text = replace_text_once(
+        text = replace_regex_once(
             text,
-            "        loaders = [\n"
-            "            *self.extra_loaders,\n"
-            "            ExtensionTolerantLoader(FileSystemLoader(paths), self.template_extension),\n"
-            "            DictLoader({self._raw_template_key: self.raw_template}),\n"
-            "        ]\n",
+            r"(?ms)^        loaders = (?:\[\n            \*self\.extra_loaders,\n|self\.extra_loaders \+ \[\n)"
+            r"            ExtensionTolerantLoader\(FileSystemLoader\(paths\), self\.template_extension\),\n"
+            r"            DictLoader\(\{self\._raw_template_key: self\.raw_template\}\),\n"
+            r"        \]\n",
             "        static_templates = dict(_STATICPYTHON_TEMPLATES)\n"
             "        for template_name in self.get_template_names():\n"
             "            prefix = template_name + \"/\"\n"
@@ -135,6 +136,7 @@ def _iter_exporter_entries():
             "            DictLoader({self._raw_template_key: self.raw_template}),\n"
             "        ]\n",
             label="nbconvert embedded jinja template loader",
+            flags=re.MULTILINE | re.DOTALL,
         )
         text = replace_regex_once(
             text,

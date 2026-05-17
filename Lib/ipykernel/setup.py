@@ -27,10 +27,10 @@ def embed_ipykernel_resources(context) -> None:
     def patch_kernelspec(text: str) -> str:
         if "from ._static_resources import" not in text:
             text, count = re.subn(
-                r"(import tempfile\nfrom pathlib import Path\nfrom typing import Any\n)",
+                r"(from jupyter_client\.kernelspec import KernelSpecManager\n)",
                 (
+                    "import importlib.util\n"
                     "\\1"
-                    "\nimport importlib.util\n"
                     "from ._static_resources import (\n"
                     "    RESOURCES as _STATICPYTHON_RESOURCES,\n"
                     "    resource_bytes as _staticpython_resource_bytes,\n"
@@ -43,7 +43,7 @@ def embed_ipykernel_resources(context) -> None:
                 raise RuntimeError("failed to patch ipykernel kernelspec imports")
 
         text, count = re.subn(
-            r'"metadata": \{"debugger": True\},',
+            r'"metadata": \{"debugger": [^}]+\},',
             '"metadata": {"debugger": importlib.util.find_spec("debugpy") is not None},',
             text,
             count=1,
@@ -51,20 +51,20 @@ def embed_ipykernel_resources(context) -> None:
         if count != 1 and 'importlib.util.find_spec("debugpy") is not None' not in text:
             raise RuntimeError("failed to patch ipykernel debugger metadata")
 
-        old = "    # stage resources\n    shutil.copytree(RESOURCES, path)\n"
-        new = (
+        text, count = re.subn(
+            r"    # stage resources\n    shutil\.copytree\(RESOURCES, path\)\n",
             "    # stage resources\n"
-            "    path = Path(path)\n"
             "    if os.path.isdir(RESOURCES):\n"
             "        shutil.copytree(RESOURCES, path)\n"
             "    else:\n"
-            "        path.mkdir(parents=True, exist_ok=True)\n"
+            "        os.makedirs(path, exist_ok=True)\n"
             "        for resource_name in sorted(_STATICPYTHON_RESOURCES):\n"
-            "            (path / resource_name).write_bytes(_staticpython_resource_bytes(resource_name))\n"
+            "            with open(pjoin(path, resource_name), \"wb\") as handle:\n"
+            "                handle.write(_staticpython_resource_bytes(resource_name))\n",
+            text,
+            count=1,
         )
-        if old in text:
-            text = text.replace(old, new, 1)
-        elif "_staticpython_resource_bytes(resource_name)" not in text:
+        if count != 1 and "_staticpython_resource_bytes(resource_name)" not in text:
             raise RuntimeError("failed to patch ipykernel resource staging")
         return text
 
