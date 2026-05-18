@@ -25,6 +25,12 @@ def embed_ipykernel_resources(context) -> None:
         + "def resource_bytes(name: str) -> bytes:\n"
         + "    return base64.b64decode(RESOURCES[name])\n",
     )
+    write_source_text(
+        context,
+        "Lib/ipykernel_launcher.py",
+        "from ipykernel import kernelapp as app\n"
+        "app.launch_new_instance()\n",
+    )
 
     def patch_kernelspec(text: str) -> str:
         if "from ._static_resources import" not in text:
@@ -77,11 +83,12 @@ def embed_ipykernel_resources(context) -> None:
 
 LIBRARY_INTEGRATION = simple_library(
     name="ipykernel",
-    overlay_entries=["Lib/ipykernel", "Lib/ipykernel_launcher.py"],
+    overlay_entries=["Lib/ipykernel"],
     materialized_paths=[
         "Lib/ipykernel/resources/logo-32x32.png",
         "Lib/ipykernel/resources/logo-64x64.png",
         "Lib/ipykernel/_static_resources.py",
+        "Lib/ipykernel_launcher.py",
     ],
     post_patch_hooks=[embed_ipykernel_resources],
 )

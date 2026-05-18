@@ -200,12 +200,13 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             else:
                 text = replace_regex_once(
                     text,
-                    r"(?m)^        env = Environment\([^\n]*\n"
-                    r"^            loader=FileSystemLoader\(template_path\), extensions=\[(?:'|\")jinja2\.ext\.i18n(?:'|\")\], \*\*jenv_opt\s*\n"
-                    r"^        \)\n",
+                    r"(?ms)^        env = Environment\(\n"
+                    r".*?"
+                    r"^        \)\n"
+                    r"(?=^        sys_info = get_sys_info\(\)\n)",
                     replacement_loader_block,
                     label="jupyter_server serverapp embedded template loader",
-                    flags=re.MULTILINE,
+                    flags=re.MULTILINE | re.DOTALL,
                 )
         if (
             has_event_schema_resources
@@ -253,7 +254,10 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             return text
         return replace_regex_once(
             text,
-            r"(?ms)^(\s*)self\.jinja2_env = Environment\(\s*loader=FileSystemLoader\(self\.template_paths\),\s*extensions=\[(?:'|\")jinja2\.ext\.i18n(?:'|\")\],\s*autoescape=True,\s*\*\*self\.jinja2_options,\s*\)\n",
+            r"(?ms)^        self\.jinja2_env = Environment\(\n"
+            r".*?"
+            r"^        \)\n"
+            r"(?=^\s*self\.settings\.update\()",
             "        template_package = \"notebook\" if self.name == \"notebook\" else \"jupyterlab\" if self.name == \"lab\" else self.name\n"
             "        self.jinja2_env = Environment(\n"
             "            loader=ChoiceLoader([\n"

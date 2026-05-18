@@ -168,10 +168,10 @@ def patch_jupyterlab_server_resources(context) -> None:
             text = replace_regex_once(
                 text,
                 r"(?ms)^    if not os\.path\.exists\(schemas_dir\):\n"
-                r"^        warnings = \[\"Settings directory does not exist at %s\" % schemas_dir\]\n"
+                r"^        warnings = \[(?:'|\")Settings directory does not exist at %s(?:'|\") % schemas_dir\]\n"
                 r"^        return \(\[\], warnings\)\n"
                 r"^\n"
-                r"^    schema_pattern = schemas_dir \+ \"/\*\*/\*\" \+ extension\n"
+                r"^    schema_pattern = schemas_dir \+ (?:'|\")/\*\*/\*(?:'|\") \+ extension\n"
                 r"^    schema_paths = \[path for path in glob\(schema_pattern, recursive=True\)\](?:\s*#.*)?\n"
                 r"^    schema_paths\.sort\(\)\n",
                 "    schema_paths = []\n"

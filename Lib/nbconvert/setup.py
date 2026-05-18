@@ -194,9 +194,9 @@ def _iter_exporter_entries():
         text = replace_regex_once(
             text,
             r"(?ms)^        loaders = (?:\[\n            \*self\.extra_loaders,\n|self\.extra_loaders \+ \[\n)"
-            r"            ExtensionTolerantLoader\(FileSystemLoader\(paths\), self\.template_extension\),\n"
-            r"            DictLoader\(\{self\._raw_template_key: self\.raw_template\}\),\n"
-            r"        \]\n",
+            r".*?"
+            r"^        \]\n"
+            r"(?=^        environment = Environment\()",
             "        static_templates = dict(_STATICPYTHON_TEMPLATES)\n"
             "        for template_name in self.get_template_names():\n"
             "            prefix = template_name + \"/\"\n"

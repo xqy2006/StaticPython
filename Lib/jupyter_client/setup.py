@@ -64,6 +64,7 @@ def patch_jupyter_client_sources(context):
         context,
         "Lib/jupyter_client/provisioning/factory.py",
         patch_provisioning_factory,
+        allow_missing=True,
     )
 
 
