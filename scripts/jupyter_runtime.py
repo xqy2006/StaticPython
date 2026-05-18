@@ -220,7 +220,8 @@ def assert_log_health(log_output: str, target: str) -> None:
             raise AssertionError(f"unexpected startup error marker {marker!r} in {target} log output")
 
     required_by_target = {
-        "server": ["Jupyter Server", "jupyterlab | extension was successfully loaded."],
+        # Plain Jupyter Server can start successfully without loading the Lab extension.
+        "server": ["Jupyter Server"],
         "notebook": ["notebook | extension was successfully loaded."],
         "lab": ["jupyterlab | extension was successfully loaded.", "Extension Manager is 'pypi'."],
     }
