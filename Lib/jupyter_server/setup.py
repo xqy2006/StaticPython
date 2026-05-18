@@ -269,19 +269,30 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
 
     def patch_base_handlers(text: str) -> str:
         if "_staticpython_resource_bytes_for_path" not in text:
-            anchor = "from jupyter_server.utils import (\n"
-            start = text.find(anchor)
-            if start == -1:
+            helper_imports = (
+                "from jupyter_server._staticpython_resources import resource_bytes_for_path as _staticpython_resource_bytes_for_path\n"
+                "from jupyter_server._staticpython_resources import resolve_resource_from_roots as _staticpython_resolve_resource_from_roots\n"
+            )
+            match = re.search(
+                r"(?ms)^from jupyter_server\.utils import \(\n.*?^\)\n",
+                text,
+            )
+            if match is None:
+                match = re.search(
+                    r"(?m)^(?:from jupyter_server\.utils import [^\n]+\n)+",
+                    text,
+                )
+            if match is None:
+                match = re.search(
+                    r"(?m)^(?:from jupyter_server(?:\.[^\s]+)? import [^\n]+\n|import jupyter_server\n)+",
+                    text,
+                )
+            if match is None:
                 raise RuntimeError("expected snippet not found in jupyter_server base handlers resource imports")
-            end = text.find(")\n", start)
-            if end == -1:
-                raise RuntimeError("expected snippet not found in jupyter_server base handlers resource imports")
-            end += 2
             text = (
-                text[:end]
-                + "from jupyter_server._staticpython_resources import resource_bytes_for_path as _staticpython_resource_bytes_for_path\n"
-                + "from jupyter_server._staticpython_resources import resolve_resource_from_roots as _staticpython_resolve_resource_from_roots\n"
-                + text[end:]
+                text[: match.end()]
+                + helper_imports
+                + text[match.end() :]
             )
         class_start = text.find("class FileFindHandler(")
         if class_start == -1:

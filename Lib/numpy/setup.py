@@ -413,6 +413,12 @@ def _patch_numpy_meson_build(context) -> None:
     text = meson_build_path.read_text(encoding="utf-8")
     if launcher in text and "find_installation" in text:
         return
+    if "project('f2py_examples'" in text or 'project("f2py_examples"' in text:
+        context.log(
+            "detected legacy NumPy source layout without a top-level Meson build; "
+            "skipping Meson python probe patch"
+        )
+        return
     updated, count = re.subn(
         r"(?m)^py\s*=\s*import\('python'\)\.find_installation\([^)]*\)\s*$",
         f"py = import('python').find_installation('{launcher}', pure: false)",
@@ -420,6 +426,19 @@ def _patch_numpy_meson_build(context) -> None:
         count=1,
     )
     if count != 1:
+        updated, count = re.subn(
+            r"(?m)^(?P<var>\w+)\s*=\s*(?P<module>\w+)\.find_installation\([^)]*\)\s*$",
+            rf"\g<var> = \g<module>.find_installation('{launcher}', pure: false)",
+            text,
+            count=1,
+        )
+    if count != 1:
+        if "find_installation" not in text:
+            context.log(
+                "NumPy source tree does not expose a patchable Meson python probe; "
+                "skipping Meson patch for this release"
+            )
+            return
         raise RuntimeError(f"expected python installation probe not found in {meson_build_path}")
     meson_build_path.write_text(updated, encoding="utf-8", newline="\n")
 

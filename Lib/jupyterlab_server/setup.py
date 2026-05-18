@@ -4,6 +4,7 @@ import re
 
 from libs import (
     pypi_library,
+    replace_regex_once,
     replace_text_once,
     source_path,
     transform_source_text,

@@ -48,10 +48,11 @@ def patch_nbconvert_sources(context) -> None:
     def patch_exporter_base(text: str) -> str:
         if "from .exporter import Exporter\n" not in text:
             return text
-        text = replace_text_once(
-            text,
-            "from .exporter import Exporter\n",
-            """from .exporter import Exporter
+        if "_STATICPYTHON_EXPORTERS" not in text:
+            text = replace_text_once(
+                text,
+                "from .exporter import Exporter\n",
+                """from .exporter import Exporter
 
 
 _STATICPYTHON_EXPORTERS = {
@@ -82,7 +83,23 @@ class _StaticPythonExporterEntryPoint:
 
 
 def _iter_exporter_entries():
-    exporters = list(entry_points(group="nbconvert.exporters"))
+    exporters = []
+    if "entry_points" in globals():
+        try:
+            exporters = list(entry_points(group="nbconvert.exporters"))
+        except TypeError:
+            discovered = entry_points()
+            if hasattr(discovered, "select"):
+                exporters = list(discovered.select(group="nbconvert.exporters"))
+            elif isinstance(discovered, dict):
+                exporters = list(discovered.get("nbconvert.exporters", []))
+            else:
+                exporters = [ep for ep in discovered if getattr(ep, "group", None) == "nbconvert.exporters"]
+    elif "entrypoints" in globals():
+        try:
+            exporters = list(entrypoints.get_group_all("nbconvert.exporters"))
+        except Exception:
+            exporters = []
     if exporters:
         return exporters
     return [
@@ -90,19 +107,77 @@ def _iter_exporter_entries():
         for name, value in _STATICPYTHON_EXPORTERS.items()
     ]
 """,
-            label="nbconvert exporter fallback helpers",
-        )
-        text = replace_text_once(
+                label="nbconvert exporter fallback helpers",
+            )
+        text = replace_function_block_once(
             text,
-            '        exporters = entry_points(group="nbconvert.exporters")\n',
-            '        exporters = _iter_exporter_entries()\n',
-            label="nbconvert get_exporter fallback call",
+            "get_exporter",
+            """def get_exporter(name, config=get_config()):  # noqa
+    \"\"\"Given an exporter name or import path, return a class ready to be instantiated
+
+    Raises ExporterName if exporter is not found or ExporterDisabledError if not enabled
+    \"\"\"
+
+    if name == "ipynb":
+        name = "notebook"
+
+    candidates = {name, name.lower()}
+    for ep in _iter_exporter_entries():
+        if ep.name not in candidates:
+            continue
+        exporter = ep.load()
+        if getattr(exporter(config=config), "enabled", True):
+            return exporter
+        raise ExporterDisabledError('Exporter "%s" disabled in configuration' % (name))
+
+    if "." in name:
+        try:
+            exporter = import_item(name)
+            if getattr(exporter(config=config), "enabled", True):
+                return exporter
+            raise ExporterDisabledError('Exporter "%s" disabled in configuration' % (name))
+        except ImportError:
+            log = get_logger()
+            log.error("Error importing %s" % name, exc_info=True)
+
+    raise ExporterNameError(
+        'Unknown exporter "{}", did you mean one of: {}?'.format(
+            name, ", ".join(get_export_names())
         )
-        return replace_text_once(
+    )
+
+""",
+            label="nbconvert get_exporter fallback",
+            next_name="get_export_names",
+        )
+        return replace_function_block_once(
             text,
-            '    exporters = sorted(e.name for e in entry_points(group="nbconvert.exporters"))\n',
-            '    exporters = sorted(e.name for e in _iter_exporter_entries())\n',
-            label="nbconvert get_export_names fallback call",
+            "get_export_names",
+            """def get_export_names(config=get_config()):  # noqa
+    \"\"\"Return a list of the currently supported export targets
+
+    Exporters can be found in external packages by registering
+    them as an nbconvert.exporter entrypoint.
+    \"\"\"
+    exporters = sorted({e.name for e in _iter_exporter_entries()})
+    if os.environ.get("NBCONVERT_DISABLE_CONFIG_EXPORTERS"):
+        get_logger().info(
+            "Config exporter loading disabled, no additional exporters will be automatically included."
+        )
+        return exporters
+
+    enabled_exporters = []
+    for exporter_name in exporters:
+        try:
+            e = get_exporter(exporter_name)(config=config)
+            if e.enabled:
+                enabled_exporters.append(exporter_name)
+        except (ExporterDisabledError, ValueError):
+            pass
+    return enabled_exporters
+
+""",
+            label="nbconvert get_export_names fallback",
         )
 
     transform_source_text(context, "Lib/nbconvert/exporters/base.py", patch_exporter_base, allow_missing=True)

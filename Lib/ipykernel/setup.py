@@ -8,11 +8,13 @@ from libs import simple_library, source_path, transform_source_text, write_sourc
 
 def embed_ipykernel_resources(context) -> None:
     resources_root = source_path(context, "Lib/ipykernel/resources")
-    encoded_resources = {
-        path.name: base64.b64encode(path.read_bytes()).decode("ascii")
-        for path in sorted(resources_root.iterdir())
-        if path.is_file()
-    }
+    encoded_resources = {}
+    if resources_root.exists():
+        encoded_resources = {
+            path.name: base64.b64encode(path.read_bytes()).decode("ascii")
+            for path in sorted(resources_root.iterdir())
+            if path.is_file()
+        }
     write_source_text(
         context,
         "Lib/ipykernel/_static_resources.py",
@@ -79,7 +81,6 @@ LIBRARY_INTEGRATION = simple_library(
     materialized_paths=[
         "Lib/ipykernel/resources/logo-32x32.png",
         "Lib/ipykernel/resources/logo-64x64.png",
-        "Lib/ipykernel/resources/logo-svg.svg",
         "Lib/ipykernel/_static_resources.py",
     ],
     post_patch_hooks=[embed_ipykernel_resources],

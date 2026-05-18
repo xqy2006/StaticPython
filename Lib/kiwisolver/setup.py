@@ -144,8 +144,8 @@ LIBRARY_INTEGRATION = pypi_library(
     name="kiwisolver",
     dependencies=["cppy"],
     source_mapping={
-        "py/kiwisolver||kiwisolver": "Lib/kiwisolver",
-        "?py/src||?src": "kiwisolver_builtin/py/src",
+        "?py/kiwisolver||?kiwisolver": "Lib/kiwisolver",
+        "?py/src||?src||?py": "kiwisolver_builtin/py/src",
         "kiwi": "kiwisolver_builtin/kiwi",
         "?constraint.cpp": "kiwisolver_builtin/legacy-root/constraint.cpp",
         "?expression.cpp": "kiwisolver_builtin/legacy-root/expression.cpp",
@@ -161,7 +161,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "?version.h": "kiwisolver_builtin/legacy-root/version.h",
     },
     materialized_paths=[
-        "Lib/kiwisolver",
         "kiwisolver_builtin/py/src",
         "kiwisolver_builtin/kiwi",
     ],

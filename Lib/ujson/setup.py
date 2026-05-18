@@ -66,17 +66,27 @@ def _render_ujson_project(source_files: list[str], include_dirs: list[str]) -> s
 
 def _discover_ujson_build_layout(context) -> tuple[list[str], list[str]]:
     root = source_path(context, "ujson_builtin")
-    source_files = [
-        "python/ujson.c",
-        "python/objToJSON.c",
-        "python/JSONtoObj.c",
-        "lib/ultrajsonenc.c",
-        "lib/ultrajsondec.c",
-    ]
-    include_dirs = [
-        "python",
-        "lib",
-    ]
+    if (root / "python" / "ujson.c").exists():
+        source_files = [
+            "python/ujson.c",
+            "python/objToJSON.c",
+            "python/JSONtoObj.c",
+            "lib/ultrajsonenc.c",
+            "lib/ultrajsondec.c",
+        ]
+        include_dirs = [
+            "python",
+            "lib",
+        ]
+    else:
+        source_files = [
+            "ujson.c",
+            "objToJSON.c",
+            "JSONtoObj.c",
+            "ultrajsonenc.c",
+            "ultrajsondec.c",
+        ]
+        include_dirs = ["."]
     double_conversion_dir = root / "deps" / "double-conversion" / "double-conversion"
     dconv_wrapper = root / "lib" / "dconv_wrapper.cc"
     if dconv_wrapper.exists() and double_conversion_dir.exists():
@@ -91,9 +101,15 @@ def _discover_ujson_build_layout(context) -> tuple[list[str], list[str]]:
 
 def _ensure_version_header(context) -> None:
     version_header = source_path(context, "ujson_builtin/python/version.h")
-    if version_header.exists():
+    legacy_version_header = source_path(context, "ujson_builtin/version.h")
+    if version_header.exists() or legacy_version_header.exists():
         return
     template = source_path(context, "ujson_builtin/python/version_template.h")
+    if not template.exists():
+        template = source_path(context, "ujson_builtin/version_template.h")
+    if not version_header.parent.exists():
+        version_header = legacy_version_header
+    version_header.parent.mkdir(parents=True, exist_ok=True)
     if template.exists():
         text = template.read_text(encoding="utf-8").replace("{version}", "0+staticpython")
     else:

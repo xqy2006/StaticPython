@@ -129,18 +129,18 @@ def prepare_regex_source(context) -> None:
             / archive_path.name
         )
 
-        if not archive_path.exists():
-            assert url is not None
-            context.log(f"downloading {project_name} {resolved_release_version} from {source_kind}")
-            _download_file(url, archive_path)
-        elif cached:
-            context.log(
-                f"reusing cached {project_name} {resolved_release_version} {source_kind} archive without refreshing metadata"
-            )
-        else:
-            context.log(f"reusing cached {project_name} {resolved_release_version} {source_kind} archive")
-
         try:
+            if not archive_path.exists():
+                assert url is not None
+                context.log(f"downloading {project_name} {resolved_release_version} from {source_kind}")
+                _download_file(url, archive_path)
+            elif cached:
+                context.log(
+                    f"reusing cached {project_name} {resolved_release_version} {source_kind} archive without refreshing metadata"
+                )
+            else:
+                context.log(f"reusing cached {project_name} {resolved_release_version} {source_kind} archive")
+
             extracted_root = _extract_archive(archive_path, extract_root, context.log)
             context.log(f"using {project_name} {resolved_release_version} source from {extracted_root}")
 
@@ -153,7 +153,7 @@ def prepare_regex_source(context) -> None:
                 context.source_root / "regex_builtin" / "src",
             )
             return
-        except RuntimeError as exc:
+        except Exception as exc:
             failure = f"{archive_path.name}: {exc}"
             failures.append(failure)
             context.log(
