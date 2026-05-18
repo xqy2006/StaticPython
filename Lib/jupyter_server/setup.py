@@ -255,9 +255,11 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
         return replace_regex_once(
             text,
             r"(?ms)^        self\.jinja2_env = Environment\(\n"
-            r".*?"
-            r"^        \)\n"
-            r"(?=^\s*self\.settings\.update\()",
+            r"^            loader=FileSystemLoader\(self\.template_paths\),\n"
+            r"^            extensions=\[\"jinja2\.ext\.i18n\"\],\n"
+            r"^            autoescape=True,\n"
+            r"^            \*\*self\.jinja2_options,?\n"
+            r"^        \)\n",
             "        template_package = \"notebook\" if self.name == \"notebook\" else \"jupyterlab\" if self.name == \"lab\" else self.name\n"
             "        self.jinja2_env = Environment(\n"
             "            loader=ChoiceLoader([\n"

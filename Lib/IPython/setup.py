@@ -29,6 +29,7 @@ def patch_ipython_sources(context):
 LIBRARY_INTEGRATION = simple_library(
     name="IPython",
     project_name="ipython",
+    dependencies=["decorator"],
     overlay_entries=["Lib/IPython"],
     post_patch_hooks=[patch_ipython_sources],
 )
