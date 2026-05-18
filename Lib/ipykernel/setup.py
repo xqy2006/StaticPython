@@ -46,8 +46,8 @@ def embed_ipykernel_resources(context) -> None:
 
         debugger_marker = 'importlib.util.find_spec("debugpy") is not None'
         text, count = re.subn(
-            r'(?m)^(\s*[\'"]metadata[\'"]\s*:\s*)\{[^}\n]*[\'"]debugger[\'"]\s*:\s*[^}\n]+(\}\s*,?\s*)$',
-            r'\1{"debugger": importlib.util.find_spec("debugpy") is not None}\2',
+            r'(?m)^(\s*[\'"]metadata[\'"]\s*:\s*\{[^}\n]*[\'"]debugger[\'"]\s*:\s*)([^}\n]+)(\}\s*,?\s*)$',
+            r'\1importlib.util.find_spec("debugpy") is not None\3',
             text,
             count=1,
         )
