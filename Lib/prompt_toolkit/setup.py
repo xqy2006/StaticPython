@@ -39,6 +39,8 @@ def _patch_prompt_toolkit_init(text: str) -> str:
     )
     if count == 1:
         return updated
+    if "version(" in text and "prompt_toolkit" in text:
+        raise RuntimeError("prompt_toolkit version metadata anchor not found")
     return text
 
 
@@ -75,6 +77,8 @@ def _patch_prompt_toolkit_application(text: str) -> str:
     )
     if count == 1:
         return updated
+    if "from ctypes import c_int, c_void_p, pythonapi" in text:
+        raise RuntimeError("prompt_toolkit ctypes signal anchor not found")
     return text
 
 

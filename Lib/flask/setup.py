@@ -3,11 +3,14 @@ from libs import replace_regex_once, simple_library, source_path, transform_firs
 
 def _patch_flask_testing(text: str) -> str:
     if 'werkzeug.__version__' in text:
-        return text.replace(
+        updated = text.replace(
             'f"werkzeug/{werkzeug.__version__}"',
             'f"werkzeug/{getattr(werkzeug, \'__version__\', \'3.1.8\')}"',
             1,
         )
+        if updated == text:
+            raise RuntimeError("flask.testing werkzeug.__version__ anchor not found")
+        return updated
     if 'importlib.metadata.version("werkzeug")' not in text:
         return text
     return replace_regex_once(

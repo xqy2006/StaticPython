@@ -212,13 +212,19 @@ def patch_protobuf_namespace(context) -> None:
 
 
 def patch_protobuf_sources(context) -> None:
+    def patch_message_c(text: str) -> str:
+        updated = text.replace(
+            "__attribute__((flatten)) static PyObject* PyUpb_Message_GetAttr(",
+            "static PyObject* PyUpb_Message_GetAttr(",
+        )
+        if "__attribute__((flatten))" in updated:
+            raise RuntimeError("protobuf message flatten attribute anchor not patched")
+        return updated
+
     transform_source_text(
         context,
         "protobuf_builtin/python/message.c",
-        lambda text: text.replace(
-            "__attribute__((flatten)) static PyObject* PyUpb_Message_GetAttr(",
-            "static PyObject* PyUpb_Message_GetAttr(",
-        ),
+        patch_message_c,
         allow_missing=True,
     )
 

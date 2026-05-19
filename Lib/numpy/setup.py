@@ -470,6 +470,8 @@ def _patch_numpy_top_level_imports(context) -> None:
                     label="numpy optional matrixlib import",
                 )
             else:
+                if "matrixlib" in text:
+                    raise RuntimeError("numpy matrixlib package import anchor not found")
                 return text
 
         if "    from .matrixlib import *\n" in text and "asmatrix = bmat = mat = matrix = None\n" not in text:
@@ -520,6 +522,8 @@ def _patch_numpy_top_level_imports(context) -> None:
             )
             if count == 1:
                 text = updated
+            else:
+                raise RuntimeError("numpy optional matrixlib symbol import anchor not found")
         if "set(_mat.__all__) if _mat is not None else set()" in text:
             return text
         if "        set(_mat.__all__) |\n" in text:
@@ -536,6 +540,8 @@ def _patch_numpy_top_level_imports(context) -> None:
                 "    if _mat is not None:\n        __all__.extend(_mat.__all__)\n",
                 label="numpy optional matrixlib __all__ extend",
             )
+        if "_mat.__all__" in text:
+            raise RuntimeError("numpy optional matrixlib __all__ anchor not found")
         return text
 
     transform_source_text(context, "Lib/numpy/__init__.py", patch)

@@ -4,6 +4,8 @@ from libs import replace_function_block_once, simple_library, transform_source_t
 def patch_jupyter_client_sources(context):
     def patch_provisioning_factory(text: str) -> str:
         if "def _get_provisioner(" not in text:
+            if "KernelProvisionerFactory" in text or "local-provisioner" in text:
+                raise RuntimeError("jupyter_client provisioner fallback anchor not found")
             return text
         return replace_function_block_once(
             text,

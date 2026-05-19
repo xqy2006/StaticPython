@@ -52,6 +52,15 @@ def embed_jupyter_events_schemas(context) -> None:
                 'PROPERTY_METASCHEMA = yaml.loads(_STATICPYTHON_SCHEMA_TEXT["schemas/property-metaschema.yml"])\n',
                 label="jupyter_events property metaschema",
             )
+        stale_loads = [
+            "yaml.load(EVENT_METASCHEMA_FILEPATH)",
+            "yaml.load(EVENT_CORE_SCHEMA_FILEPATH)",
+            "yaml.load(PROPERTY_METASCHEMA_FILEPATH)",
+        ]
+        if any(stale_load in text for stale_load in stale_loads):
+            raise RuntimeError("jupyter_events schema constant loader anchor not found")
+        if "_STATICPYTHON_SCHEMA_TEXT[" in text and "_static_schemas import SCHEMA_TEXT" not in text:
+            raise RuntimeError("jupyter_events static schema import anchor not found")
         return text
 
     def patch_yaml(text: str) -> str:
@@ -78,6 +87,13 @@ def embed_jupyter_events_schemas(context) -> None:
                 "    return loads(data)\n",
                 label="jupyter_events yaml embedded schema loader",
             )
+        if (
+            "Path(str(fpath)).read_text" in text
+            and "marker = '/jupyter_events/schemas/'\n" not in text
+        ):
+            raise RuntimeError("jupyter_events yaml embedded schema loader anchor not found")
+        if "_STATICPYTHON_SCHEMA_TEXT" in text and "_static_schemas import SCHEMA_TEXT" not in text:
+            raise RuntimeError("jupyter_events yaml static schema import anchor not found")
         return text
 
     def patch_schema(text: str) -> str:
@@ -115,6 +131,13 @@ def embed_jupyter_events_schemas(context) -> None:
                 "            loaded_schema = yaml.loads(static_schema) if static_schema is not None else yaml.load(schema)\n",
                 label="jupyter_events schema embedded path loader",
             )
+        if (
+            "loaded_schema = yaml.load(schema)" in text
+            and "static_schema = _STATICPYTHON_SCHEMA_TEXT.get(resource_key)" not in text
+        ):
+            raise RuntimeError("jupyter_events schema embedded path loader anchor not found")
+        if "_STATICPYTHON_SCHEMA_TEXT" in text and "_static_schemas import SCHEMA_TEXT" not in text:
+            raise RuntimeError("jupyter_events schema static import anchor not found")
         return text
 
     transform_source_text(context, "Lib/jupyter_events/validators.py", patch_validators, allow_missing=True)

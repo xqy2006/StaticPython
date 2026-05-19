@@ -36,6 +36,8 @@ def embed_nbformat_schemas(context) -> None:
                     1,
                 )
             else:
+                if "_get_schema_json" in text or "schema_path" in text:
+                    raise RuntimeError("nbformat static schema import anchor not found")
                 return text
         if re.search(r"(?m)^import os(?:\s|$)", text) is None:
             if "import json\n" in text:
@@ -97,6 +99,8 @@ def embed_nbformat_schemas(context) -> None:
         version_match = re.search(r'(?m)^__version__ = version\((?P<arg>.+?)\)(?: or [\'"]0\.0\.0[\'"])?\n', text)
         import_match = re.search(r"(?m)^from importlib\.metadata import (?P<names>.+)\n", text)
         if version_match is None or import_match is None or "version" not in import_match.group("names"):
+            if "__version__" in text and "version(" in text:
+                raise RuntimeError("nbformat version metadata anchor not found")
             return text
         imported_names = import_match.group("names")
         replacement_names = imported_names if "PackageNotFoundError" in imported_names else f"PackageNotFoundError, {imported_names}"
@@ -107,7 +111,9 @@ def embed_nbformat_schemas(context) -> None:
             updated,
             count=1,
         )
-        return updated if count == 1 else text
+        if count != 1:
+            raise RuntimeError("nbformat version metadata replacement failed")
+        return updated
 
     transform_source_text(context, "Lib/nbformat/validator.py", patch_validator)
     transform_source_text(context, "Lib/nbformat/_version.py", patch_version)

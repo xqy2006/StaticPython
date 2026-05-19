@@ -111,6 +111,17 @@ def patch_jupyterlab_server_resources(context) -> None:
                 "        if app_data is not None:\n",
                 label="jupyterlab_server app package metadata fallback",
             )
+        if (
+            "for ext_path in chain(" in text
+            and "with open(ext_path, encoding=\"utf-8\") as fid:" in text
+            and "FEDERATED_EXTENSIONS as static_extensions" not in text
+        ):
+            raise RuntimeError("jupyterlab_server federated extension metadata anchor not found")
+        if (
+            "package_data_file = pjoin(app_dir, \"static\", \"package.json\")" in text
+            and "STATIC_PACKAGE_DATA as app_data" not in text
+        ):
+            raise RuntimeError("jupyterlab_server app package metadata anchor not found")
         return text
 
     def patch_settings_utils(text: str) -> str:
@@ -194,6 +205,21 @@ def patch_jupyterlab_server_resources(context) -> None:
                 label="jupyterlab_server list embedded schemas",
                 flags=re.MULTILINE | re.DOTALL,
             )
+        if (
+            "def _get_schema(" in text
+            and "static_entry = _staticpython_schema_data(schema_name)" not in text
+        ):
+            raise RuntimeError("jupyterlab_server direct schema fallback anchor not found")
+        if (
+            "def _list_settings(" in text
+            and "for static_schema_name in _staticpython_schema_names()" not in text
+        ):
+            raise RuntimeError("jupyterlab_server list embedded schemas anchor not found")
+        if (
+            ("_staticpython_schema_data(" in text or "_staticpython_schema_names()" in text)
+            and "def _staticpython_schema_data(schema_name):" not in text
+        ):
+            raise RuntimeError("jupyterlab_server static schema helper import anchor not found")
         return text
 
     def patch_themes_handler(text: str) -> str:
@@ -218,6 +244,16 @@ def patch_jupyterlab_server_resources(context) -> None:
                 "            data = resource_data.decode(\"utf-8\")\n",
                 label="jupyterlab_server themes embedded css read",
             )
+        if (
+            "with open(self.absolute_path, \"rb\") as fid:" in text
+            and "_staticpython_resource_bytes_for_path(self.absolute_path)" not in text
+        ):
+            raise RuntimeError("jupyterlab_server themes embedded css read anchor not found")
+        if (
+            "_staticpython_resource_bytes_for_path(self.absolute_path)" in text
+            and "resource_bytes_for_path as _staticpython_resource_bytes_for_path" not in text
+        ):
+            raise RuntimeError("jupyterlab_server themes static import anchor not found")
         return text
 
     transform_source_text(context, "Lib/jupyterlab_server/config.py", patch_config, allow_missing=True)

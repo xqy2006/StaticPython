@@ -186,7 +186,11 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
         )
 
     def patch_coreconfig(text: str) -> str:
-        if not text or "def _get_default_core_data():" not in text:
+        if not text:
+            return text
+        if "def _get_default_core_data():" not in text:
+            if '"staging", "package.json"' in text:
+                raise RuntimeError("jupyterlab coreconfig package data anchor not found")
             return text
         text = ensure_text_before(
             text,
@@ -208,7 +212,11 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
         )
 
     def patch_commands(text: str) -> str:
-        if not text or "def ensure_app(app_dir):" not in text:
+        if not text:
+            return text
+        if "def ensure_app(app_dir):" not in text:
+            if "JupyterLab application assets not found" in text or "def _get_static_data(" in text:
+                raise RuntimeError("jupyterlab ensure_app embedded assets anchor not found")
             return text
         text = ensure_text_before(
             text,
@@ -252,6 +260,8 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
 
     def patch_extensions_init(text: str) -> str:
         if 'for entry in entry_points(group="jupyterlab.extension_manager_v1"):' not in text:
+            if "jupyterlab.extension_manager_v1" in text or "MANAGERS" in text:
+                raise RuntimeError("jupyterlab.extensions builtin manager entry-point anchor not found")
             return text
         manager_wrapper = """
 
@@ -286,6 +296,8 @@ class _StaticPythonEntryPoint:
 
     def patch_labapp(text: str) -> str:
         if not text or "entry_point is None" not in text or "manager_factory = entry_point.load()" not in text:
+            if "Extension Manager" in text and "manager_factory" in text:
+                raise RuntimeError("jupyterlab.labapp extension manager fallback anchor not found")
             return text
         old = (
             "            if entry_point is None:\n"

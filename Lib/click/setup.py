@@ -33,7 +33,7 @@ def _patch_click_compat(text: str) -> str:
             '    def _get_argv_encoding():\n',
             label="click._compat legacy windows block",
         )
-    return text
+    raise RuntimeError("click._compat Windows console import anchor not found")
 
 
 def _patch_click_winconsole(text: str) -> str:
@@ -100,7 +100,7 @@ def _patch_click_winconsole(text: str) -> str:
             new_legacy,
             label="click._winconsole",
         )
-    return text
+    raise RuntimeError("click._winconsole PyObject_GetBuffer anchor not found")
 
 
 def patch_click_sources(context) -> None:

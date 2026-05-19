@@ -15,6 +15,8 @@ def patch_ipython_sources(context):
         )
         if count == 1:
             return updated
+        if "from IPython.testing.skipdoctest import skip_doctest" in text:
+            raise RuntimeError("IPython skip_doctest import anchor not found")
         return text
 
     ipython_root = context.source_root / "Lib" / "IPython"

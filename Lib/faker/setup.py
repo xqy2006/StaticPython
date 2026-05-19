@@ -37,12 +37,15 @@ def embed_faker_provider_index(context) -> None:
     )
 
     def patch_loading(text: str) -> str:
-        text = text.replace(
-            "from typing import List\n",
-            "from typing import List\n\nfrom faker._staticpython_provider_index import LOCALIZED_PROVIDERS as _STATICPYTHON_LOCALIZED_PROVIDERS\nfrom faker._staticpython_provider_index import PROVIDERS as _STATICPYTHON_PROVIDERS\n",
-            1,
-        )
-        text = text.replace(
+        if "from faker._staticpython_provider_index import" not in text:
+            if "from typing import List\n" not in text:
+                raise RuntimeError("faker provider index import anchor not found")
+            text = text.replace(
+                "from typing import List\n",
+                "from typing import List\n\nfrom faker._staticpython_provider_index import LOCALIZED_PROVIDERS as _STATICPYTHON_LOCALIZED_PROVIDERS\nfrom faker._staticpython_provider_index import PROVIDERS as _STATICPYTHON_PROVIDERS\n",
+                1,
+            )
+        old_list_module = (
             "def list_module(module: ModuleType) -> List[str]:\n"
             "    path = get_path(module)\n"
             "\n"
@@ -51,6 +54,8 @@ def embed_faker_provider_index(context) -> None:
             "        return [file.parent.name for file in Path(path).glob(\"*/__init__.py\")]\n"
             "    else:\n"
             "        return [name for _, name, is_pkg in pkgutil.iter_modules([str(path)]) if is_pkg]\n",
+        )
+        new_list_module = (
             "def list_module(module: ModuleType) -> List[str]:\n"
             "    package = module.__package__ or module.__name__\n"
             "    if package == \"faker.providers\" and _STATICPYTHON_PROVIDERS:\n"
@@ -68,8 +73,11 @@ def embed_faker_provider_index(context) -> None:
             "        return [file.parent.name for file in Path(path).glob(\"*/__init__.py\")]\n"
             "    else:\n"
             "        return [name for _, name, is_pkg in pkgutil.iter_modules([str(path)]) if is_pkg]\n",
-            1,
         )
+        if old_list_module in text:
+            text = text.replace(old_list_module, new_list_module, 1)
+        elif "_STATICPYTHON_PROVIDERS" not in text and "def list_module(" in text and "pkgutil.iter_modules" in text:
+            raise RuntimeError("faker provider index list_module anchor not found")
         return text
 
     transform_source_text(context, "Lib/faker/utils/loading.py", patch_loading)

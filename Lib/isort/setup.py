@@ -20,6 +20,8 @@ def patch_isort_sources(context):
         )
         if count == 1:
             return updated
+        if "metadata.version" in text and "isort" in text:
+            raise RuntimeError("isort version metadata anchor not found")
         return text
 
     transform_first_existing_source_text(

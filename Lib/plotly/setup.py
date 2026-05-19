@@ -114,6 +114,8 @@ def patch_plotly_sources(context):
         import_match = re.search(r"(?m)^from importlib\.metadata import (?P<names>.+)\n", text)
         version_match = re.search(r'(?m)^__version__ = version\((?P<arg>.+?)\)\n', text)
         if import_match is None or version_match is None or "version" not in import_match.group("names"):
+            if "__version__" in text and "version(" in text and "PackageNotFoundError" not in text:
+                raise RuntimeError("plotly version metadata anchor not found")
             return text
         imported_names = import_match.group("names")
         replacement_names = imported_names if "PackageNotFoundError" in imported_names else f"PackageNotFoundError, {imported_names}"
@@ -124,7 +126,9 @@ def patch_plotly_sources(context):
             updated,
             count=1,
         )
-        return updated if count == 1 else text
+        if count != 1:
+            raise RuntimeError("plotly version metadata replacement failed")
+        return updated
 
     transform_first_existing_source_text(
         context,
@@ -147,7 +151,10 @@ def patch_plotly_sources(context):
             "    _STATICPYTHON_TEMPLATES = {}\n\n"
         )
         if "_STATICPYTHON_TEMPLATES" not in text:
-            text = text.replace("import json\n", "import json\n" + import_guard, 1)
+            if "import json\n" in text:
+                text = text.replace("import json\n", "import json\n" + import_guard, 1)
+            elif "pkgutil.get_data" in text:
+                raise RuntimeError("plotly template static import anchor not found")
 
         if "template_basename = os.path.splitext(os.path.basename(path))[0]" in text:
             return text
@@ -186,6 +193,8 @@ def patch_plotly_sources(context):
                     1,
                 )
             else:
+                if "plotly.min.js" in text:
+                    raise RuntimeError("plotly.min.js import anchor not found")
                 return text
 
         modern_old = (
@@ -258,6 +267,8 @@ def patch_plotly_sources(context):
                     label="plotly graph_reference static package data import",
                 )
             else:
+                if "pkgutil.get_data" in text or "resource_string(" in text:
+                    raise RuntimeError("plotly graph_reference static import anchor not found")
                 return text
 
         modern_old = "    s = pkgutil.get_data('plotly', path).decode('utf-8')\n"
@@ -275,6 +286,8 @@ def patch_plotly_sources(context):
             return text.replace(modern_old, replacement, 1)
         if legacy_old in text:
             return text.replace(legacy_old, replacement, 1)
+        if "pkgutil.get_data" in text or "resource_string(" in text:
+            raise RuntimeError("expected plotly graph_reference package-data loader was not found")
         return text
 
     transform_first_existing_source_text(
@@ -308,6 +321,8 @@ def patch_plotly_sources(context):
                     label="plotly graph_widget static package data import",
                 )
             else:
+                if "graphWidget.js" in text or "pkgutil.get_data" in text or "resource_string(" in text:
+                    raise RuntimeError("plotly graph widget static import anchor not found")
                 return text
 
         modern_old = (
@@ -332,6 +347,8 @@ def patch_plotly_sources(context):
             return text.replace(modern_old, replacement, 1)
         if legacy_old in text:
             return text.replace(legacy_old, replacement, 1)
+        if "graphWidget.js" in text or "pkgutil.get_data" in text or "resource_string(" in text:
+            raise RuntimeError("expected plotly graph widget package-data loader was not found")
         return text
 
     transform_first_existing_source_text(
@@ -513,6 +530,8 @@ def patch_plotly_sources(context):
         )
         if count == 1:
             return updated
+        if "resource_string('plotly', path)" in text or "plotly.min.js" in text:
+            raise RuntimeError("expected legacy plotly.min.js loader was not found")
         return text
 
     transform_first_existing_source_text(

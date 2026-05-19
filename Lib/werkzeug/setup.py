@@ -23,6 +23,8 @@ def _patch_werkzeug_init(text: str) -> str:
                 return "import importlib.metadata\n" + updated
             return "import importlib.metadata\n\n" + updated
         return updated
+    if 'version("werkzeug")' in text:
+        raise RuntimeError("werkzeug version metadata anchor not found")
     return text
 
 

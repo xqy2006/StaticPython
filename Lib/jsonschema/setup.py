@@ -36,6 +36,8 @@ def embed_jsonschema_schemas(context) -> None:
 
     def patch_utils(text: str) -> str:
         if "def load_schema(" not in text or "resources.files(__package__)" not in text:
+            if "resources.files(__package__)" in text and "schemas" in text:
+                raise RuntimeError("jsonschema schema loader anchor not found")
             return text
         if "from copy import deepcopy\n" not in text:
             if "import sys\n" in text:
@@ -84,6 +86,8 @@ def embed_jsonschema_schemas(context) -> None:
 
     def patch_validators(text: str) -> str:
         if "def _store_schema_list(" not in text:
+            if "_VOCABULARIES" in text or "vocabularies" in text:
+                raise RuntimeError("jsonschema vocabulary loader anchor not found")
             return text
         if "from ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n" not in text:
             text, count = re.subn(

@@ -130,16 +130,22 @@ def _patch_legacy_psutil_windows_names(context) -> None:
         return
 
     def patch_c(text: str) -> str:
-        return text.replace("_psutil_mswindows", "_psutil_windows").replace(
+        updated = text.replace("_psutil_mswindows", "_psutil_windows").replace(
             "psutil_mswindows",
             "psutil_windows",
         )
+        if "mswindows" in updated:
+            raise RuntimeError("psutil legacy Windows C module rename anchor not patched")
+        return updated
 
     def patch_py(text: str) -> str:
-        return text.replace("import _psutil_mswindows", "from psutil import _psutil_windows").replace(
+        updated = text.replace("import _psutil_mswindows", "from psutil import _psutil_windows").replace(
             "from _psutil_mswindows import",
             "from psutil._psutil_windows import",
         ).replace("_psutil_mswindows", "_psutil_windows")
+        if "_psutil_mswindows" in updated:
+            raise RuntimeError("psutil legacy Windows Python module rename anchor not patched")
+        return updated
 
     transform_source_text(context, "Lib/psutil/_psutil_mswindows.c", patch_c)
     transform_source_text(context, "Lib/psutil/_psmswindows.py", patch_py)

@@ -85,6 +85,8 @@ def patch_markdown_sources(context) -> None:
             return text
         import_anchor = "            module = importlib.import_module(ext_name)\n"
         if import_anchor not in text:
+            if "importlib.import_module(ext_name)" in text:
+                raise RuntimeError("markdown short extension import anchor not found")
             return text
         text = replace_text_once(
             text,

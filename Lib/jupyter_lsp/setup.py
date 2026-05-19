@@ -46,7 +46,7 @@ def _embed_modern_jupyter_lsp_schema(context) -> None:
     )
 
     def patch_schema_init(text: str) -> str:
-        return text.replace(
+        updated = text.replace(
             "import json\n"
             "import pathlib\n"
             "\n"
@@ -58,11 +58,14 @@ def _embed_modern_jupyter_lsp_schema(context) -> None:
             "import jsonschema\n\nfrom ._staticpython_schema import SCHEMA\n",
             1,
         )
+        if "SCHEMA_FILE" in updated and "SCHEMA_FILE.read_text" in updated:
+            raise RuntimeError("jupyter_lsp modern schema loader anchor not found")
+        return updated
 
     transform_source_text(context, "Lib/jupyter_lsp/schema/__init__.py", patch_schema_init)
 
     def patch_config_init(text: str) -> str:
-        return text.replace(
+        updated = text.replace(
             "import json\n"
             "import pathlib\n"
             "\n"
@@ -92,6 +95,9 @@ def _embed_modern_jupyter_lsp_schema(context) -> None:
             "    )\n",
             1,
         )
+        if "(CONFIGS / \"{}.schema.json\".format(key)).read_text" in updated and "CONFIG_SCHEMAS.get(key)" not in updated:
+            raise RuntimeError("jupyter_lsp config schema loader anchor not found")
+        return updated
 
     transform_source_text(context, "Lib/jupyter_lsp/specs/config/__init__.py", patch_config_init)
 

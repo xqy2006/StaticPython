@@ -491,7 +491,9 @@ def _patch_pandas_numpy_include(context) -> None:
             text,
             count=1,
         )
-        return updated if count == 1 else text
+        if count != 1:
+            raise RuntimeError("pandas numpy include probe anchor not found")
+        return updated
 
     transform_first_existing_source_text(
         context,
@@ -633,6 +635,8 @@ they can coexist with the standalone ujson builtin in the final static link.
                 '#include "pandas/portable.h"\n#include "pandas/vendored/ujson/lib/staticpython_rename.h"\n',
                 label="pandas vendored ujson rename header include",
             )
+        if "JSON_EncodeObject" in text or "JSON_DecodeObject" in text:
+            raise RuntimeError("pandas vendored ujson rename header include anchor not found")
         return text
 
     transform_source_text(
@@ -652,6 +656,8 @@ they can coexist with the standalone ujson builtin in the final static link.
                 '#include "numpy/arrayobject.h"\n#include "pandas/vendored/ujson/lib/staticpython_rename.h"\n',
                 label="pandas vendored ujson module rename header include",
             )
+        if "ultrajson.h" in text:
+            raise RuntimeError("pandas vendored ujson module rename header include anchor not found")
         return text
 
     transform_source_text(

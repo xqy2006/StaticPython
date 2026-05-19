@@ -130,6 +130,9 @@ def patch_pyparsing_unicode_identifiers(context) -> None:
         ]
         for old, new in replacements:
             text = replace_text_all(text, old, new)
+        remaining = [old.strip() for old, _new in replacements if old in text]
+        if remaining:
+            raise RuntimeError("pyparsing unicode identifier anchor not patched: " + ", ".join(remaining[:3]))
         return text
 
     transform_first_existing_source_text(

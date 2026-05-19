@@ -154,6 +154,10 @@ def patch_nest_asyncio_sources(context) -> None:
                 "                            curr_tasks[self] = curr_task\n",
                 label="nest_asyncio current task preemption",
             )
+        if "curr_tasks.pop(self, None)" in text and "task_swap(self, None)" not in text:
+            raise RuntimeError("nest_asyncio current task preemption anchor not found")
+        if "_c_register_task" in text and "_py_swap_current_task" not in text:
+            raise RuntimeError("nest_asyncio asyncio 3.14 task alias anchor not found")
         return text
 
     transform_source_text(context, "Lib/nest_asyncio/__init__.py", patch_runtime)

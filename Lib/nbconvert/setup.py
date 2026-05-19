@@ -47,6 +47,8 @@ def patch_nbconvert_sources(context) -> None:
 
     def patch_exporter_base(text: str) -> str:
         if "from .exporter import Exporter\n" not in text:
+            if "def get_exporter(" in text or "entry_points" in text or "entrypoints" in text:
+                raise RuntimeError("nbconvert exporter fallback import anchor not found")
             return text
         if "_STATICPYTHON_EXPORTERS" not in text:
             text = replace_text_once(
@@ -184,6 +186,8 @@ def _iter_exporter_entries():
 
     def patch_template_exporter(text: str) -> str:
         if "from .exporter import Exporter\n" not in text:
+            if "class TemplateExporter" in text:
+                raise RuntimeError("nbconvert template exporter static import anchor not found")
             return text
         if "_STATICPYTHON_TEMPLATES" not in text:
             text = replace_text_once(
@@ -193,6 +197,8 @@ def _iter_exporter_entries():
                 label="nbconvert template exporter static imports",
             )
         if "def _get_conf(" not in text:
+            if "template_paths" in text or "FileSystemLoader" in text:
+                raise RuntimeError("nbconvert _get_conf anchor not found")
             return text
         updated, count = re.subn(
             r"^        loaders = (?:\[\n            \*self\.extra_loaders,\n|self\.extra_loaders \+ \[\n)"

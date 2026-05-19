@@ -119,10 +119,15 @@ def patch_black_sources(context) -> None:
                 label="black linegen ascii empty parens name",
             )
         elif replacement not in text:
+            if "\u00d8" in text:
+                raise RuntimeError("black linegen empty-parens anchor not found")
             return text
-        return text.replace("parens=\u00d8", "parens=_empty_parens").replace(
+        updated = text.replace("parens=\u00d8", "parens=_empty_parens").replace(
             "keywords=\u00d8", "keywords=_empty_parens"
         )
+        if "\u00d8" in updated:
+            raise RuntimeError("black linegen empty-parens references were not fully patched")
+        return updated
 
     transform_source_text(context, "Lib/black/linegen.py", patch_linegen, allow_missing=True)
 
@@ -177,6 +182,8 @@ def patch_black_sources(context) -> None:
 
     def patch_schema(text: str) -> str:
         if 'fname = "black.schema.json"' not in text:
+            if "black.schema.json" in text:
+                raise RuntimeError("black schema embedded fallback anchor not found")
             return text
         text = replace_text_once(
             text,
