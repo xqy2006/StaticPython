@@ -1,14 +1,31 @@
-from libs import replace_regex_once, simple_library, source_path, transform_first_existing_source_text, write_source_text
+from libs import (
+    replace_regex_once,
+    simple_library,
+    source_path,
+    transform_first_existing_source_text,
+    transform_source_text,
+    write_source_text,
+)
 
 
 def _patch_flask_testing(text: str) -> str:
     if 'werkzeug.__version__' in text:
-        updated = text.replace(
-            'f"werkzeug/{werkzeug.__version__}"',
-            'f"werkzeug/{getattr(werkzeug, \'__version__\', \'3.1.8\')}"',
-            1,
-        )
-        if updated == text:
+        updated = text
+        replacements = [
+            (
+                'f"werkzeug/{werkzeug.__version__}"',
+                'f"werkzeug/{getattr(werkzeug, \'__version__\', \'3.1.8\')}"',
+            ),
+            (
+                '"werkzeug/" + werkzeug.__version__',
+                '"werkzeug/" + getattr(werkzeug, "__version__", "3.1.8")',
+            ),
+        ]
+        for old, new in replacements:
+            if old in updated:
+                updated = updated.replace(old, new, 1)
+                break
+        if "werkzeug.__version__" in updated:
             raise RuntimeError("flask.testing werkzeug.__version__ anchor not found")
         return updated
     if 'importlib.metadata.version("werkzeug")' not in text:
@@ -26,6 +43,19 @@ def _patch_flask_testing(text: str) -> str:
     )
 
 
+def _patch_flask_cli(text: str) -> str:
+    if "werkzeug.__version__" not in text:
+        return text
+    updated = text.replace(
+        '"werkzeug": werkzeug.__version__,',
+        '"werkzeug": getattr(werkzeug, "__version__", "3.1.8"),',
+        1,
+    )
+    if "werkzeug.__version__" in updated:
+        raise RuntimeError("flask.cli werkzeug.__version__ anchor not found")
+    return updated
+
+
 def patch_flask_sources(context) -> None:
     transform_first_existing_source_text(
         context,
@@ -36,6 +66,7 @@ def patch_flask_sources(context) -> None:
         _patch_flask_testing,
         allow_all_missing=True,
     )
+    transform_source_text(context, "Lib/flask/cli.py", _patch_flask_cli, allow_missing=True)
     package_root = source_path(context, "Lib/flask")
     sansio_root = package_root / "sansio"
     if not package_root.is_dir() or not sansio_root.exists():

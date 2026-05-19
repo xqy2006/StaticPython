@@ -469,6 +469,16 @@ def _patch_numpy_top_level_imports(context) -> None:
                     ),
                     label="numpy optional matrixlib import",
                 )
+            elif "    import matrixlib as _mat\n" in text:
+                text = replace_text_once(
+                    text,
+                    "    import matrixlib as _mat\n",
+                    "    try:\n"
+                    "        import matrixlib as _mat\n"
+                    "    except ImportError:\n"
+                    "        _mat = None\n",
+                    label="numpy optional legacy matrixlib import",
+                )
             else:
                 if "matrixlib" in text:
                     raise RuntimeError("numpy matrixlib package import anchor not found")
@@ -483,6 +493,16 @@ def _patch_numpy_top_level_imports(context) -> None:
                 "    else:\n"
                 "        asmatrix = bmat = mat = matrix = None\n",
                 label="numpy optional matrixlib star import",
+            )
+        elif "    from matrixlib import *\n" in text and "asmatrix = bmat = mat = matrix = None\n" not in text:
+            text = replace_text_once(
+                text,
+                "    from matrixlib import *\n",
+                "    if _mat is not None:\n"
+                "        from matrixlib import *\n"
+                "    else:\n"
+                "        asmatrix = bmat = mat = matrix = None\n",
+                label="numpy optional legacy matrixlib star import",
             )
         elif "from .matrixlib import (\n        asmatrix, bmat, matrix\n    )\n" in text:
             text = replace_text_once(

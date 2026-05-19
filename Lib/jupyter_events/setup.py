@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from libs import pypi_library, replace_text_once, source_path, transform_source_text, write_source_text
+import re
+
+from libs import (
+    pypi_library,
+    replace_regex_once,
+    replace_text_once,
+    source_path,
+    transform_source_text,
+    write_source_text,
+)
 
 
 def embed_jupyter_events_schemas(context) -> None:
@@ -64,18 +73,26 @@ def embed_jupyter_events_schemas(context) -> None:
         return text
 
     def patch_yaml(text: str) -> str:
-        if "from pathlib import Path\n\n" in text:
-            text = replace_text_once(
+        if "_static_schemas import SCHEMA_TEXT" not in text:
+            if re.search(r"(?m)^from pathlib import .*\bPath\b.*$", text):
+                text = replace_regex_once(
+                    text,
+                    r"(?m)^(from pathlib import .*\bPath\b.*\n)",
+                    r"\1from ._static_schemas import SCHEMA_TEXT as _STATICPYTHON_SCHEMA_TEXT\n",
+                    label="jupyter_events yaml pathlib static schema import",
+                )
+            elif "import pathlib\n" in text:
+                text = replace_text_once(
+                    text,
+                    "import pathlib\n",
+                    "import pathlib\nfrom ._static_schemas import SCHEMA_TEXT as _STATICPYTHON_SCHEMA_TEXT\n",
+                    label="jupyter_events yaml pathlib-module static schema import",
+                )
+        if "Path(str(fpath)).read_text" in text and "marker = '/jupyter_events/schemas/'\n" not in text:
+            text = replace_regex_once(
                 text,
-                "from pathlib import Path\n\n",
-                "from pathlib import Path\n\nfrom ._static_schemas import SCHEMA_TEXT as _STATICPYTHON_SCHEMA_TEXT\n\n",
-                label="jupyter_events yaml static schema import",
-            )
-        if "    data = Path(str(fpath)).read_text(encoding=\"utf-8\")\n" in text and "marker = '/jupyter_events/schemas/'\n" not in text:
-            text = replace_text_once(
-                text,
-                "    data = Path(str(fpath)).read_text(encoding=\"utf-8\")\n"
-                "    return loads(data)\n",
+                r"(?m)^    data = (?P<reader>(?:Path|pathlib\.Path)\(str\(fpath\)\)\.read_text\([^\n]*\))\n"
+                r"    return loads\(data\)\n",
                 "    path_text = str(fpath).replace('\\\\', '/')\n"
                 "    marker = '/jupyter_events/schemas/'\n"
                 "    if marker in path_text:\n"
@@ -83,7 +100,7 @@ def embed_jupyter_events_schemas(context) -> None:
                 "        data = _STATICPYTHON_SCHEMA_TEXT.get(resource_key)\n"
                 "        if data is not None:\n"
                 "            return loads(data)\n"
-                "    data = Path(str(fpath)).read_text(encoding=\"utf-8\")\n"
+                "    data = \\g<reader>\n"
                 "    return loads(data)\n",
                 label="jupyter_events yaml embedded schema loader",
             )
@@ -105,19 +122,16 @@ def embed_jupyter_events_schemas(context) -> None:
                 label="jupyter_events schema static import",
             )
         if (
-            "            if not Path(schema).exists():\n"
-            '                msg = f\'Schema file not present at path "{schema}".\'\n'
-            "                raise EventSchemaFileAbsent(msg)\n"
-            "\n"
-            "            loaded_schema = yaml.load(schema)\n"
-        ) in text:
-            text = replace_text_once(
+            "if isinstance(schema, PurePath):" in text
+            and "loaded_schema = yaml.load(schema)" in text
+            and "static_schema = _STATICPYTHON_SCHEMA_TEXT.get(resource_key)" not in text
+        ):
+            text = replace_regex_once(
                 text,
-                "            if not Path(schema).exists():\n"
-                "                msg = f'Schema file not present at path \"{schema}\".'\n"
-                "                raise EventSchemaFileAbsent(msg)\n"
-                "\n"
-                "            loaded_schema = yaml.load(schema)\n",
+                r"(?ms)^        # if schema is PurePath,.*?^        if isinstance\(schema, PurePath\):\n"
+                r".*?^            loaded_schema = yaml\.load\(schema\)\n",
+                "        # if schema is PurePath, load from the embedded schemas when possible.\n"
+                "        if isinstance(schema, PurePath):\n"
                 "            path_text = str(schema).replace('\\\\', '/')\n"
                 "            marker = '/jupyter_events/schemas/'\n"
                 "            static_schema = None\n"
@@ -125,11 +139,29 @@ def embed_jupyter_events_schemas(context) -> None:
                 "                resource_key = 'schemas/' + path_text.rsplit(marker, 1)[1]\n"
                 "                static_schema = _STATICPYTHON_SCHEMA_TEXT.get(resource_key)\n"
                 "            if static_schema is None and not Path(schema).exists():\n"
-                "                msg = f'Schema file not present at path \"{schema}\".'\n"
-                "                raise EventSchemaFileAbsent(msg)\n"
+                "                raise EventSchemaFileAbsent(f'Schema file not present at path \"{schema}\".')\n"
                 "\n"
                 "            loaded_schema = yaml.loads(static_schema) if static_schema is not None else yaml.load(schema)\n",
                 label="jupyter_events schema embedded path loader",
+            )
+        elif (
+            "elif isinstance(schema, PurePath):" in text
+            and "_schema = yaml.load(schema)" in text
+            and "static_schema = _STATICPYTHON_SCHEMA_TEXT.get(resource_key)" not in text
+        ):
+            text = replace_text_once(
+                text,
+                "        elif isinstance(schema, PurePath):\n"
+                "            _schema = yaml.load(schema)\n",
+                "        elif isinstance(schema, PurePath):\n"
+                "            path_text = str(schema).replace('\\\\', '/')\n"
+                "            marker = '/jupyter_events/schemas/'\n"
+                "            static_schema = None\n"
+                "            if marker in path_text:\n"
+                "                resource_key = 'schemas/' + path_text.rsplit(marker, 1)[1]\n"
+                "                static_schema = _STATICPYTHON_SCHEMA_TEXT.get(resource_key)\n"
+                "            _schema = yaml.loads(static_schema) if static_schema is not None else yaml.load(schema)\n",
+                label="jupyter_events legacy schema embedded path loader",
             )
         if (
             "loaded_schema = yaml.load(schema)" in text

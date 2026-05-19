@@ -45,7 +45,95 @@ def _patch_prompt_toolkit_init(text: str) -> str:
 
 
 def _patch_prompt_toolkit_application(text: str) -> str:
-    if "pythonapi.PyOS_getsig" in text and "have_ctypes_signal = False" in text:
+    if "except AttributeError:\n                have_ctypes_signal = False\n" in text:
+        return text
+
+    helper_old = (
+        "        # GraalPy has the functions, but they don't work\n"
+        '        have_ctypes_signal = sys.implementation.name != "graalpy"\n'
+    )
+    helper_new = (
+        "        # GraalPy has the functions, but they don't work\n"
+        '        have_ctypes_signal = sys.implementation.name != "graalpy"\n'
+        "        if have_ctypes_signal:\n"
+        "            try:\n"
+        "                pythonapi.PyOS_getsig\n"
+        "                pythonapi.PyOS_setsig\n"
+        "            except AttributeError:\n"
+        "                have_ctypes_signal = False\n"
+    )
+    if helper_old in text:
+        return replace_text_once(
+            text,
+            helper_old,
+            helper_new,
+            label="prompt_toolkit ctypes signal helper",
+        )
+
+    top_level_import_old = "from ctypes import c_int, c_void_p, pythonapi\n"
+    top_level_import_new = (
+        "try:\n"
+        "    from ctypes import c_int, c_void_p, pythonapi\n"
+        "except ImportError:\n"
+        "    c_int = c_void_p = pythonapi = None\n"
+        "    have_ctypes_signal = False\n"
+        "else:\n"
+        "    have_ctypes_signal = sys.implementation.name != \"graalpy\"\n"
+    )
+    top_level_setup_old = (
+        "# PyOS_sighandler_t PyOS_getsig(int i)\n"
+        "pythonapi.PyOS_getsig.restype = c_void_p\n"
+        "pythonapi.PyOS_getsig.argtypes = (c_int,)\n"
+        "\n"
+        "# PyOS_sighandler_t PyOS_setsig(int i, PyOS_sighandler_t h)\n"
+        "pythonapi.PyOS_setsig.restype = c_void_p\n"
+        "pythonapi.PyOS_setsig.argtypes = (\n"
+        "    c_int,\n"
+        "    c_void_p,\n"
+        ")\n"
+    )
+    top_level_setup_new = (
+        "if have_ctypes_signal:\n"
+        "    try:\n"
+        "        # PyOS_sighandler_t PyOS_getsig(int i)\n"
+        "        pythonapi.PyOS_getsig.restype = c_void_p\n"
+        "        pythonapi.PyOS_getsig.argtypes = (c_int,)\n"
+        "\n"
+        "        # PyOS_sighandler_t PyOS_setsig(int i, PyOS_sighandler_t h)\n"
+        "        pythonapi.PyOS_setsig.restype = c_void_p\n"
+        "        pythonapi.PyOS_setsig.argtypes = (\n"
+        "            c_int,\n"
+        "            c_void_p,\n"
+        "        )\n"
+        "    except AttributeError:\n"
+        "        have_ctypes_signal = False\n"
+    )
+    if top_level_import_old in text and top_level_setup_old in text:
+        text = replace_text_once(
+            text,
+            top_level_import_old,
+            top_level_import_new,
+            label="prompt_toolkit top-level ctypes import",
+        )
+        text = replace_text_once(
+            text,
+            top_level_setup_old,
+            top_level_setup_new,
+            label="prompt_toolkit top-level ctypes signal setup",
+        )
+        text = replace_text_once(
+            text,
+            "                sigint_os = pythonapi.PyOS_getsig(signal.SIGINT)\n",
+            "                sigint_os = pythonapi.PyOS_getsig(signal.SIGINT) if have_ctypes_signal else None\n",
+            label="prompt_toolkit top-level ctypes getsig guard",
+        )
+        text = replace_text_once(
+            text,
+            "                    pythonapi.PyOS_setsig(signal.SIGINT, sigint_os)\n",
+            "                    if have_ctypes_signal:\n"
+            "                        pythonapi.PyOS_setsig(signal.SIGINT, sigint_os)\n",
+            label="prompt_toolkit top-level ctypes setsig guard",
+        )
         return text
 
     old = (

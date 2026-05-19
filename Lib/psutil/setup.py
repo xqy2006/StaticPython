@@ -128,13 +128,23 @@ def _patch_legacy_psutil_windows_names(context) -> None:
     root = source_path(context, "Lib/psutil")
     if not (root / "_psutil_mswindows.c").exists():
         return
+    legacy_header = root / "_psutil_mswindows.h"
+    if legacy_header.exists() and not (root / "_psutil_windows.h").exists():
+        write_source_text(
+            context,
+            "Lib/psutil/_psutil_windows.h",
+            legacy_header.read_text(encoding="utf-8").replace("_psutil_mswindows", "_psutil_windows").replace(
+                "psutil_mswindows",
+                "psutil_windows",
+            ),
+        )
 
     def patch_c(text: str) -> str:
         updated = text.replace("_psutil_mswindows", "_psutil_windows").replace(
             "psutil_mswindows",
             "psutil_windows",
         )
-        if "mswindows" in updated:
+        if "_psutil_mswindows" in updated or "psutil_mswindows" in updated:
             raise RuntimeError("psutil legacy Windows C module rename anchor not patched")
         return updated
 
