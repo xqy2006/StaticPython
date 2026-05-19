@@ -53,7 +53,7 @@ def embed_faker_provider_index(context) -> None:
             "        # PyInstaller\n"
             "        return [file.parent.name for file in Path(path).glob(\"*/__init__.py\")]\n"
             "    else:\n"
-            "        return [name for _, name, is_pkg in pkgutil.iter_modules([str(path)]) if is_pkg]\n",
+            "        return [name for _, name, is_pkg in pkgutil.iter_modules([str(path)]) if is_pkg]\n"
         )
         new_list_module = (
             "def list_module(module: ModuleType) -> List[str]:\n"
@@ -72,7 +72,7 @@ def embed_faker_provider_index(context) -> None:
             "        # PyInstaller\n"
             "        return [file.parent.name for file in Path(path).glob(\"*/__init__.py\")]\n"
             "    else:\n"
-            "        return [name for _, name, is_pkg in pkgutil.iter_modules([str(path)]) if is_pkg]\n",
+            "        return [name for _, name, is_pkg in pkgutil.iter_modules([str(path)]) if is_pkg]\n"
         )
         if old_list_module in text:
             text = text.replace(old_list_module, new_list_module, 1)
