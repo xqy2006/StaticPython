@@ -218,10 +218,12 @@ def _iter_exporter_entries():
         )
         if count:
             text = updated
+        elif "environment = Environment(" in text:
+            raise RuntimeError("nbconvert template exporter loader anchor not found")
         updated, count = re.subn(
-            r"^    def _get_conf\(self\):\n.*?^    @default\(\"template_paths\"\)\n",
+            r"^    def _get_conf\(self\):\n.*?^    @default\((['\"])template_paths\1\)\n",
             """    def _get_conf(self):
-        conf: dict[str, t.Any] = {}  # the configuration once all conf files are merged
+        conf = {}  # the configuration once all conf files are merged
         for template_name in reversed(self.get_template_names()):
             conf_text = _STATICPYTHON_TEMPLATE_CONFS.get(template_name)
             if conf_text:
@@ -247,6 +249,8 @@ def _iter_exporter_entries():
         )
         if count:
             text = updated
+        else:
+            raise RuntimeError("nbconvert _get_conf template_paths anchor not found")
         if "def get_template_names(" in text and "def get_prefix_root_dirs(" in text:
             text = replace_function_block_once(
                 text,
@@ -256,10 +260,10 @@ def _iter_exporter_entries():
         template_names = []
         root_dirs = self.get_prefix_root_dirs()
         base_template = self.template_name
-        merged_conf: dict = {}  # the configuration once all conf files are merged
+        merged_conf = {}  # the configuration once all conf files are merged
         while base_template is not None:
             template_names.append(base_template)
-            conf: dict = {}
+            conf = {}
             found_at_least_one = False
             for base_dir in self.extra_template_basedirs:
                 template_dir = os.path.join(base_dir, base_template)
@@ -319,9 +323,7 @@ def _iter_exporter_entries():
                 label="nbconvert embedded template name discovery",
                 next_name="get_prefix_root_dirs",
             )
-        updated, count = re.subn(
-            r"^    def _template_paths\(self, prune=True, root_dirs=None\):\n.*?^    @classmethod\n",
-            """    def _template_paths(self, prune=True, root_dirs=None):
+        template_paths_replacement = """    def _template_paths(self, prune=True, root_dirs=None):
         paths = []
         root_dirs = self.get_prefix_root_dirs()
         template_names = self.get_template_names()
@@ -359,6 +361,11 @@ def _iter_exporter_entries():
             additional_paths.append("staticpython-nbconvert-templates")
         return paths + self.extra_template_paths + additional_paths
 
+"""
+        updated, count = re.subn(
+            r"^    def _template_paths\(self, prune=True, root_dirs=None\):\n.*?^    @classmethod\n",
+            template_paths_replacement
+            + """
     @classmethod
 """,
             text,
@@ -367,6 +374,18 @@ def _iter_exporter_entries():
         )
         if count:
             text = updated
+        else:
+            updated, count = re.subn(
+                r"^    def _template_paths\(self, prune=True, root_dirs=None\):\n.*?(?=^    def get_template_names\()",
+                template_paths_replacement,
+                text,
+                count=1,
+                flags=re.MULTILINE | re.DOTALL,
+            )
+            if count:
+                text = updated
+            else:
+                raise RuntimeError("nbconvert _template_paths anchor not found")
         return text
 
     transform_source_text(context, "Lib/nbconvert/exporters/templateexporter.py", patch_template_exporter)

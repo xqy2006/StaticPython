@@ -199,17 +199,31 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
                 )
             else:
                 updated, count = re.subn(
-                    r"^        env = Environment\(\n"
-                    r".*?"
-                    r"^        \)\n"
+                    r"^        env = Environment\(loader=FileSystemLoader\(template_path\), "
+                    r"extensions=\[['\"]jinja2\.ext\.i18n['\"]\], \*\*jenv_opt\)\n"
                     r"(?=^        sys_info = get_sys_info\(\)\n)",
                     replacement_loader_block,
                     text,
                     count=1,
-                    flags=re.MULTILINE | re.DOTALL,
+                    flags=re.MULTILINE,
                 )
                 if count:
                     text = updated
+                else:
+                    updated, count = re.subn(
+                        r"^        env = Environment\(\n"
+                        r".*?"
+                        r"^        \)\n"
+                        r"(?=^        sys_info = get_sys_info\(\)\n)",
+                        replacement_loader_block,
+                        text,
+                        count=1,
+                        flags=re.MULTILINE | re.DOTALL,
+                    )
+                    if count:
+                        text = updated
+                    else:
+                        raise RuntimeError("jupyter_server serverapp embedded template loader anchor not found")
         if (
             has_event_schema_resources
             and "register_event_schema(schema_text if schema_text is not None else schema_path)" not in text
@@ -258,7 +272,7 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             text,
             r"(?ms)^        self\.jinja2_env = Environment\(\n"
             r"^            loader=FileSystemLoader\(self\.template_paths\),\n"
-            r"^            extensions=\[\"jinja2\.ext\.i18n\"\],\n"
+            r"^            extensions=\[['\"]jinja2\.ext\.i18n['\"]\],\n"
             r"^            autoescape=True,\n"
             r"^            \*\*self\.jinja2_options,?\n"
             r"^        \)\n",
