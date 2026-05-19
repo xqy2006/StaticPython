@@ -93,7 +93,7 @@ def embed_jupyter_events_schemas(context) -> None:
                 text,
                 r"(?m)^    data = (?P<reader>(?:Path|pathlib\.Path)\(str\(fpath\)\)\.read_text\([^\n]*\))\n"
                 r"    return loads\(data\)\n",
-                "    path_text = str(fpath).replace('\\\\', '/')\n"
+                "    path_text = str(fpath).replace('\\\\\\\\', '/')\n"
                 "    marker = '/jupyter_events/schemas/'\n"
                 "    if marker in path_text:\n"
                 "        resource_key = 'schemas/' + path_text.rsplit(marker, 1)[1]\n"
@@ -132,7 +132,7 @@ def embed_jupyter_events_schemas(context) -> None:
                 r".*?^            loaded_schema = yaml\.load\(schema\)\n",
                 "        # if schema is PurePath, load from the embedded schemas when possible.\n"
                 "        if isinstance(schema, PurePath):\n"
-                "            path_text = str(schema).replace('\\\\', '/')\n"
+                "            path_text = str(schema).replace('\\\\\\\\', '/')\n"
                 "            marker = '/jupyter_events/schemas/'\n"
                 "            static_schema = None\n"
                 "            if marker in path_text:\n"
