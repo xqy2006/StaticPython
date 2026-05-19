@@ -211,7 +211,7 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
                     text = updated
                 else:
                     updated, count = re.subn(
-                        r"^        env = Environment\(\n"
+                        r"^        env = Environment\([^\n]*\n"
                         r".*?"
                         r"^        \)\n"
                         r"(?=^        sys_info = get_sys_info\(\)\n)",
@@ -258,6 +258,8 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
         return text
 
     def patch_extension_application(text: str) -> str:
+        if "self.jinja2_env = Environment(" not in text and "FileSystemLoader(self.template_paths)" not in text:
+            return text
         if "_staticpython_template_dict_for_package" not in text:
             text = replace_regex_once(
                 text,
@@ -271,12 +273,13 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
         return replace_regex_once(
             text,
             r"(?ms)^        self\.jinja2_env = Environment\(\n"
-            r"^            loader=FileSystemLoader\(self\.template_paths\),\n"
-            r"^            extensions=\[['\"]jinja2\.ext\.i18n['\"]\],\n"
-            r"^            autoescape=True,\n"
-            r"^            \*\*self\.jinja2_options,?\n"
+            r"^            loader=FileSystemLoader\(self\.template_paths\),\s*\n"
+            r"^            extensions=\[['\"]jinja2\.ext\.i18n['\"]\],\s*\n"
+            r"^            autoescape=True,\s*\n"
+            r"^            \*\*self\.jinja2_options,?\s*\n"
             r"^        \)\n",
-            "        template_package = \"notebook\" if self.name == \"notebook\" else \"jupyterlab\" if self.name == \"lab\" else self.name\n"
+            "        template_package = getattr(self, \"name\", getattr(self, \"extension_name\", \"\"))\n"
+            "        template_package = \"notebook\" if template_package == \"notebook\" else \"jupyterlab\" if template_package == \"lab\" else template_package\n"
             "        self.jinja2_env = Environment(\n"
             "            loader=ChoiceLoader([\n"
             "                DictLoader(_staticpython_template_dict_for_package(template_package)),\n"
