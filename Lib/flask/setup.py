@@ -1,3 +1,5 @@
+import re
+
 from libs import (
     replace_regex_once,
     simple_library,
@@ -47,11 +49,12 @@ def _patch_flask_testing(text: str) -> str:
 
 def _patch_flask_cli(text: str) -> str:
     if "werkzeug.__version__" not in text:
-        if (
-            "Werkzeug" in text
-            and "werkzeug" in text
-            and "version(" in text
-            and 'importlib.metadata.version("werkzeug")' not in text
+        version_block_match = re.search(r"(?ms)^def get_version\(.*?^version_option\s*=", text)
+        version_block = version_block_match.group(0) if version_block_match else ""
+        if version_block_match and (
+            ("Werkzeug" in version_block or "werkzeug" in version_block)
+            and 'version("werkzeug")' not in version_block
+            and "version('werkzeug')" not in version_block
         ):
             raise RuntimeError("flask.cli werkzeug version anchor not found")
         return text
@@ -60,6 +63,10 @@ def _patch_flask_cli(text: str) -> str:
         (
             '"werkzeug": werkzeug.__version__,',
             '"werkzeug": getattr(werkzeug, "__version__", "3.1.8"),',
+        ),
+        (
+            "'werkzeug': werkzeug.__version__,",
+            "'werkzeug': getattr(werkzeug, \"__version__\", \"3.1.8\"),",
         ),
         (
             'f"Werkzeug {werkzeug.__version__}"',
