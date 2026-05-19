@@ -449,7 +449,7 @@ def patch_plotly_sources(context):
 
     def patch_validator_cache(text):
         if "_validators.json" not in text:
-            if "ValidatorCache" in text and ("json.load" in text or "validators" in text):
+            if "ValidatorCache" in text and ("_json_cache" in text or "json.load" in text):
                 raise RuntimeError("expected plotly validator JSON loader was not found")
             return text
         import_guard = (

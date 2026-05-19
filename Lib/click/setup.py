@@ -1,3 +1,5 @@
+import re
+
 from libs import replace_regex_once, replace_text_once, simple_library, transform_source_text
 
 
@@ -43,6 +45,35 @@ def _patch_click_winconsole(text: str) -> str:
         if "Py_buffer" in text or "pythonapi" in text:
             raise RuntimeError("click._winconsole PyObject_GetBuffer anchor not found")
         return text
+    if "except (AttributeError, ImportError):\n    pythonapi = None\n" in text:
+        return text
+    if "except ImportError:\n    pythonapi = None\n" in text:
+        return replace_text_once(
+            text,
+            "except ImportError:\n    pythonapi = None\n",
+            "except (AttributeError, ImportError):\n    pythonapi = None\n",
+            label="click._winconsole pythonapi import guard",
+        )
+    if "except AttributeError:\n        get_buffer = None\n    else:\n\n        def get_buffer" in text:
+        return text
+    updated, count = re.subn(
+        r"(?ms)^    PyObject_GetBuffer = pythonapi\.PyObject_GetBuffer\n"
+        r"    PyBuffer_Release = pythonapi\.PyBuffer_Release\n\n"
+        r"(?P<func>    def get_buffer\(.*?^            PyBuffer_Release\(byref\(buf\)\)\n)",
+        lambda match: (
+            "    try:\n"
+            "        PyObject_GetBuffer = pythonapi.PyObject_GetBuffer\n"
+            "        PyBuffer_Release = pythonapi.PyBuffer_Release\n"
+            "    except AttributeError:\n"
+            "        get_buffer = None\n"
+            "    else:\n\n"
+            + "".join("    " + line if line.strip() else line for line in match.group("func").splitlines(keepends=True))
+        ),
+        text,
+        count=1,
+    )
+    if count:
+        return updated
     old_legacy = (
         "    PyObject_GetBuffer = pythonapi.PyObject_GetBuffer\n"
         "    PyBuffer_Release = pythonapi.PyBuffer_Release\n\n"

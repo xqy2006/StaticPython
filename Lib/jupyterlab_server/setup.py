@@ -125,34 +125,44 @@ def patch_jupyterlab_server_resources(context) -> None:
         return text
 
     def patch_settings_utils(text: str) -> str:
+        schema_helpers = (
+            "def _staticpython_schema_data(schema_name):\n"
+            "    try:\n"
+            "        from jupyterlab._staticpython_resources import SCHEMAS as lab_schemas\n"
+            "    except Exception:\n"
+            "        lab_schemas = {}\n"
+            "    try:\n"
+            "        from notebook._staticpython_resources import LABEXTENSION_SCHEMAS as notebook_schemas\n"
+            "    except Exception:\n"
+            "        notebook_schemas = {}\n"
+            "    return lab_schemas.get(schema_name) or notebook_schemas.get(schema_name)\n\n"
+            "def _staticpython_schema_names():\n"
+            "    names = set()\n"
+            "    try:\n"
+            "        from jupyterlab._staticpython_resources import SCHEMAS as lab_schemas\n"
+            "        names.update(lab_schemas)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    try:\n"
+            "        from notebook._staticpython_resources import LABEXTENSION_SCHEMAS as notebook_schemas\n"
+            "        names.update(notebook_schemas)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    return sorted(names)\n\n"
+        )
         if "from .translation_utils import DEFAULT_LOCALE, L10N_SCHEMA_NAME, SYS_LOCALE, is_valid_locale\n" in text:
             text = replace_text_once(
                 text,
                 "from .translation_utils import DEFAULT_LOCALE, L10N_SCHEMA_NAME, SYS_LOCALE, is_valid_locale\n",
                 "from .translation_utils import DEFAULT_LOCALE, L10N_SCHEMA_NAME, SYS_LOCALE, is_valid_locale\n\n"
-                "def _staticpython_schema_data(schema_name):\n"
-                "    try:\n"
-                "        from jupyterlab._staticpython_resources import SCHEMAS as lab_schemas\n"
-                "    except Exception:\n"
-                "        lab_schemas = {}\n"
-                "    try:\n"
-                "        from notebook._staticpython_resources import LABEXTENSION_SCHEMAS as notebook_schemas\n"
-                "    except Exception:\n"
-                "        notebook_schemas = {}\n"
-                "    return lab_schemas.get(schema_name) or notebook_schemas.get(schema_name)\n\n"
-                "def _staticpython_schema_names():\n"
-                "    names = set()\n"
-                "    try:\n"
-                "        from jupyterlab._staticpython_resources import SCHEMAS as lab_schemas\n"
-                "        names.update(lab_schemas)\n"
-                "    except Exception:\n"
-                "        pass\n"
-                "    try:\n"
-                "        from notebook._staticpython_resources import LABEXTENSION_SCHEMAS as notebook_schemas\n"
-                "        names.update(notebook_schemas)\n"
-                "    except Exception:\n"
-                "        pass\n"
-                "    return sorted(names)\n",
+                + schema_helpers.rstrip("\n"),
+                label="jupyterlab_server settings static schema helpers",
+            )
+        elif "def _staticpython_schema_data(schema_name):" not in text:
+            text = replace_regex_once(
+                text,
+                r"(?m)^def _get_schema\(",
+                schema_helpers + "def _get_schema(",
                 label="jupyterlab_server settings static schema helpers",
             )
         if "    path = None\n" in text and "static_entry = _staticpython_schema_data(schema_name)\n" not in text:
@@ -228,6 +238,14 @@ def patch_jupyterlab_server_resources(context) -> None:
                 text,
                 "from jupyter_server.base.handlers import FileFindHandler\n",
                 "from jupyter_server.base.handlers import FileFindHandler\n"
+                "from jupyter_server._staticpython_resources import resource_bytes_for_path as _staticpython_resource_bytes_for_path\n",
+                label="jupyterlab_server themes static import",
+            )
+        elif "from .server import FileFindHandler\n" in text:
+            text = replace_text_once(
+                text,
+                "from .server import FileFindHandler\n",
+                "from .server import FileFindHandler\n"
                 "from jupyter_server._staticpython_resources import resource_bytes_for_path as _staticpython_resource_bytes_for_path\n",
                 label="jupyterlab_server themes static import",
             )

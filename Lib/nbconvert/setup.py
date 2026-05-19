@@ -196,7 +196,35 @@ def _iter_exporter_entries():
                 "from .exporter import Exporter\nfrom nbconvert._staticpython_templates import CONFS as _STATICPYTHON_TEMPLATE_CONFS\nfrom nbconvert._staticpython_templates import TEMPLATE_NAMES as _STATICPYTHON_TEMPLATE_NAMES\nfrom nbconvert._staticpython_templates import TEMPLATES as _STATICPYTHON_TEMPLATES\n",
                 label="nbconvert template exporter static imports",
             )
+        if "DictLoader" not in text:
+            text = replace_regex_once(
+                text,
+                r"(?m)^(?P<indent>\s*)(?P<line>from jinja2 import .*\bFileSystemLoader)(?P<rest>[^\n]*)$",
+                r"\g<indent>\g<line>, DictLoader\g<rest>",
+                label="nbconvert legacy DictLoader import",
+            )
         if "def _get_conf(" not in text:
+            if "DictLoader(_STATICPYTHON_TEMPLATES)" in text:
+                return text
+            updated, count = re.subn(
+                r"(?m)^        loaders = self\.extra_loaders \+ \[FileSystemLoader\(paths\)\]\n",
+                "        loaders = self.extra_loaders + [\n"
+                "            DictLoader(_STATICPYTHON_TEMPLATES),\n"
+                "            FileSystemLoader(paths),\n"
+                "        ]\n",
+                text,
+                count=1,
+            )
+            if count == 0:
+                updated, count = re.subn(
+                    r"(?ms)^        loaders = self\.extra_loaders \+ \[\n",
+                    "        loaders = self.extra_loaders + [\n"
+                    "            ExtensionTolerantLoader(DictLoader(_STATICPYTHON_TEMPLATES), self.template_extension),\n",
+                    text,
+                    count=1,
+                )
+            if count:
+                return updated
             if "template_paths" in text or "FileSystemLoader" in text:
                 raise RuntimeError("nbconvert _get_conf anchor not found")
             return text

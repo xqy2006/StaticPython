@@ -259,7 +259,7 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
 
     def patch_extension_application(text: str) -> str:
         if "self.jinja2_env = Environment(" not in text and "FileSystemLoader(self.template_paths)" not in text:
-            if "ExtensionApp" in text and ("jinja2_env" in text or "template_paths" in text or "FileSystemLoader" in text):
+            if "ExtensionApp" in text and ("jinja2_env" in text or "FileSystemLoader" in text):
                 raise RuntimeError("jupyter_server extension embedded template loader anchor not found")
             return text
         if "_staticpython_template_dict_for_package" not in text:
