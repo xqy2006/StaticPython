@@ -449,6 +449,8 @@ def patch_plotly_sources(context):
 
     def patch_validator_cache(text):
         if "_validators.json" not in text:
+            if "ValidatorCache" in text and ("json.load" in text or "validators" in text):
+                raise RuntimeError("expected plotly validator JSON loader was not found")
             return text
         import_guard = (
             "try:\n"
@@ -500,6 +502,8 @@ def patch_plotly_sources(context):
         if "_STATICPYTHON_PLOTLY_MIN_JS" in text:
             return text
         if "get_embed('plotly')" not in text:
+            if "plotly.min.js" in text or "resource_string('plotly'" in text:
+                raise RuntimeError("expected legacy plotly.min.js loader was not found")
             return text
         if "from plotly._staticpython_package_data import PLOTLY_MIN_JS as _STATICPYTHON_PLOTLY_MIN_JS" not in text:
             text = text.replace(

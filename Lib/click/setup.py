@@ -3,6 +3,8 @@ from libs import replace_regex_once, replace_text_once, simple_library, transfor
 
 def _patch_click_compat(text: str) -> str:
     if '_get_windows_console_stream' not in text:
+        if "._winconsole" in text or "_winconsole" in text:
+            raise RuntimeError("click._compat Windows console import anchor not found")
         return text
     modern_import_guard = (
         '    try:\n'
@@ -38,6 +40,8 @@ def _patch_click_compat(text: str) -> str:
 
 def _patch_click_winconsole(text: str) -> str:
     if "PyObject_GetBuffer" not in text:
+        if "Py_buffer" in text or "pythonapi" in text:
+            raise RuntimeError("click._winconsole PyObject_GetBuffer anchor not found")
         return text
     old_legacy = (
         "    PyObject_GetBuffer = pythonapi.PyObject_GetBuffer\n"

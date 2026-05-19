@@ -4,6 +4,8 @@ from libs import replace_text_once, simple_library, transform_source_text
 def patch_portalocker_sources(context):
     def patch_windows_locker(text):
         if "class MsvcrtLocker(BaseLocker):" not in text:
+            if "Win32Locker" in text and "msvcrt" in text:
+                raise RuntimeError("portalocker MsvcrtLocker lazy Win32 setup anchor not found")
             return text
         text = replace_text_once(
             text,

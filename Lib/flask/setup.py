@@ -29,6 +29,8 @@ def _patch_flask_testing(text: str) -> str:
             raise RuntimeError("flask.testing werkzeug.__version__ anchor not found")
         return updated
     if 'importlib.metadata.version("werkzeug")' not in text:
+        if "werkzeug/" in text or "_werkzeug_version" in text:
+            raise RuntimeError("flask.testing werkzeug version anchor not found")
         return text
     return replace_regex_once(
         text,
@@ -45,12 +47,29 @@ def _patch_flask_testing(text: str) -> str:
 
 def _patch_flask_cli(text: str) -> str:
     if "werkzeug.__version__" not in text:
+        if (
+            "Werkzeug" in text
+            and "werkzeug" in text
+            and "version(" in text
+            and 'importlib.metadata.version("werkzeug")' not in text
+        ):
+            raise RuntimeError("flask.cli werkzeug version anchor not found")
         return text
-    updated = text.replace(
-        '"werkzeug": werkzeug.__version__,',
-        '"werkzeug": getattr(werkzeug, "__version__", "3.1.8"),',
-        1,
-    )
+    updated = text
+    replacements = [
+        (
+            '"werkzeug": werkzeug.__version__,',
+            '"werkzeug": getattr(werkzeug, "__version__", "3.1.8"),',
+        ),
+        (
+            'f"Werkzeug {werkzeug.__version__}"',
+            'f"Werkzeug {getattr(werkzeug, \'__version__\', \'3.1.8\')}"',
+        ),
+    ]
+    for old, new in replacements:
+        if old in updated:
+            updated = updated.replace(old, new, 1)
+            break
     if "werkzeug.__version__" in updated:
         raise RuntimeError("flask.cli werkzeug.__version__ anchor not found")
     return updated

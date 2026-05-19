@@ -327,7 +327,7 @@ class _StaticPythonEntryPoint:
             "Lib/jupyterlab/coreconfig.py",
             "Lib/jupyterlab/commands.py",
         ],
-        lambda text: patch_coreconfig(text) if "def _get_default_core_data():" in text else text,
+        patch_coreconfig,
         allow_all_missing=True,
     )
     transform_source_text(context, "Lib/jupyterlab/commands.py", patch_commands, allow_missing=True)
