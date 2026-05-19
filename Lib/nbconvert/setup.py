@@ -183,17 +183,19 @@ def _iter_exporter_entries():
     transform_source_text(context, "Lib/nbconvert/exporters/base.py", patch_exporter_base, allow_missing=True)
 
     def patch_template_exporter(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "from .exporter import Exporter\n",
-            "from .exporter import Exporter\nfrom nbconvert._staticpython_templates import CONFS as _STATICPYTHON_TEMPLATE_CONFS\nfrom nbconvert._staticpython_templates import TEMPLATE_NAMES as _STATICPYTHON_TEMPLATE_NAMES\nfrom nbconvert._staticpython_templates import TEMPLATES as _STATICPYTHON_TEMPLATES\n",
-            label="nbconvert template exporter static imports",
-        )
+        if "from .exporter import Exporter\n" not in text:
+            return text
+        if "_STATICPYTHON_TEMPLATES" not in text:
+            text = replace_text_once(
+                text,
+                "from .exporter import Exporter\n",
+                "from .exporter import Exporter\nfrom nbconvert._staticpython_templates import CONFS as _STATICPYTHON_TEMPLATE_CONFS\nfrom nbconvert._staticpython_templates import TEMPLATE_NAMES as _STATICPYTHON_TEMPLATE_NAMES\nfrom nbconvert._staticpython_templates import TEMPLATES as _STATICPYTHON_TEMPLATES\n",
+                label="nbconvert template exporter static imports",
+            )
         if "def _get_conf(" not in text:
             return text
-        text = replace_regex_once(
-            text,
-            r"(?ms)^        loaders = (?:\[\n            \*self\.extra_loaders,\n|self\.extra_loaders \+ \[\n)"
+        updated, count = re.subn(
+            r"^        loaders = (?:\[\n            \*self\.extra_loaders,\n|self\.extra_loaders \+ \[\n)"
             r".*?"
             r"^        \]\n"
             r"(?=^        environment = Environment\()",
@@ -210,12 +212,14 @@ def _iter_exporter_entries():
             "            ExtensionTolerantLoader(FileSystemLoader(paths), self.template_extension),\n"
             "            DictLoader({self._raw_template_key: self.raw_template}),\n"
             "        ]\n",
-            label="nbconvert embedded jinja template loader",
+            text,
+            count=1,
             flags=re.MULTILINE | re.DOTALL,
         )
-        text = replace_regex_once(
-            text,
-            r"(?ms)^    def _get_conf\(self\):\n.*?^    @default\(\"template_paths\"\)\n",
+        if count:
+            text = updated
+        updated, count = re.subn(
+            r"^    def _get_conf\(self\):\n.*?^    @default\(\"template_paths\"\)\n",
             """    def _get_conf(self):
         conf: dict[str, t.Any] = {}  # the configuration once all conf files are merged
         for template_name in reversed(self.get_template_names()):
@@ -237,12 +241,17 @@ def _iter_exporter_entries():
 
     @default("template_paths")
 """,
-            label="nbconvert embedded template conf loader",
-        )
-        text = replace_function_block_once(
             text,
-            "get_template_names",
-            """    def get_template_names(self):  # noqa
+            count=1,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        if count:
+            text = updated
+        if "def get_template_names(" in text and "def get_prefix_root_dirs(" in text:
+            text = replace_function_block_once(
+                text,
+                "get_template_names",
+                """    def get_template_names(self):  # noqa
         \"\"\"Finds a list of template names where each successive template name is the base template\"\"\"
         template_names = []
         root_dirs = self.get_prefix_root_dirs()
@@ -307,12 +316,11 @@ def _iter_exporter_entries():
         return template_names
 
 """,
-            label="nbconvert embedded template name discovery",
-            next_name="get_prefix_root_dirs",
-        )
-        return replace_regex_once(
-            text,
-            r"(?ms)^    def _template_paths\(self, prune=True, root_dirs=None\):\n.*?^    @classmethod\n",
+                label="nbconvert embedded template name discovery",
+                next_name="get_prefix_root_dirs",
+            )
+        updated, count = re.subn(
+            r"^    def _template_paths\(self, prune=True, root_dirs=None\):\n.*?^    @classmethod\n",
             """    def _template_paths(self, prune=True, root_dirs=None):
         paths = []
         root_dirs = self.get_prefix_root_dirs()
@@ -353,8 +361,13 @@ def _iter_exporter_entries():
 
     @classmethod
 """,
-            label="nbconvert embedded template path marker",
+            text,
+            count=1,
+            flags=re.MULTILINE | re.DOTALL,
         )
+        if count:
+            text = updated
+        return text
 
     transform_source_text(context, "Lib/nbconvert/exporters/templateexporter.py", patch_template_exporter)
 

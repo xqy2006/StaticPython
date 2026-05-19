@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+
 from packaging.version import Version
 
 from libs import (
@@ -144,14 +146,34 @@ def prepare_regex_source(context) -> None:
             extracted_root = _extract_archive(archive_path, extract_root, context.log)
             context.log(f"using {project_name} {resolved_release_version} source from {extracted_root}")
 
-            _copy_entry(
-                _resolve_source_entry(extracted_root, "regex||Python3||regex_3"),
-                context.source_root / "Lib" / "regex",
-            )
-            _copy_entry(
-                _resolve_source_entry(extracted_root, "src||Python3||regex_3"),
-                context.source_root / "regex_builtin" / "src",
-            )
+            package_entry = _resolve_source_entry(extracted_root, "regex||Python3||regex_3")
+            package_target = context.source_root / "Lib" / "regex"
+            if package_entry.is_file() and package_entry.name == "regex.py":
+                if package_target.exists():
+                    if package_target.is_dir():
+                        shutil.rmtree(package_target)
+                    else:
+                        package_target.unlink()
+                package_target.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(package_entry, package_target / "__init__.py")
+            else:
+                _copy_entry(package_entry, package_target)
+
+            native_entry = _resolve_source_entry(extracted_root, "src||Python3||regex_3||_regex.c")
+            native_target = context.source_root / "regex_builtin" / "src"
+            if native_entry.is_file():
+                if native_target.exists():
+                    if native_target.is_dir():
+                        shutil.rmtree(native_target)
+                    else:
+                        native_target.unlink()
+                native_target.mkdir(parents=True, exist_ok=True)
+                for source_name in ("_regex.c", "_regex.h", "_regex_unicode.c", "unicodedata_db.h"):
+                    source_file = native_entry.parent / source_name
+                    if source_file.exists():
+                        shutil.copy2(source_file, native_target / source_name)
+            else:
+                _copy_entry(native_entry, native_target)
             return
         except Exception as exc:
             failure = f"{archive_path.name}: {exc}"

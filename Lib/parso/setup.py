@@ -1,3 +1,5 @@
+import re
+
 from libs import (
     ensure_text_after,
     replace_function_block_once,
@@ -17,6 +19,25 @@ def embed_parso_grammars(context) -> None:
     }
     if not grammars:
         raise RuntimeError("expected Parso grammar files were not materialized")
+    target_key = f"python/grammar{context.version_info[0]}{context.version_info[1]}.txt"
+    if target_key not in grammars:
+        target_value = context.version_info[0] * 100 + context.version_info[1]
+        candidates: list[tuple[int, str]] = []
+        for key in grammars:
+            match = re.search(r"grammar(?P<version>\d+(?:\.\d+)?)\.txt$", key)
+            if match is None:
+                continue
+            version_text = match.group("version")
+            if "." in version_text:
+                major_text, minor_text = version_text.split(".", 1)
+                value = int(major_text) * 100 + int(minor_text)
+            else:
+                value = int(version_text[0]) * 100 + int(version_text[1:] or "0")
+            candidates.append((value, key))
+        if candidates:
+            fallback_candidates = [candidate for candidate in candidates if candidate[0] <= target_value]
+            _, fallback_key = max(fallback_candidates or candidates)
+            grammars[target_key] = grammars[fallback_key]
 
     write_source_text(
         context,

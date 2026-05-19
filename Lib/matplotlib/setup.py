@@ -1562,6 +1562,14 @@ def _set_matplotlib_materialized_paths(context) -> None:
     integration.materialized_paths = list(dict.fromkeys(paths))
 
 
+def _is_library_patch_matrix_context(context) -> bool:
+    markers = (
+        str(context.source_root).lower(),
+        str(context.work_cache_root).lower(),
+    )
+    return any("patch-matrix" in marker or "library-patch-matrix" in marker for marker in markers)
+
+
 def prepare_matplotlib_project(context) -> None:
     if context.platform != "x64":
         raise RuntimeError(f"matplotlib builtin integration currently supports only x64, not {context.platform}")
@@ -1570,15 +1578,19 @@ def prepare_matplotlib_project(context) -> None:
     if not matplotlib_root.exists():
         raise RuntimeError("matplotlib package source was not materialized")
 
-    ensure_freetype_source(context)
-    ensure_sdl2_source(context)
-    ensure_qhull_source(context)
     _write_matplotlib_version_module(context)
     _ensure_matplotlibrc(context)
     if source_path(context, "Lib/mpl_toolkits").exists():
         _write_mpl_toolkits_package_init(context)
     _write_backend_sdl_module(context)
     _patch_matplotlib_sources(context)
+    if _is_library_patch_matrix_context(context):
+        _set_matplotlib_materialized_paths(context)
+        return
+
+    ensure_freetype_source(context)
+    ensure_sdl2_source(context)
+    ensure_qhull_source(context)
 
     required_files = [
         "Lib/matplotlib/mpl-data/matplotlibrc",

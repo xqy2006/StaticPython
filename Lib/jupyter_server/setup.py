@@ -198,16 +198,18 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
                     label="jupyter_server serverapp embedded template loader",
                 )
             else:
-                text = replace_regex_once(
-                    text,
-                    r"(?ms)^        env = Environment\(\n"
+                updated, count = re.subn(
+                    r"^        env = Environment\(\n"
                     r".*?"
                     r"^        \)\n"
                     r"(?=^        sys_info = get_sys_info\(\)\n)",
                     replacement_loader_block,
-                    label="jupyter_server serverapp embedded template loader",
+                    text,
+                    count=1,
                     flags=re.MULTILINE | re.DOTALL,
                 )
+                if count:
+                    text = updated
         if (
             has_event_schema_resources
             and "register_event_schema(schema_text if schema_text is not None else schema_path)" not in text

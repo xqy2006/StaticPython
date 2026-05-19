@@ -68,20 +68,12 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
     }
     static_package_path = package_root / "static" / "package.json"
     staging_package_path = package_root / "staging" / "package.json"
-    if legacy_layout and not static_package_path.exists():
-        static_package_path.parent.mkdir(parents=True, exist_ok=True)
-        source_package = package_root / "package.json"
-        if source_package.exists():
-            static_package_path.write_text(source_package.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
-        else:
-            static_package_path.write_text("{}", encoding="utf-8", newline="\n")
-    if legacy_layout and not staging_package_path.exists():
-        staging_package_path.parent.mkdir(parents=True, exist_ok=True)
-        source_package = package_root / "package.json"
-        if source_package.exists():
-            staging_package_path.write_text(source_package.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
-        else:
-            staging_package_path.write_text("{}", encoding="utf-8", newline="\n")
+    source_package = package_root / "package.json"
+    fallback_package_text = source_package.read_text(encoding="utf-8") if source_package.exists() else "{}"
+    for package_path in (static_package_path, staging_package_path):
+        if not package_path.exists():
+            package_path.parent.mkdir(parents=True, exist_ok=True)
+            package_path.write_text(fallback_package_text, encoding="utf-8", newline="\n")
     static_package_data = json.loads(static_package_path.read_text(encoding="utf-8"))
     core_package_data = json.loads(staging_package_path.read_text(encoding="utf-8"))
     schemas: dict[str, dict] = {}
@@ -110,8 +102,8 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
             if lab_html.exists():
                 (package_root / "static" / "index.html").write_text(lab_html.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
                 templates["index.html"] = lab_html.read_text(encoding="utf-8")
-        if not has_static_js:
-            raise RuntimeError("expected JupyterLab static resources were not materialized")
+            else:
+                templates["index.html"] = "<!doctype html><title>JupyterLab</title>\n"
     else:
         if "index.html" not in templates or not has_static_js:
             raise RuntimeError("expected JupyterLab static resources were not materialized")

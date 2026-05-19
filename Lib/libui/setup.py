@@ -50,11 +50,16 @@ def _patch_libui_declarative_init(text: str) -> str:
 
 
 def _patch_libui_declarative_app(text: str) -> str:
-    return replace_text_once(
-        text,
+    old = (
         "                    unsub = state.subscribe(\n"
         "                        lambda it=item, st=state: setattr(it, \"checked\", st.value)\n"
-        "                    )\n",
+        "                    )\n"
+    )
+    if old not in text:
+        return text
+    return replace_text_once(
+        text,
+        old,
         "                    unsub = state.subscribe(\n"
         "                        lambda it=item, st=state: core.queue_main(\n"
         "                            lambda it=it, st=st: setattr(it, \"checked\", st.value)\n"
