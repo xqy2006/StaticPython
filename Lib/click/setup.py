@@ -74,6 +74,36 @@ def _patch_click_winconsole(text: str) -> str:
     )
     if count:
         return updated
+    top_level_assignments = (
+        "PyObject_GetBuffer = pythonapi.PyObject_GetBuffer\n"
+        "PyBuffer_Release = pythonapi.PyBuffer_Release\n"
+    )
+    if top_level_assignments in text:
+        text = replace_text_once(
+            text,
+            top_level_assignments,
+            "try:\n"
+            "    PyObject_GetBuffer = pythonapi.PyObject_GetBuffer\n"
+            "    PyBuffer_Release = pythonapi.PyBuffer_Release\n"
+            "except AttributeError:\n"
+            "    PyObject_GetBuffer = None\n"
+            "    PyBuffer_Release = None\n",
+            label="click._winconsole top-level pythonapi import guard",
+        )
+        updated, count = re.subn(
+            r"(?ms)^(?P<func>def get_buffer\(.*?^        PyBuffer_Release\(byref\(buf\)\)\n)",
+            lambda match: (
+                "if PyObject_GetBuffer is None:\n"
+                "    get_buffer = None\n"
+                "else:\n\n"
+                + "".join("    " + line if line.strip() else line for line in match.group("func").splitlines(keepends=True))
+            ),
+            text,
+            count=1,
+        )
+        if count == 0:
+            raise RuntimeError("click._winconsole top-level get_buffer anchor not found")
+        return updated
     old_legacy = (
         "    PyObject_GetBuffer = pythonapi.PyObject_GetBuffer\n"
         "    PyBuffer_Release = pythonapi.PyBuffer_Release\n\n"

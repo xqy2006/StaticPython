@@ -321,65 +321,39 @@ def _patch_raw_api(text: str) -> str:
         )
         text = head + "except ImportError:\n" + tail
     if "_load_embedded_process_lib" not in text:
-        if "\n\ndef load_pycryptodome_raw_lib(name, cdecl):\n" in text:
-            text = replace_text_once(
-                text,
-                "\n\ndef load_pycryptodome_raw_lib(name, cdecl):\n",
-                "\n\n_EMBEDDED_PROCESS_LIB = None\n\n\n"
-                "def _load_embedded_process_lib():\n"
-                "    global _EMBEDDED_PROCESS_LIB\n\n"
-                "    if _EMBEDDED_PROCESS_LIB is False:\n"
-                "        return None\n"
-                "    if _EMBEDDED_PROCESS_LIB is not None:\n"
-                "        return _EMBEDDED_PROCESS_LIB\n\n"
-                "    if backend != \"ctypes\" or os.name != \"nt\":\n"
-                "        _EMBEDDED_PROCESS_LIB = False\n"
-                "        return None\n\n"
-                "    executable = getattr(sys, \"executable\", None)\n"
-                "    if not executable:\n"
-                "        _EMBEDDED_PROCESS_LIB = False\n"
-                "        return None\n\n"
-                "    try:\n"
-                "        lib = load_lib(executable, \"\")\n"
-                "        getattr(lib, \"pycryptodome_embedded\")\n"
-                "    except (AttributeError, OSError):\n"
-                "        _EMBEDDED_PROCESS_LIB = False\n"
-                "        return None\n\n"
-                "    _EMBEDDED_PROCESS_LIB = lib\n"
-                "    return lib\n\n\n"
-                "def load_pycryptodome_raw_lib(name, cdecl):\n",
-                label="Crypto.Util._raw_api.embedded-loader",
-            )
-        elif "def load_pycryptodome_raw_lib(name, cdecl):\n" in text:
-            insert_anchor = "def load_pycryptodome_raw_lib(name, cdecl):\n"
-            text = text.replace(
-                insert_anchor,
-                "_EMBEDDED_PROCESS_LIB = None\n\n\n"
-                "def _load_embedded_process_lib():\n"
-                "    global _EMBEDDED_PROCESS_LIB\n\n"
-                "    if _EMBEDDED_PROCESS_LIB is False:\n"
-                "        return None\n"
-                "    if _EMBEDDED_PROCESS_LIB is not None:\n"
-                "        return _EMBEDDED_PROCESS_LIB\n\n"
-                "    if backend != \"ctypes\" or os.name != \"nt\":\n"
-                "        _EMBEDDED_PROCESS_LIB = False\n"
-                "        return None\n\n"
-                "    executable = getattr(sys, \"executable\", None)\n"
-                "    if not executable:\n"
-                "        _EMBEDDED_PROCESS_LIB = False\n"
-                "        return None\n\n"
-                "    try:\n"
-                "        lib = load_lib(executable, \"\")\n"
-                "        getattr(lib, \"pycryptodome_embedded\")\n"
-                "    except (AttributeError, OSError):\n"
-                "        _EMBEDDED_PROCESS_LIB = False\n"
-                "        return None\n\n"
-                "    _EMBEDDED_PROCESS_LIB = lib\n"
-                "    return lib\n\n\n"
-                + insert_anchor,
-                1,
-            )
-        else:
+        embedded_loader = (
+            "_EMBEDDED_PROCESS_LIB = None\n\n\n"
+            "def _load_embedded_process_lib():\n"
+            "    global _EMBEDDED_PROCESS_LIB\n\n"
+            "    if _EMBEDDED_PROCESS_LIB is False:\n"
+            "        return None\n"
+            "    if _EMBEDDED_PROCESS_LIB is not None:\n"
+            "        return _EMBEDDED_PROCESS_LIB\n\n"
+            "    if backend != \"ctypes\" or os.name != \"nt\":\n"
+            "        _EMBEDDED_PROCESS_LIB = False\n"
+            "        return None\n\n"
+            "    executable = getattr(sys, \"executable\", None)\n"
+            "    if not executable:\n"
+            "        _EMBEDDED_PROCESS_LIB = False\n"
+            "        return None\n\n"
+            "    try:\n"
+            "        lib = load_lib(executable, \"\")\n"
+            "        getattr(lib, \"pycryptodome_embedded\")\n"
+            "    except (AttributeError, OSError):\n"
+            "        _EMBEDDED_PROCESS_LIB = False\n"
+            "        return None\n\n"
+            "    _EMBEDDED_PROCESS_LIB = lib\n"
+            "    return lib\n\n\n"
+        )
+        text, count = re.subn(
+            r"(?m)^def load_pycryptodome_raw_lib\([^\n]*\):\n",
+            lambda match: embedded_loader + match.group(0),
+            text,
+            count=1,
+        )
+        if count == 0:
+            if "load_pycryptodome_raw_lib" in text or "load_lib(" in text:
+                raise RuntimeError("Crypto.Util._raw_api embedded loader anchor not found")
             return text
     text = replace_function_block_once(
         text,

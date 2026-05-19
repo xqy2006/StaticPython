@@ -197,12 +197,33 @@ def _iter_exporter_entries():
                 label="nbconvert template exporter static imports",
             )
         if "DictLoader" not in text:
-            text = replace_regex_once(
-                text,
+            updated, count = re.subn(
                 r"(?m)^(?P<indent>\s*)(?P<line>from jinja2 import .*\bFileSystemLoader)(?P<rest>[^\n]*)$",
                 r"\g<indent>\g<line>, DictLoader\g<rest>",
-                label="nbconvert legacy DictLoader import",
+                text,
+                count=1,
             )
+            if count == 0:
+                def add_dict_loader(match: re.Match) -> str:
+                    body = match.group("body")
+                    if "FileSystemLoader" not in body:
+                        return match.group(0)
+                    indent = match.group("indent")
+                    if not body.rstrip().endswith(","):
+                        body = body.rstrip("\n") + ",\n"
+                    return f"{indent}from jinja2 import (\n{body}{indent}    DictLoader,\n{indent})\n"
+
+                updated, count = re.subn(
+                    r"(?ms)^(?P<indent>[ \t]*)from jinja2 import \(\n(?P<body>.*?)(?P=indent)\)\n",
+                    add_dict_loader,
+                    text,
+                    count=1,
+                )
+            if count == 0:
+                if "FileSystemLoader" in text and "from jinja2 import" in text:
+                    raise RuntimeError("nbconvert legacy DictLoader import anchor not found")
+            else:
+                text = updated
         if "def _get_conf(" not in text:
             if "DictLoader(_STATICPYTHON_TEMPLATES)" in text:
                 return text

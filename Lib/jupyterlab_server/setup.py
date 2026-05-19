@@ -7,6 +7,7 @@ from libs import (
     replace_regex_once,
     replace_text_once,
     source_path,
+    transform_first_existing_source_text,
     transform_source_text,
     write_source_text,
 )
@@ -185,7 +186,27 @@ def patch_jupyterlab_server_resources(context) -> None:
                 "    # Look for the setting in all of the labextension paths first\n",
                 label="jupyterlab_server direct schema fallback",
             )
-        if "    if not os.path.exists(schemas_dir):\n" in text and "for static_schema_name in _staticpython_schema_names()" not in text:
+        elif "    path = _path(schemas_dir, schema_name)\n" in text and "static_entry = _staticpython_schema_data(schema_name)\n" not in text:
+            text = replace_text_once(
+                text,
+                "    path = _path(schemas_dir, schema_name)\n",
+                "    path = _path(schemas_dir, schema_name)\n"
+                "    static_entry = _staticpython_schema_data(schema_name)\n"
+                "    if static_entry is not None:\n"
+                "        schema = _override(schema_name, static_entry[\"schema\"].copy(), overrides)\n"
+                "        try:\n"
+                "            Validator.check_schema(schema)\n"
+                "        except Exception as e:\n"
+                "            name = schema_name\n"
+                "            raise web.HTTPError(500, validation_error % (name, str(e))) from None\n"
+                "        return schema\n",
+                label="jupyterlab_server legacy direct schema fallback",
+            )
+        if (
+            "    if not os.path.exists(schemas_dir):\n" in text
+            and "Settings directory does not exist at %s" in text
+            and "for static_schema_name in _staticpython_schema_names()" not in text
+        ):
             text = replace_regex_once(
                 text,
                 r"(?ms)^    if not os\.path\.exists\(schemas_dir\):\n"
@@ -214,6 +235,48 @@ def patch_jupyterlab_server_resources(context) -> None:
                 "            settings[static_schema_name] = dict(id=static_schema_name, schema=schema, version=version, **user_settings)\n",
                 label="jupyterlab_server list embedded schemas",
                 flags=re.MULTILINE | re.DOTALL,
+            )
+        if (
+            "    if not os.path.exists(schemas_dir):\n        return (settings_list, warnings)\n" in text
+            and "for static_schema_name in _staticpython_schema_names()" not in text
+        ):
+            text = replace_text_once(
+                text,
+                "    if not os.path.exists(schemas_dir):\n"
+                "        return (settings_list, warnings)\n"
+                "\n"
+                "    schema_pattern = schemas_dir + '/**/*' + extension\n"
+                "    schema_paths = [path for path in glob(schema_pattern, recursive=True)]\n"
+                "    schema_paths.sort()\n",
+                "    schema_paths = []\n"
+                "    if os.path.exists(schemas_dir):\n"
+                "        schema_pattern = schemas_dir + '/**/*' + extension\n"
+                "        schema_paths = [path for path in glob(schema_pattern, recursive=True)]\n"
+                "        schema_paths.sort()\n",
+                label="jupyterlab_server legacy list embedded schemas setup",
+            )
+            text = replace_text_once(
+                text,
+                "    return (settings_list, warnings)\n",
+                "    existing_ids = {entry['id'] for entry in settings_list}\n"
+                "    for static_schema_name in _staticpython_schema_names():\n"
+                "        if static_schema_name in existing_ids:\n"
+                "            continue\n"
+                "        schema = _get_schema(schemas_dir, static_schema_name, overrides)\n"
+                "        raw, settings, warning = _get_settings(settings_dir, static_schema_name, schema)\n"
+                "        version = _get_version(schemas_dir, static_schema_name)\n"
+                "        if warning:\n"
+                "            warnings.append(warning)\n"
+                "        settings_list.append(dict(\n"
+                "            id=static_schema_name,\n"
+                "            raw=raw,\n"
+                "            schema=schema,\n"
+                "            settings=settings,\n"
+                "            version=version,\n"
+                "        ))\n"
+                "\n"
+                "    return (settings_list, warnings)\n",
+                label="jupyterlab_server legacy list embedded schemas",
             )
         if (
             "def _get_schema(" in text
@@ -275,7 +338,15 @@ def patch_jupyterlab_server_resources(context) -> None:
         return text
 
     transform_source_text(context, "Lib/jupyterlab_server/config.py", patch_config, allow_missing=True)
-    transform_source_text(context, "Lib/jupyterlab_server/settings_utils.py", patch_settings_utils, allow_missing=True)
+    transform_first_existing_source_text(
+        context,
+        [
+            "Lib/jupyterlab_server/settings_utils.py",
+            "Lib/jupyterlab_server/settings_handler.py",
+        ],
+        patch_settings_utils,
+        allow_all_missing=True,
+    )
     transform_source_text(context, "Lib/jupyterlab_server/themes_handler.py", patch_themes_handler, allow_missing=True)
 
 
