@@ -5,19 +5,24 @@ from libs import simple_library, transform_source_text
 
 def patch_ipython_sources(context):
     def patch_skipdoctest_import(text: str) -> str:
-        if "def skip_doctest(function):\n    return function\n" in text:
+        if "from IPython.testing.skipdoctest import" not in text:
             return text
         updated, count = re.subn(
-            r"(?m)^from IPython\.testing\.skipdoctest import skip_doctest\s*$",
-            "def skip_doctest(function):\n    return function",
+            r"(?m)^from IPython\.testing\.skipdoctest import .*$",
+            "def skip_doctest(function):\n"
+            "    return function\n"
+            "\n"
+            "def skip_doctest_py2(function):\n"
+            "    return function\n"
+            "\n"
+            "def skip_doctest_py3(function):\n"
+            "    return function",
             text,
             count=1,
         )
         if count == 1:
             return updated
-        if "from IPython.testing.skipdoctest import skip_doctest" in text:
-            raise RuntimeError("IPython skip_doctest import anchor not found")
-        return text
+        raise RuntimeError("IPython skip_doctest import anchor not found")
 
     ipython_root = context.source_root / "Lib" / "IPython"
     for path in sorted(ipython_root.rglob("*.py")):

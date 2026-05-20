@@ -53,7 +53,6 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
             staging_dir = package_root / "staging"
             staging_dir.mkdir(parents=True, exist_ok=True)
             (staging_dir / "package.json").write_bytes(staging_package.read_bytes())
-    legacy_layout = legacy_static_root.exists()
     if not (package_root / "static").exists():
         return
     byte_resources = {
@@ -95,6 +94,7 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
         key.startswith("static/") and key.endswith(".js")
         for key in byte_resources
     )
+    legacy_layout = legacy_static_root.exists() or ("index.html" not in templates and has_static_js)
 
     if legacy_layout:
         if "index.html" not in templates:
@@ -215,7 +215,30 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
         if not text:
             return text
         if "def ensure_app(app_dir):" not in text:
-            if "JupyterLab application assets not found" in text or "def _get_static_data(" in text:
+            if "def _get_static_data(" in text:
+                text = ensure_text_before(
+                    text,
+                    "def _get_static_data(app_dir):\n",
+                    "from jupyterlab._staticpython_resources import STATIC_PACKAGE_DATA as _STATICPYTHON_STATIC_PACKAGE_DATA\n",
+                    label="jupyterlab commands static package data import",
+                )
+                return replace_function_block_once(
+                    text,
+                    "_get_static_data",
+                    'def _get_static_data(app_dir):\n'
+                    '    """Get the data for the app static dir."""\n'
+                    '    target = pjoin(app_dir, "static", "package.json")\n'
+                    '    if _STATICPYTHON_STATIC_PACKAGE_DATA:\n'
+                    '        return json.loads(json.dumps(_STATICPYTHON_STATIC_PACKAGE_DATA))\n'
+                    '    if osp.exists(target):\n'
+                    '        with open(target) as fid:\n'
+                    '            return json.load(fid)\n'
+                    '    else:\n'
+                    '        return None\n\n',
+                    label="jupyterlab static package data fallback",
+                    next_name="_validate_compatibility",
+                )
+            if "JupyterLab application assets not found" in text:
                 raise RuntimeError("jupyterlab ensure_app embedded assets anchor not found")
             return text
         text = ensure_text_before(

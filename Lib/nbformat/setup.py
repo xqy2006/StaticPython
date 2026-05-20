@@ -35,6 +35,24 @@ def embed_nbformat_schemas(context) -> None:
                     "from ipython_genutils.importstring import import_item\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n",
                     1,
                 )
+            elif "from .reader import get_version\n" in text:
+                text = text.replace(
+                    "from .reader import get_version\n",
+                    "from .reader import get_version\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n",
+                    1,
+                )
+            elif "import os\n" in text:
+                text = text.replace(
+                    "import os\n",
+                    "import os\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n",
+                    1,
+                )
+            elif "import json\n" in text:
+                text = text.replace(
+                    "import json\n",
+                    "import json\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n",
+                    1,
+                )
             else:
                 if "_get_schema_json" in text or "schema_path" in text:
                     raise RuntimeError("nbformat static schema import anchor not found")
@@ -94,25 +112,41 @@ def embed_nbformat_schemas(context) -> None:
         )
 
     def patch_version(text: str) -> str:
-        if "from importlib.metadata import" not in text or "PackageNotFoundError" in text:
+        if "PackageNotFoundError" in text:
             return text
-        version_match = re.search(r'(?m)^__version__ = version\((?P<arg>.+?)\)(?: or [\'"]0\.0\.0[\'"])?\n', text)
-        import_match = re.search(r"(?m)^from importlib\.metadata import (?P<names>.+)\n", text)
-        if version_match is None or import_match is None or "version" not in import_match.group("names"):
+        if "version(" not in text or "__version__" not in text:
+            return text
+
+        import_count = 0
+
+        def patch_import(match: re.Match[str]) -> str:
+            nonlocal import_count
+            names = match.group("names")
+            if "version" not in names:
+                return match.group(0)
+            import_count += 1
+            return f"{match.group('prefix')}PackageNotFoundError, {names}{match.group('comment') or ''}"
+
+        text = re.sub(
+            r"(?m)^(?P<prefix>from importlib(?:\.metadata|_metadata) import )(?P<names>[^\n#]+?)(?P<comment>\s*#.*)?$",
+            patch_import,
+            text,
+        )
+        if import_count == 0:
             if "__version__" in text and "version(" in text:
-                raise RuntimeError("nbformat version metadata anchor not found")
+                raise RuntimeError("nbformat version metadata import anchor not found")
             return text
-        imported_names = import_match.group("names")
-        replacement_names = imported_names if "PackageNotFoundError" in imported_names else f"PackageNotFoundError, {imported_names}"
-        updated = text[: import_match.start()] + f"from importlib.metadata import {replacement_names}\n" + text[import_match.end() :]
+
         updated, count = re.subn(
-            r'(?m)^__version__ = version\((?P<arg>.+?)\)(?: or [\'"]0\.0\.0[\'"])?\n',
+            r'(?m)^__version__(?P<annotation>\s*:\s*[^=]+)?\s*=\s*version\((?P<arg>.+?)\)(?: or [\'"]0\.0\.0[\'"])?(?P<comment>\s*#.*)?\n',
             'try:\n    __version__ = version(\\g<arg>)\nexcept PackageNotFoundError:\n    __version__ = "0.0.0"\n',
-            updated,
+            text,
             count=1,
         )
         if count != 1:
-            raise RuntimeError("nbformat version metadata replacement failed")
+            if "__version__" in text and "version(" in text:
+                raise RuntimeError("nbformat version metadata anchor not found")
+            return text
         return updated
 
     transform_source_text(context, "Lib/nbformat/validator.py", patch_validator)

@@ -23,6 +23,19 @@ def _patch_werkzeug_init(text: str) -> str:
                 return "import importlib.metadata\n" + updated
             return "import importlib.metadata\n\n" + updated
         return updated
+    updated, count = re.subn(
+        r'(?m)^(?P<indent>[ \t]+)return importlib\.metadata\.version\("werkzeug"\)\n',
+        (
+            "\\g<indent>try:\n"
+            "\\g<indent>    return importlib.metadata.version(\"werkzeug\")\n"
+            "\\g<indent>except importlib.metadata.PackageNotFoundError:\n"
+            "\\g<indent>    return \"0+staticpython\"\n"
+        ),
+        text,
+        count=1,
+    )
+    if count == 1:
+        return updated
     if 'version("werkzeug")' in text:
         raise RuntimeError("werkzeug version metadata anchor not found")
     return text
