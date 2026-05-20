@@ -212,6 +212,43 @@ def patch_protobuf_namespace(context) -> None:
 
 
 def patch_protobuf_sources(context) -> None:
+    def patch_protobuf_c(text: str) -> str:
+        old = (
+            "typedef struct {\n"
+            "#ifdef ENABLE_MUTEX\n"
+            "  pthread_mutex_t mutex;\n"
+            "#endif\n"
+            "} FreeThreadingMutex;\n"
+            "\n"
+            "#ifdef ENABLE_MUTEX\n"
+            "static FreeThreadingMutex obj_cache_mutex = {PTHREAD_MUTEX_INITIALIZER};\n"
+            "#else\n"
+            "static FreeThreadingMutex obj_cache_mutex = {};\n"
+            "#endif\n"
+        )
+        new = (
+            "typedef struct {\n"
+            "#ifdef ENABLE_MUTEX\n"
+            "  pthread_mutex_t mutex;\n"
+            "#else\n"
+            "  char unused;\n"
+            "#endif\n"
+            "} FreeThreadingMutex;\n"
+            "\n"
+            "#ifdef ENABLE_MUTEX\n"
+            "static FreeThreadingMutex obj_cache_mutex = {PTHREAD_MUTEX_INITIALIZER};\n"
+            "#else\n"
+            "static FreeThreadingMutex obj_cache_mutex = {0};\n"
+            "#endif\n"
+        )
+        if new in text:
+            return text
+        if old not in text:
+            if "FreeThreadingMutex" in text and "static FreeThreadingMutex obj_cache_mutex" in text:
+                raise RuntimeError("protobuf free-threading mutex anchor not found")
+            return text
+        return text.replace(old, new, 1)
+
     def patch_message_c(text: str) -> str:
         updated = text.replace(
             "__attribute__((flatten)) static PyObject* PyUpb_Message_GetAttr(",
@@ -221,6 +258,12 @@ def patch_protobuf_sources(context) -> None:
             raise RuntimeError("protobuf message flatten attribute anchor not patched")
         return updated
 
+    transform_source_text(
+        context,
+        "protobuf_builtin/python/protobuf.c",
+        patch_protobuf_c,
+        allow_missing=True,
+    )
     transform_source_text(
         context,
         "protobuf_builtin/python/message.c",
