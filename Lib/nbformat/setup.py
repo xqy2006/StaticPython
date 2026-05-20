@@ -125,10 +125,10 @@ def embed_nbformat_schemas(context) -> None:
             if "version" not in names:
                 return match.group(0)
             import_count += 1
-            return f"{match.group('prefix')}PackageNotFoundError, {names}{match.group('comment') or ''}"
+            return f"{match.group('indent')}{match.group('prefix')}PackageNotFoundError, {names}{match.group('comment') or ''}"
 
         text = re.sub(
-            r"(?m)^(?P<prefix>from importlib(?:\.metadata|_metadata) import )(?P<names>[^\n#]+?)(?P<comment>\s*#.*)?$",
+            r"(?m)^(?P<indent>[ \t]*)(?P<prefix>from importlib(?:\.metadata|_metadata) import )(?P<names>[^\n#]+?)(?P<comment>\s*#.*)?$",
             patch_import,
             text,
         )
