@@ -127,8 +127,11 @@
       },
       {
         "name": "cattrs",
-        "overlay_entries": [
-          "Lib/cattrs"
+        "source_mapping": {
+          "cattrs||src/cattrs||cattr||src/cattr": "Lib/cattrs"
+        },
+        "python_packages": [
+          "cattrs"
         ],
         "source_provider": "pypi"
       },
@@ -551,7 +554,7 @@
         "project_name": "notebook-shim",
         "source_mapping": {
           "notebook_shim": "Lib/notebook_shim",
-          "jupyter_server_config.d/notebook_shim.json": "etc/jupyter/jupyter_server_config.d/notebook_shim.json"
+          "jupyter_server_config.d/notebook_shim.json||jupyter-config/jupyter_server_config.d/notebook_shim.json": "etc/jupyter/jupyter_server_config.d/notebook_shim.json"
         },
         "source_provider": "pypi"
       },
@@ -673,7 +676,7 @@
       {
         "name": "pybind11",
         "source_mapping": {
-          "include/pybind11": "pybind11_builtin/include/pybind11",
+          "pybind11/include/pybind11||include/pybind11": "pybind11_builtin/include/pybind11",
           "pybind11": "Lib/pybind11"
         },
         "source_provider": "pypi"
@@ -696,8 +699,8 @@
         "name": "pymongo",
         "source_mapping": {
           "pymongo": "Lib/pymongo",
-          "bson": "Lib/bson",
-          "gridfs": "Lib/gridfs"
+          "?bson||?pymongo/bson.py": "Lib/bson",
+          "?gridfs": "Lib/gridfs"
         },
         "python_packages": [
           "pymongo",
@@ -787,7 +790,7 @@
         "name": "rapidfuzz",
         "project_name": "RapidFuzz",
         "source_mapping": {
-          "src/rapidfuzz": "Lib/rapidfuzz"
+          "src/rapidfuzz || rapidfuzz || python/src": "Lib/rapidfuzz"
         },
         "source_provider": "pypi"
       },

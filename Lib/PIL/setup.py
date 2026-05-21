@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 from libs import pypi_library, source_path, write_source_text
@@ -132,7 +133,13 @@ def _render_pil_project(
 
 
 def _parse_literal_module_attribute(path: Path, attribute_name: str) -> str | None:
-    module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    text = path.read_text(encoding="utf-8")
+    try:
+        module = ast.parse(text, filename=str(path))
+    except SyntaxError:
+        pattern = rf"(?m)^{re.escape(attribute_name)}\s*=\s*['\"]([^'\"]+)['\"]\s*$"
+        match = re.search(pattern, text)
+        return None if match is None else match.group(1)
     for node in module.body:
         if not isinstance(node, ast.Assign):
             continue
@@ -149,19 +156,33 @@ def _parse_literal_module_attribute(path: Path, attribute_name: str) -> str | No
 
 
 def _parse_pillow_version(context) -> str:
-    for candidate in ("Lib/PIL/_version.py", "Lib/PIL/__init__.py"):
+    for candidate, attribute_names in (
+        ("Lib/PIL/_version.py", ("__version__",)),
+        ("Lib/PIL/version.py", ("__version__",)),
+        ("Lib/PIL/__init__.py", ("__version__", "PILLOW_VERSION", "VERSION")),
+        ("pillow_builtin/src/setup.py", ("VERSION",)),
+    ):
         path = source_path(context, candidate)
         if not path.exists():
             continue
-        version = _parse_literal_module_attribute(path, "__version__")
-        if version:
-            return version
-    raise RuntimeError("could not find a literal Pillow __version__ in Lib/PIL/_version.py or Lib/PIL/__init__.py")
+        for attribute_name in attribute_names:
+            version = _parse_literal_module_attribute(path, attribute_name)
+            if version:
+                return version
+    raise RuntimeError(
+        "could not find a literal Pillow version in "
+        "Lib/PIL/_version.py, Lib/PIL/version.py, Lib/PIL/__init__.py, or pillow_builtin/src/setup.py"
+    )
+
+
+def _optional_top_level_source_files(context) -> list[str]:
+    root = source_path(context, "pillow_builtin/src")
+    return [name for name in PIL_TOP_LEVEL_IMAGING_SOURCES if (root / name).exists()]
 
 
 def _discover_imaging_sources(context) -> list[str]:
     root = source_path(context, "pillow_builtin/src")
-    source_files = [name for name in PIL_TOP_LEVEL_IMAGING_SOURCES if (root / name).exists()]
+    source_files = _optional_top_level_source_files(context)
     source_files.extend(
         f"libImaging/{path.name}"
         for path in sorted((root / "libImaging").glob("*.c"))
@@ -172,9 +193,17 @@ def _discover_imaging_sources(context) -> list[str]:
     return source_files
 
 
+def _has_optional_pillow_source(context, relative: str) -> bool:
+    return source_path(context, relative).exists()
+
+
 def prepare_pillow_projects(context) -> None:
     version = _parse_pillow_version(context)
     common_definitions = [f'PILLOW_VERSION=&quot;{version}&quot;']
+    imagingmath_source = "_imagingmath.c" if _has_optional_pillow_source(context, "pillow_builtin/src/_imagingmath.c") else ""
+    imagingmorph_source = "_imagingmorph.c" if _has_optional_pillow_source(context, "pillow_builtin/src/_imagingmorph.c") else ""
+    imagingmath_project_path = source_path(context, "PCbuild/PIL._imagingmath.vcxproj")
+    imagingmorph_project_path = source_path(context, "PCbuild/PIL._imagingmorph.vcxproj")
     write_source_text(
         context,
         "PCbuild/PIL._imaging.vcxproj",
@@ -187,49 +216,46 @@ def prepare_pillow_projects(context) -> None:
             include_zlib=True,
         ),
     )
-    write_source_text(
-        context,
-        "PCbuild/PIL._imagingmath.vcxproj",
-        _render_pil_project(
-            project_guid=PIL_IMAGINGMATH_PROJECT_GUID,
-            root_namespace="PIL__imagingmath",
-            target_name="PIL._imagingmath",
-            source_files=["_imagingmath.c"],
-            extra_definitions=common_definitions,
-        ),
-    )
-    write_source_text(
-        context,
-        "PCbuild/PIL._imagingmorph.vcxproj",
-        _render_pil_project(
-            project_guid=PIL_IMAGINGMORPH_PROJECT_GUID,
-            root_namespace="PIL__imagingmorph",
-            target_name="PIL._imagingmorph",
-            source_files=["_imagingmorph.c"],
-            extra_definitions=common_definitions,
-        ),
-    )
+    if imagingmath_source:
+        write_source_text(
+            context,
+            "PCbuild/PIL._imagingmath.vcxproj",
+            _render_pil_project(
+                project_guid=PIL_IMAGINGMATH_PROJECT_GUID,
+                root_namespace="PIL__imagingmath",
+                target_name="PIL._imagingmath",
+                source_files=[imagingmath_source],
+                extra_definitions=common_definitions,
+            ),
+        )
+    elif imagingmath_project_path.exists():
+        imagingmath_project_path.unlink()
+    if imagingmorph_source:
+        write_source_text(
+            context,
+            "PCbuild/PIL._imagingmorph.vcxproj",
+            _render_pil_project(
+                project_guid=PIL_IMAGINGMORPH_PROJECT_GUID,
+                root_namespace="PIL__imagingmorph",
+                target_name="PIL._imagingmorph",
+                source_files=[imagingmorph_source],
+                extra_definitions=common_definitions,
+            ),
+        )
+    elif imagingmorph_project_path.exists():
+        imagingmorph_project_path.unlink()
 
 
 LIBRARY_INTEGRATION = pypi_library(
     name="PIL",
     project_name="pillow",
     source_mapping={
-        "src/PIL": "Lib/PIL",
-        "src": "pillow_builtin/src",
+        "src/PIL||PIL": "Lib/PIL",
+        "src||.": "pillow_builtin/src",
     },
     materialized_paths=[
-        "Lib/PIL/__init__.py",
-        "Lib/PIL/_version.py",
-        "Lib/PIL/Image.py",
-        "Lib/PIL/ImageFile.py",
-        "Lib/PIL/BmpImagePlugin.py",
-        "Lib/PIL/PngImagePlugin.py",
-        "pillow_builtin/src/_imaging.c",
-        "pillow_builtin/src/_imagingmath.c",
-        "pillow_builtin/src/_imagingmorph.c",
-        "pillow_builtin/src/libImaging/Access.c",
-        "pillow_builtin/src/libImaging/Storage.c",
+        "Lib/PIL",
+        "pillow_builtin/src",
     ],
     python_packages=["PIL"],
     static_library_projects_release_x64=[

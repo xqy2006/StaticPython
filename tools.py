@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 
 WINDOWS_RESERVED_BASENAMES = {
@@ -360,24 +360,52 @@ def download_file(log: Callable[[str], None], url: str, destination: Path, *, fo
     temporary.replace(destination)
 
 
+def validate_source_archive(archive_path: Path) -> None:
+    suffixes = "".join(archive_path.suffixes).lower()
+    if suffixes.endswith(".zip"):
+        with ZipFile(archive_path) as archive:
+            archive_top_level_from_zip(archive)
+            bad_member = archive.testzip()
+            if bad_member is not None:
+                raise RuntimeError(f"corrupt zip archive member: {bad_member}")
+        return
+    if suffixes.endswith((".tar.gz", ".tgz", ".tar")):
+        mode = "r:gz" if suffixes.endswith((".tar.gz", ".tgz")) else "r:"
+        with tarfile.open(archive_path, mode) as archive:
+            archive_top_level_from_tar(archive)
+        return
+
+
+def _cleanup_failed_download(destination: Path) -> None:
+    if destination.exists():
+        destination.unlink()
+    temporary = Path(str(destination) + ".tmp")
+    if temporary.exists():
+        temporary.unlink()
+
+
 def download_first_available(log: Callable[[str], None], urls: list[str], destination: Path) -> str:
     if destination.exists():
-        log(f"using cached download {destination}")
-        return str(destination)
+        try:
+            validate_source_archive(destination)
+        except (BadZipFile, EOFError, OSError, RuntimeError, tarfile.TarError) as exc:
+            log(f"discarding invalid cached download {destination}: {exc}")
+            _cleanup_failed_download(destination)
+        else:
+            log(f"using cached download {destination}")
+            return str(destination)
 
     errors: list[str] = []
     for url in urls:
-        try:
-            download_file(log, url, destination, force=True)
-            return url
-        except (HTTPError, URLError, OSError) as exc:
-            errors.append(f"{url}: {exc}")
-            if destination.exists():
-                destination.unlink()
-            temporary = Path(str(destination) + ".tmp")
-            if temporary.exists():
-                temporary.unlink()
-            log(f"download failed from {url}: {exc}")
+        for attempt in range(1, 3):
+            try:
+                download_file(log, url, destination, force=True)
+                validate_source_archive(destination)
+                return url
+            except (BadZipFile, EOFError, HTTPError, OSError, RuntimeError, tarfile.TarError, URLError) as exc:
+                errors.append(f"{url} (attempt {attempt}/2): {exc}")
+                _cleanup_failed_download(destination)
+                log(f"download failed from {url} on attempt {attempt}/2: {exc}")
     raise RuntimeError("all download sources failed:\n" + "\n".join(errors))
 
 

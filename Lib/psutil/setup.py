@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from libs import pypi_library, source_path, write_source_text
+from libs import pypi_library, source_path, transform_source_text, write_source_text
 
 
 PSUTIL_WINDOWS_PROJECT_GUID = "{3B30BB3F-D913-48A8-AB4D-88CB41369C1D}"
@@ -79,26 +79,90 @@ def _render_psutil_windows_project(source_files: list[str], psutil_version: int)
 
 
 def _parse_psutil_version(context) -> int:
-    init_py = source_path(context, "Lib/psutil/__init__.py")
-    for line in init_py.read_text(encoding="utf-8").splitlines():
-        if line.startswith("__version__"):
-            version = ast.literal_eval(line.split("=", 1)[1].strip())
-            return int(version.replace(".", ""))
-    raise RuntimeError(f"could not find psutil __version__ in {init_py}")
+    candidates = [
+        source_path(context, "Lib/psutil/__init__.py"),
+        source_path(context, "Lib/psutil/psutil.py"),
+    ]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        for line in candidate.read_text(encoding="utf-8").splitlines():
+            if line.startswith("__version__"):
+                version = ast.literal_eval(line.split("=", 1)[1].strip())
+                return int(version.replace(".", ""))
+    if source_path(context, "Lib/psutil/_psutil_mswindows.c").exists():
+        return 11
+    searched = ", ".join(str(path) for path in candidates)
+    raise RuntimeError(f"could not find psutil __version__ in {searched}")
 
 
 def _discover_psutil_windows_sources(context) -> list[str]:
     root = source_path(context, "Lib/psutil")
     source_files = [path.relative_to(root).as_posix() for path in sorted((root / "arch" / "all").glob("*.c"))]
-    source_files.append("_psutil_windows.c")
-    source_files.extend(path.relative_to(root).as_posix() for path in sorted((root / "arch" / "windows").glob("*.c")))
+    if (root / "_psutil_windows.c").exists():
+        source_files.append("_psutil_windows.c")
+        source_files.extend(path.relative_to(root).as_posix() for path in sorted((root / "arch" / "windows").glob("*.c")))
+    elif (root / "_psutil_mswindows.c").exists():
+        legacy_support_sources = []
+        if (root / "_psutil_common.c").exists():
+            legacy_support_sources.append("_psutil_common.c")
+        source_files.extend(
+            [
+                "_psutil_mswindows.c",
+                *legacy_support_sources,
+                *[
+                    path.relative_to(root).as_posix()
+                    for path in sorted((root / "arch" / "mswindows").glob("*.c"))
+                ],
+            ]
+        )
+    else:
+        raise RuntimeError("psutil source files are missing: _psutil_windows.c or _psutil_mswindows.c")
     missing = [name for name in source_files if not (root / name).exists()]
     if missing:
         raise RuntimeError("psutil source files are missing: " + ", ".join(missing))
     return source_files
 
 
+def _patch_legacy_psutil_windows_names(context) -> None:
+    root = source_path(context, "Lib/psutil")
+    if not (root / "_psutil_mswindows.c").exists():
+        return
+    legacy_header = root / "_psutil_mswindows.h"
+    if legacy_header.exists() and not (root / "_psutil_windows.h").exists():
+        write_source_text(
+            context,
+            "Lib/psutil/_psutil_windows.h",
+            legacy_header.read_text(encoding="utf-8").replace("_psutil_mswindows", "_psutil_windows").replace(
+                "psutil_mswindows",
+                "psutil_windows",
+            ),
+        )
+
+    def patch_c(text: str) -> str:
+        updated = text.replace("_psutil_mswindows", "_psutil_windows").replace(
+            "psutil_mswindows",
+            "psutil_windows",
+        )
+        if "_psutil_mswindows" in updated or "psutil_mswindows" in updated:
+            raise RuntimeError("psutil legacy Windows C module rename anchor not patched")
+        return updated
+
+    def patch_py(text: str) -> str:
+        updated = text.replace("import _psutil_mswindows", "from psutil import _psutil_windows").replace(
+            "from _psutil_mswindows import",
+            "from psutil._psutil_windows import",
+        ).replace("_psutil_mswindows", "_psutil_windows")
+        if "_psutil_mswindows" in updated:
+            raise RuntimeError("psutil legacy Windows Python module rename anchor not patched")
+        return updated
+
+    transform_source_text(context, "Lib/psutil/_psutil_mswindows.c", patch_c)
+    transform_source_text(context, "Lib/psutil/_psmswindows.py", patch_py)
+
+
 def prepare_psutil_windows_project(context) -> None:
+    _patch_legacy_psutil_windows_names(context)
     write_source_text(
         context,
         "PCbuild/psutil._psutil_windows.vcxproj",

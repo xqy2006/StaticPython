@@ -69,7 +69,7 @@ def prepare_markupsafe_speedups_project(context) -> None:
 LIBRARY_INTEGRATION = pypi_library(
     name="markupsafe",
     source_mapping={
-        "src/markupsafe": "Lib/markupsafe",
+        "markupsafe||src/markupsafe": "Lib/markupsafe",
     },
     python_packages=["markupsafe"],
     static_library_projects_release_x64=["markupsafe._speedups.vcxproj"],

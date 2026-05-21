@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 
-from libs import replace_text_once, simple_library, source_path, transform_source_text, write_source_text
+from libs import replace_function_block_once, replace_regex_once, simple_library, source_path, transform_source_text, write_source_text
 
 
 def embed_nbformat_schemas(context) -> None:
@@ -20,37 +22,132 @@ def embed_nbformat_schemas(context) -> None:
     )
 
     def patch_validator(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "from .warnings import DuplicateCellId, MissingIDFieldWarning\n",
-            "from .warnings import DuplicateCellId, MissingIDFieldWarning\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n",
-            label="nbformat static schema import",
-        )
-        return replace_text_once(
-            text,
-            (
-                '    with Path(schema_path).open(encoding="utf8") as f:\n'
-                "        schema_json = json.load(f)\n"
-                "    return schema_json  # noqa: RET504\n"
-            ),
-            (
-                "    schema_name = Path(schema_path).name\n"
+        if "from ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n" not in text:
+            if "from .warnings import DuplicateCellId, MissingIDFieldWarning\n" in text:
+                text = text.replace(
+                    "from .warnings import DuplicateCellId, MissingIDFieldWarning\n",
+                    "from .warnings import DuplicateCellId, MissingIDFieldWarning\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n",
+                    1,
+                )
+            elif "from ipython_genutils.importstring import import_item\n" in text:
+                text = text.replace(
+                    "from ipython_genutils.importstring import import_item\n",
+                    "from ipython_genutils.importstring import import_item\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n",
+                    1,
+                )
+            elif "from .reader import get_version\n" in text:
+                text = text.replace(
+                    "from .reader import get_version\n",
+                    "from .reader import get_version\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n",
+                    1,
+                )
+            elif "import os\n" in text:
+                text = text.replace(
+                    "import os\n",
+                    "import os\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n",
+                    1,
+                )
+            elif "import json\n" in text:
+                text = text.replace(
+                    "import json\n",
+                    "import json\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n",
+                    1,
+                )
+            else:
+                if "_get_schema_json" in text or "schema_path" in text:
+                    raise RuntimeError("nbformat static schema import anchor not found")
+                return text
+        if re.search(r"(?m)^import os(?:\s|$)", text) is None:
+            if "import json\n" in text:
+                text = text.replace("import json\n", "import json\nimport os\n", 1)
+            elif "import warnings\n" in text:
+                text = text.replace("import warnings\n", "import warnings\nimport os\n", 1)
+            elif "from pathlib import Path\n" in text:
+                text = text.replace("from pathlib import Path\n", "import os\nfrom pathlib import Path\n", 1)
+        if "from copy import deepcopy\n" not in text:
+            if "import warnings\n" in text:
+                text = text.replace("import warnings\n", "import warnings\nfrom copy import deepcopy\n", 1)
+            elif "import json\n" in text:
+                text = text.replace("import json\n", "import json\nfrom copy import deepcopy\n", 1)
+        if "schema_name = os.path.basename(schema_path)" in text:
+            return text
+        if "def _get_schema_json(" in text:
+            return replace_function_block_once(
+                text,
+                "_get_schema_json",
+                "def _get_schema_json(v, version=None, version_minor=None):\n"
+                "    \"\"\"\n"
+                "    Gets the json schema from a given imported library and nbformat version.\n"
+                "    \"\"\"\n"
+                "    if (version, version_minor) in v.nbformat_schema:\n"
+                "        schema_path = os.path.join(\n"
+                "            os.path.dirname(v.__file__), v.nbformat_schema[(version, version_minor)]\n"
+                "        )\n"
+                "    elif version_minor > v.nbformat_minor:\n"
+                "        schema_path = os.path.join(\n"
+                "            os.path.dirname(v.__file__), v.nbformat_schema[(None, None)]\n"
+                "        )\n"
+                "    else:\n"
+                "        msg = \"Cannot find appropriate nbformat schema file.\"\n"
+                "        raise AttributeError(msg)\n"
+                "    schema_name = os.path.basename(schema_path)\n"
                 "    if schema_name in _STATICPYTHON_SCHEMAS:\n"
                 "        return deepcopy(_STATICPYTHON_SCHEMAS[schema_name])\n"
-                '    with Path(schema_path).open(encoding="utf8") as f:\n'
+                "    with open(schema_path, encoding='utf-8') as f:\n"
                 "        schema_json = json.load(f)\n"
-                "    return schema_json  # noqa: RET504\n"
-            ),
+                "    return schema_json\n\n",
+                label="nbformat schema loader",
+                next_name="isvalid",
+            )
+        return replace_regex_once(
+            text,
+            r"(?m)^(?P<indent>[ \t]+)with (?P<open_stmt>open\(schema_path\)|Path\(schema_path\)\.open\(encoding=[\"']utf8[\"']\)) as f:\n(?P=indent)    schema_json = json\.load\(f\)\n",
+            "\\g<indent>schema_name = os.path.basename(schema_path)\n"
+            "\\g<indent>if schema_name in _STATICPYTHON_SCHEMAS:\n"
+            "\\g<indent>    schema_json = deepcopy(_STATICPYTHON_SCHEMAS[schema_name])\n"
+            "\\g<indent>else:\n"
+            "\\g<indent>    with \\g<open_stmt> as f:\n"
+            "\\g<indent>        schema_json = json.load(f)\n",
             label="nbformat schema loader",
         )
 
     def patch_version(text: str) -> str:
-        return replace_text_once(
+        if "PackageNotFoundError" in text:
+            return text
+        if "version(" not in text or "__version__" not in text:
+            return text
+
+        import_count = 0
+
+        def patch_import(match: re.Match[str]) -> str:
+            nonlocal import_count
+            names = match.group("names")
+            if "version" not in names:
+                return match.group(0)
+            import_count += 1
+            return f"{match.group('indent')}{match.group('prefix')}PackageNotFoundError, {names}{match.group('comment') or ''}"
+
+        text = re.sub(
+            r"(?m)^(?P<indent>[ \t]*)(?P<prefix>from importlib(?:\.metadata|_metadata) import )(?P<names>[^\n#]+?)(?P<comment>\s*#.*)?$",
+            patch_import,
             text,
-            'import re\nfrom importlib.metadata import version\n\n__version__ = version("nbformat") or "0.0.0"\n',
-            'import re\nfrom importlib.metadata import PackageNotFoundError, version\n\ntry:\n    __version__ = version("nbformat")\nexcept PackageNotFoundError:\n    __version__ = "0.0.0"\n',
-            label="nbformat version fallback",
         )
+        if import_count == 0:
+            if "__version__" in text and "version(" in text:
+                raise RuntimeError("nbformat version metadata import anchor not found")
+            return text
+
+        updated, count = re.subn(
+            r'(?m)^__version__(?P<annotation>\s*:\s*[^=]+)?\s*=\s*version\((?P<arg>.+?)\)(?: or [\'"]0\.0\.0[\'"])?(?P<comment>\s*#.*)?\n',
+            'try:\n    __version__ = version(\\g<arg>)\nexcept PackageNotFoundError:\n    __version__ = "0.0.0"\n',
+            text,
+            count=1,
+        )
+        if count != 1:
+            if "__version__" in text and "version(" in text:
+                raise RuntimeError("nbformat version metadata anchor not found")
+            return text
+        return updated
 
     transform_source_text(context, "Lib/nbformat/validator.py", patch_validator)
     transform_source_text(context, "Lib/nbformat/_version.py", patch_version)

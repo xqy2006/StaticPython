@@ -2,12 +2,45 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 
 from libs import pypi_library, source_path, write_source_text
 
 
+def _collect_schema_map(schema_root: Path) -> dict[str, dict]:
+    schemas: dict[str, dict] = {}
+    if not schema_root.exists():
+        return schemas
+    for schema_path in sorted(schema_root.rglob("*.json")):
+        if schema_path.name == "package.json.orig":
+            continue
+        rel_path = schema_path.relative_to(schema_root)
+        package_dir = rel_path.parent.as_posix()
+        plugin = schema_path.stem
+        schema_name = f"{package_dir}:{plugin}" if package_dir != "." else plugin
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        version = "N/A"
+        package_json = schema_path.parent / "package.json.orig"
+        if package_json.exists():
+            version = json.loads(package_json.read_text(encoding="utf-8")).get("version", "N/A")
+        schemas[schema_name] = {"schema": schema, "version": version}
+    return schemas
+
+
+def _supports_server_extension(package_root: Path) -> bool:
+    init_path = package_root / "__init__.py"
+    if not init_path.exists():
+        return False
+    init_text = init_path.read_text(encoding="utf-8")
+    if "_jupyter_server_extension_paths" in init_text or "_jupyter_server_extension_points" in init_text:
+        return True
+    return (package_root / "app.py").exists()
+
+
 def embed_notebook_resources(context) -> None:
     package_root = source_path(context, "Lib/notebook")
+    has_labextension = (package_root / "labextension").exists()
+    has_static = (package_root / "static").exists()
     templates = {
         path.name: path.read_text(encoding="utf-8")
         for path in sorted((package_root / "templates").glob("*.html"))
@@ -16,27 +49,23 @@ def embed_notebook_resources(context) -> None:
         path.relative_to(package_root).as_posix(): base64.b64encode(path.read_bytes()).decode("ascii")
         for root_name in ("static", "labextension")
         for path in sorted((package_root / root_name).rglob("*"))
-        if path.is_file()
+        if (package_root / root_name).exists() and path.is_file()
     }
-    labextension_package = json.loads((package_root / "labextension" / "package.json").read_text(encoding="utf-8"))
-    labextension_schemas: dict[str, dict] = {}
-    for schema_path in sorted((package_root / "labextension" / "schemas").rglob("*.json")):
-        if schema_path.name == "package.json.orig":
-            continue
-        rel_path = schema_path.relative_to(package_root / "labextension" / "schemas")
-        package_dir = rel_path.parent.as_posix()
-        plugin = schema_path.stem
-        schema_name = f"{package_dir}:{plugin}"
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        version = "N/A"
-        package_json = schema_path.parent / "package.json.orig"
-        if package_json.exists():
-            version = json.loads(package_json.read_text(encoding="utf-8")).get("version", "N/A")
-        labextension_schemas[schema_name] = {"schema": schema, "version": version}
-    if "tree.html" not in templates or "static/bundle.js" not in byte_resources:
+    labextension_package = (
+        json.loads((package_root / "labextension" / "package.json").read_text(encoding="utf-8"))
+        if has_labextension and (package_root / "labextension" / "package.json").exists()
+        else {}
+    )
+    labextension_schemas = _collect_schema_map(package_root / "labextension" / "schemas")
+    notebook_schemas = _collect_schema_map(package_root / "schemas")
+    if "tree.html" not in templates or (has_static and not any(key.startswith("static/") for key in byte_resources)):
         raise RuntimeError("expected Notebook templates/static resources were not materialized")
-    if "labextension/package.json" not in byte_resources:
+    if has_labextension and "labextension/package.json" not in byte_resources:
         raise RuntimeError("expected Notebook labextension resources were not materialized")
+    if (package_root / "schemas").exists() and not notebook_schemas:
+        raise RuntimeError("expected Notebook package schemas were not materialized")
+    if has_labextension and (package_root / "labextension" / "schemas").exists() and not labextension_schemas:
+        raise RuntimeError("expected Notebook labextension schemas were not materialized")
 
     write_source_text(
         context,
@@ -45,19 +74,56 @@ def embed_notebook_resources(context) -> None:
         "import base64\n\n"
         f"TEMPLATES = {templates!r}\n"
         f"BYTE_RESOURCES = {byte_resources!r}\n"
+        f"NOTEBOOK_SCHEMAS = {notebook_schemas!r}\n"
         f"LABEXTENSION_PACKAGE = {labextension_package!r}\n"
         f"LABEXTENSION_SCHEMAS = {labextension_schemas!r}\n"
-        "FEDERATED_EXTENSIONS = [\n"
-        "    {\n"
-        "        \"package\": LABEXTENSION_PACKAGE,\n"
-        "        \"ext_dir\": \"staticpython-resource://notebook/labextension\",\n"
-        "        \"ext_path\": \"staticpython-resource://notebook/labextension\",\n"
-        "    }\n"
-        "]\n\n"
+        "FEDERATED_EXTENSIONS = []\n"
+        "if LABEXTENSION_PACKAGE:\n"
+        "    FEDERATED_EXTENSIONS = [\n"
+        "        {\n"
+        "            \"package\": LABEXTENSION_PACKAGE,\n"
+        "            \"ext_dir\": \"staticpython-resource://notebook/labextension\",\n"
+        "            \"ext_path\": \"staticpython-resource://notebook/labextension\",\n"
+        "        }\n"
+        "    ]\n\n"
         "def resource_bytes(path: str) -> bytes | None:\n"
         "    data = BYTE_RESOURCES.get(path.replace('\\\\', '/'))\n"
         "    return None if data is None else base64.b64decode(data)\n",
     )
+    if _supports_server_extension(package_root):
+        write_source_text(
+            context,
+            "etc/jupyter/jupyter_server_config.d/notebook.json",
+            json.dumps(
+                {
+                    "ServerApp": {
+                        "jpserver_extensions": {
+                            "notebook": True,
+                        }
+                    }
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+    else:
+        write_source_text(
+            context,
+            "etc/jupyter/jupyter_notebook_config.d/notebook.json",
+            json.dumps(
+                {
+                    "NotebookApp": {
+                        "nbserver_extensions": {
+                            "notebook": True,
+                        }
+                    }
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
 
 
 LIBRARY_INTEGRATION = pypi_library(
@@ -65,23 +131,13 @@ LIBRARY_INTEGRATION = pypi_library(
     release_version="7.0.8",
     source_mapping={
         "notebook": "Lib/notebook",
-        "notebook/labextension": "share/jupyter/labextensions/@jupyter-notebook/lab-extension",
-        "jupyter-config/jupyter_server_config.d/notebook.json": "etc/jupyter/jupyter_server_config.d/notebook.json",
     },
     cleanup_paths=[
-        "etc/jupyter/jupyter_server_config.d/notebook",
+        "etc/jupyter/jupyter_server_config.d/notebook.json",
+        "etc/jupyter/jupyter_notebook_config.d/notebook.json",
     ],
     materialized_paths=[
-        "Lib/notebook/templates/error.html",
-        "Lib/notebook/templates/consoles.html",
-        "Lib/notebook/templates/edit.html",
-        "Lib/notebook/templates/notebooks.html",
-        "Lib/notebook/templates/terminals.html",
-        "Lib/notebook/templates/tree.html",
-        "Lib/notebook/static/bundle.js",
         "Lib/notebook/_staticpython_resources.py",
-        "share/jupyter/labextensions/@jupyter-notebook/lab-extension/package.json",
-        "etc/jupyter/jupyter_server_config.d/notebook.json",
     ],
     python_packages=["notebook"],
     post_patch_hooks=[embed_notebook_resources],

@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 from packaging.version import Version
 
@@ -127,6 +127,14 @@ WINDOWS_SYSTEM_LIBRARY_NAMES = {
     "winspool.lib",
     "ws2_32.lib",
 }
+WINDOWS_SDK_LIBRARY_NAMES = {
+    "imm32.lib",
+    "msimg32.lib",
+    "netapi32.lib",
+    "oleacc.lib",
+    "setupapi.lib",
+    "windowscodecs.lib",
+}
 
 ET.register_namespace("", MSBUILD_NS)
 
@@ -206,6 +214,10 @@ def is_windows_system_library(library_name: str) -> bool:
     return normalize_library_name(library_name) in WINDOWS_SYSTEM_LIBRARY_NAMES
 
 
+def is_windows_sdk_library(library_name: str) -> bool:
+    return normalize_library_name(library_name) in WINDOWS_SDK_LIBRARY_NAMES
+
+
 def is_python_host_library(library_name: str) -> bool:
     stem = Path(normalize_library_name(library_name)).stem
     return stem in {"python", "python3", "pythoncore"} or re.fullmatch(r"python\d{2,3}", stem) is not None
@@ -217,6 +229,7 @@ def is_packaged_static_library(library_name: str) -> bool:
         normalized.endswith(".lib")
         and normalized != "%(additionaldependencies)"
         and not is_windows_system_library(normalized)
+        and not is_windows_sdk_library(normalized)
         and not is_python_host_library(normalized)
     )
 
@@ -310,10 +323,24 @@ def iter_builtin_module_registrations(source_root: Path, manifest: dict, integra
     integration_candidates = collect_builtin_module_registrations(integrations)
 
     available_projects = {Path(project).stem for project in iter_static_library_projects(source_root, manifest, integrations)}
+    available_libraries = {
+        Path(library).stem
+        for library in [
+            *iter_python_link_dependencies(source_root, manifest, integrations),
+            *iter_python_link_wholearchive_libraries(source_root, manifest, integrations),
+        ]
+    }
+
+    def builtin_is_available(builtin: dict) -> bool:
+        library = builtin.get("library")
+        if library and Path(library).stem in available_libraries:
+            return True
+        return builtin["name"] in available_projects or builtin["name"] in available_libraries
+
     filtered = []
     seen: set[str] = set()
     for builtin in manifest_candidates:
-        if builtin["name"] in available_projects:
+        if builtin_is_available(builtin):
             filtered.append(builtin)
             seen.add(builtin["name"])
         else:
@@ -323,6 +350,12 @@ def iter_builtin_module_registrations(source_root: Path, manifest: dict, integra
             )
     for builtin in integration_candidates:
         if builtin["name"] in seen:
+            continue
+        if not builtin_is_available(builtin):
+            log(
+                f"skip builtin registration {builtin['name']} because the corresponding integration project is unavailable "
+                "in this CPython version"
+            )
             continue
         filtered.append(builtin)
         seen.add(builtin["name"])
@@ -787,11 +820,16 @@ def resolve_static_lib_sdk_records(
     library_index = index_library_files(source_root, platform)
     records: list[dict] = []
     missing: list[str] = []
+    skipped_link_only: list[str] = []
 
     for spec in collect_static_lib_sdk_library_specs(source_root, platform, manifest, integrations):
         logical_name = spec["logical_name"]
         candidates = library_index.get(logical_name, [])
         if not candidates:
+            reasons = set(spec["reasons"])
+            if reasons.issubset({"link_dependency", "wholearchive"}):
+                skipped_link_only.append(logical_name)
+                continue
             missing.append(logical_name)
             continue
         source_path = candidates[0]
@@ -804,6 +842,14 @@ def resolve_static_lib_sdk_records(
                 "reasons": list(spec["reasons"]),
                 "source_path": source_path,
             }
+        )
+
+    if skipped_link_only:
+        preview = ", ".join(skipped_link_only[:12])
+        suffix = " ..." if len(skipped_link_only) > 12 else ""
+        log(
+            "skip static library SDK export for unresolved link-only libraries that do not have packaged build "
+            f"artifacts: {preview}{suffix}"
         )
 
     if missing:
@@ -2474,24 +2520,52 @@ def download_file(url: str, destination: Path, *, force: bool = False) -> None:
     temporary.replace(destination)
 
 
+def validate_source_archive(archive_path: Path) -> None:
+    suffixes = "".join(archive_path.suffixes).lower()
+    if suffixes.endswith(".zip"):
+        with ZipFile(archive_path) as archive:
+            archive_top_level_from_zip(archive)
+            bad_member = archive.testzip()
+            if bad_member is not None:
+                raise RuntimeError(f"corrupt zip archive member: {bad_member}")
+        return
+    if suffixes.endswith((".tar.gz", ".tgz", ".tar")):
+        mode = "r:gz" if suffixes.endswith((".tar.gz", ".tgz")) else "r:"
+        with tarfile.open(archive_path, mode) as archive:
+            archive_top_level_from_tar(archive)
+        return
+
+
+def _cleanup_failed_download(destination: Path) -> None:
+    if destination.exists():
+        destination.unlink()
+    temporary = Path(str(destination) + ".tmp")
+    if temporary.exists():
+        temporary.unlink()
+
+
 def download_first_available(urls: list[str], destination: Path) -> str:
     if destination.exists():
-        log(f"using cached download {destination}")
-        return str(destination)
+        try:
+            validate_source_archive(destination)
+        except (BadZipFile, EOFError, OSError, RuntimeError, tarfile.TarError) as exc:
+            log(f"discarding invalid cached download {destination}: {exc}")
+            _cleanup_failed_download(destination)
+        else:
+            log(f"using cached download {destination}")
+            return str(destination)
 
     errors: list[str] = []
     for url in urls:
-        try:
-            download_file(url, destination, force=True)
-            return url
-        except (HTTPError, URLError, OSError) as exc:
-            errors.append(f"{url}: {exc}")
-            if destination.exists():
-                destination.unlink()
-            temporary = Path(str(destination) + ".tmp")
-            if temporary.exists():
-                temporary.unlink()
-            log(f"download failed from {url}: {exc}")
+        for attempt in range(1, 3):
+            try:
+                download_file(url, destination, force=True)
+                validate_source_archive(destination)
+                return url
+            except (BadZipFile, EOFError, HTTPError, OSError, RuntimeError, tarfile.TarError, URLError) as exc:
+                errors.append(f"{url} (attempt {attempt}/2): {exc}")
+                _cleanup_failed_download(destination)
+                log(f"download failed from {url} on attempt {attempt}/2: {exc}")
     raise RuntimeError("all download sources failed:\n" + "\n".join(errors))
 
 

@@ -1,9 +1,30 @@
 import json
+import re
 
-from libs import simple_library, source_path, transform_source_text, write_source_text
+from libs import (
+    replace_function_block_once,
+    replace_regex_once,
+    simple_library,
+    source_path,
+    transform_source_text,
+    write_source_text,
+)
 
 
-def embed_jupyter_lsp_schema(context) -> None:
+def _set_jupyter_lsp_materialized_paths(context) -> None:
+    integration = LIBRARY_INTEGRATION
+    paths = ["Lib/jupyter_lsp"]
+    optional_if_exists = [
+        "Lib/jupyter_lsp/schema/schema.json",
+        "Lib/jupyter_lsp/schema/_staticpython_schema.py",
+        "Lib/jupyter_lsp/specs/config/_staticpython_config_schemas.py",
+        "Lib/jupyter_lsp/_staticpython_spec_fallback.py",
+    ]
+    paths.extend(path for path in optional_if_exists if source_path(context, path).exists())
+    integration.materialized_paths = list(dict.fromkeys(paths))
+
+
+def _embed_modern_jupyter_lsp_schema(context) -> None:
     schema_path = source_path(context, "Lib/jupyter_lsp/schema/schema.json")
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     config_dir = source_path(context, "Lib/jupyter_lsp/specs/config")
@@ -26,42 +47,42 @@ def embed_jupyter_lsp_schema(context) -> None:
     )
 
     def patch_schema_init(text: str) -> str:
-        return text.replace(
-            "import json\n"
-            "import pathlib\n"
-            "\n"
-            "import jsonschema\n"
-            "\n"
-            "HERE = pathlib.Path(__file__).parent\n"
-            "SCHEMA_FILE = HERE / \"schema.json\"\n"
-            "SCHEMA = json.loads(SCHEMA_FILE.read_text(encoding=\"utf-8\"))\n",
+        if "from ._staticpython_schema import SCHEMA\n" in text:
+            return text
+        updated, count = re.subn(
+            r"(?ms)^import json\n"
+            r"import pathlib\n"
+            r"\n"
+            r"import jsonschema\n"
+            r"\n"
+            r"HERE = pathlib\.Path\(__file__\)\.parent\n"
+            r"SCHEMA_FILE = HERE / \"schema\.json\"\n"
+            r"SCHEMA = json\.loads\(SCHEMA_FILE\.read_text\((?:encoding=\"utf-8\")?\)\)\n",
             "import jsonschema\n\nfrom ._staticpython_schema import SCHEMA\n",
-            1,
+            text,
+            count=1,
         )
+        if count == 1:
+            return updated
+        if "SCHEMA_FILE" in text and "SCHEMA_FILE.read_text" in text:
+            raise RuntimeError("jupyter_lsp modern schema loader anchor not found")
+        return text
 
     transform_source_text(context, "Lib/jupyter_lsp/schema/__init__.py", patch_schema_init)
 
     def patch_config_init(text: str) -> str:
-        return text.replace(
-            "import json\n"
-            "import pathlib\n"
-            "\n"
-            "CONFIGS = pathlib.Path(__file__).parent\n"
-            "\n"
-            "\n"
-            "def load_config_schema(key):\n"
-            "    \"\"\"load a keyed filename\"\"\"\n"
-            "    return json.loads(\n"
-            "        (CONFIGS / \"{}.schema.json\".format(key)).read_text(encoding=\"utf-8\")\n"
-            "    )\n",
-            "import json\n"
-            "import pathlib\n"
-            "\n"
-            "from ._staticpython_config_schemas import CONFIG_SCHEMAS\n"
-            "\n"
-            "CONFIGS = pathlib.Path(__file__).parent\n"
-            "\n"
-            "\n"
+        if "CONFIG_SCHEMAS.get(key)" in text:
+            return text
+        if "from ._staticpython_config_schemas import CONFIG_SCHEMAS\n" not in text:
+            text = replace_regex_once(
+                text,
+                r"(?m)^import pathlib\n",
+                "import pathlib\n\nfrom ._staticpython_config_schemas import CONFIG_SCHEMAS\n",
+                label="jupyter_lsp config schema static import",
+            )
+        updated = replace_function_block_once(
+            text,
+            "load_config_schema",
             "def load_config_schema(key):\n"
             "    \"\"\"load a keyed filename\"\"\"\n"
             "    schema = CONFIG_SCHEMAS.get(key)\n"
@@ -70,20 +91,128 @@ def embed_jupyter_lsp_schema(context) -> None:
             "    return json.loads(\n"
             "        (CONFIGS / \"{}.schema.json\".format(key)).read_text(encoding=\"utf-8\")\n"
             "    )\n",
-            1,
+            label="jupyter_lsp config schema loader",
         )
+        if "(CONFIGS / \"{}.schema.json\".format(key)).read_text" in updated and "CONFIG_SCHEMAS.get(key)" not in updated:
+            raise RuntimeError("jupyter_lsp config schema loader anchor not found")
+        return updated
 
     transform_source_text(context, "Lib/jupyter_lsp/specs/config/__init__.py", patch_config_init)
+
+
+def _embed_legacy_jupyter_lsp_specs(context) -> None:
+    specs_dir = source_path(context, "Lib/jupyter_lsp/specs")
+    if not specs_dir.exists():
+        return
+
+    modules: list[str] = []
+    for path in sorted(specs_dir.glob("*.py")):
+        if path.name in {"__init__.py", "utils.py"}:
+            continue
+        modules.append(path.stem)
+
+    if not modules:
+        return
+
+    write_source_text(
+        context,
+        "Lib/jupyter_lsp/_staticpython_spec_fallback.py",
+        "# Generated by StaticPython; keeps built-in jupyter-lsp specs available after freezing.\n"
+        f"SPEC_MODULES = {modules!r}\n",
+    )
+
+    def patch_manager(text: str) -> str:
+        if "_STATICPYTHON_SPEC_MODULES" not in text:
+            text = replace_regex_once(
+                text,
+                r"(?m)^from \.types import KeyedLanguageServerSpecs, LanguageServerManagerAPI, SpecMaker\n",
+                "from .types import KeyedLanguageServerSpecs, LanguageServerManagerAPI, SpecMaker\n"
+                "from ._staticpython_spec_fallback import SPEC_MODULES as _STATICPYTHON_SPEC_MODULES\n",
+                label="jupyter_lsp legacy spec fallback import",
+            )
+        if "def _staticpython_builtin_language_servers" not in text:
+            text = replace_regex_once(
+                text,
+                r"(?m)^class LanguageServerManager\(LanguageServerManagerAPI\):\n",
+                "def _staticpython_builtin_language_servers(manager):\n"
+                "    builtins = {}\n"
+                "    for module_name in _STATICPYTHON_SPEC_MODULES:\n"
+                "        try:\n"
+                "            module = __import__(f\"jupyter_lsp.specs.{module_name}\", fromlist=[\"*\"])\n"
+                "        except Exception:\n"
+                "            continue\n"
+                "        for value in vars(module).values():\n"
+                "            if hasattr(value, \"key\") and hasattr(value, \"__call__\"):\n"
+                "                try:\n"
+                "                    builtins.update(value(manager))\n"
+                "                except Exception:\n"
+                "                    continue\n"
+                "    return builtins\n\n"
+                "class LanguageServerManager(LanguageServerManagerAPI):\n",
+                label="jupyter_lsp legacy builtin spec helper",
+            )
+        return replace_function_block_once(
+            text,
+            "_autodetect_language_servers",
+            "    def _autodetect_language_servers(self):\n"
+            "        language_servers = {}\n"
+            "\n"
+            "        try:\n"
+            "            language_servers.update(_staticpython_builtin_language_servers(self))\n"
+            "        except Exception:\n"
+            "            self.log.exception(\"Failed to load built-in language server specs\")\n"
+            "\n"
+            "        entry_points = []\n"
+            "\n"
+            "        try:\n"
+            "            entry_points = list(pkg_resources.iter_entry_points(EP_SPEC_V0))\n"
+            "        except Exception:  # pragma: no cover\n"
+            "            self.log.exception(\"Failed to load entry_points\")\n"
+            "\n"
+            "        for ep in entry_points:\n"
+            "            try:\n"
+            "                spec_finder = ep.load()  # type: SpecMaker\n"
+            "            except Exception as err:  # pragma: no cover\n"
+            "                self.log.warn(\n"
+            "                    _(\"Failed to load language server spec finder `{}`: \\n{}\").format(\n"
+            "                        ep.name, err\n"
+            "                    )\n"
+            "                )\n"
+            "                continue\n"
+            "\n"
+            "            try:\n"
+            "                for key, spec in spec_finder(self).items():\n"
+            "                    language_servers[key] = spec\n"
+            "            except Exception as err:  # pragma: no cover\n"
+            "                self.log.warning(\n"
+            "                    _(\n"
+            "                        \"Failed to fetch commands from language server spec finder\"\n"
+            "                        \"`{}`:\\n{}\"\n"
+            "                    ).format(ep.name, err)\n"
+            "                )\n"
+            "                continue\n"
+            "\n"
+            "        for key, spec in language_servers.items():\n"
+            "            yield key, spec\n\n",
+            label="jupyter_lsp legacy autodetect fallback",
+            next_name=None,
+        )
+
+    transform_source_text(context, "Lib/jupyter_lsp/manager.py", patch_manager)
+
+
+def patch_jupyter_lsp_sources(context) -> None:
+    if source_path(context, "Lib/jupyter_lsp/schema/schema.json").exists():
+        _embed_modern_jupyter_lsp_schema(context)
+    else:
+        _embed_legacy_jupyter_lsp_specs(context)
+    _set_jupyter_lsp_materialized_paths(context)
 
 
 LIBRARY_INTEGRATION = simple_library(
     name="jupyter_lsp",
     project_name="jupyter-lsp",
     overlay_entries=["Lib/jupyter_lsp"],
-    materialized_paths=[
-        "Lib/jupyter_lsp/schema/schema.json",
-        "Lib/jupyter_lsp/schema/_staticpython_schema.py",
-        "Lib/jupyter_lsp/specs/config/_staticpython_config_schemas.py",
-    ],
-    post_patch_hooks=[embed_jupyter_lsp_schema],
+    materialized_paths=["Lib/jupyter_lsp"],
+    post_patch_hooks=[patch_jupyter_lsp_sources],
 )

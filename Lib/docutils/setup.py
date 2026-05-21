@@ -5,12 +5,14 @@ from libs import simple_library, source_path, transform_source_text, write_sourc
 
 def embed_docutils_resources(context) -> None:
     package_root = source_path(context, "Lib/docutils")
+    if not source_path(context, "Lib/docutils/writers/_html_base.py").exists():
+        return
     resources = {
         path.relative_to(package_root).as_posix(): path.read_text(encoding="utf-8")
         for path in sorted(package_root.rglob("*"))
         if path.is_file() and path.suffix.lower() in {".txt", ".css", ".tex", ".sty"}
     }
-    if "writers/html5_polyglot/template.txt" not in resources:
+    if not resources:
         raise RuntimeError("expected Docutils HTML5 template was not materialized")
 
     write_source_text(
@@ -23,27 +25,35 @@ def embed_docutils_resources(context) -> None:
     )
 
     def patch_html_base(text: str) -> str:
-        text = text.replace(
-            "import docutils\n",
-            "import docutils\nfrom docutils._staticpython_resources import resource_text as _staticpython_resource_text\n",
-            1,
-        )
-        text = text.replace(
+        if "_staticpython_resource_text" not in text:
+            if "import docutils\n" not in text:
+                raise RuntimeError("docutils static resource import anchor not found")
+            text = text.replace(
+                "import docutils\n",
+                "import docutils\nfrom docutils._staticpython_resources import resource_text as _staticpython_resource_text\n",
+                1,
+            )
+        old_template = (
             "    def apply_template(self) -> str:\n"
             "        template_path = Path(self.document.settings.template)\n"
             "        template = template_path.read_text(encoding='utf-8')\n"
-            "        return template % self.interpolation_dict()\n",
+            "        return template % self.interpolation_dict()\n"
+        )
+        new_template = (
             "    def apply_template(self) -> str:\n"
             "        template_path = Path(self.document.settings.template)\n"
             "        resource_key = template_path.as_posix().split('/docutils/', 1)[-1]\n"
             "        template = _staticpython_resource_text(resource_key)\n"
             "        if template is None:\n"
             "            template = template_path.read_text(encoding='utf-8')\n"
-            "        return template % self.interpolation_dict()\n",
-            1,
+            "        return template % self.interpolation_dict()\n"
         )
-        return text.replace(
-            "                content = Path(path).read_text(encoding='utf-8')\n",
+        if old_template in text:
+            text = text.replace(old_template, new_template, 1)
+        elif "template_path.read_text(encoding='utf-8')" in text and "_staticpython_resource_text(resource_key)" not in text:
+            raise RuntimeError("docutils template resource loader anchor not found")
+        old_stylesheet = "                content = Path(path).read_text(encoding='utf-8')\n"
+        new_stylesheet = (
             "                stylesheet_path = Path(path)\n"
             "                resource_key = stylesheet_path.as_posix().split('/docutils/', 1)[-1]\n"
             "                content = _staticpython_resource_text(resource_key)\n"
@@ -57,9 +67,13 @@ def embed_docutils_resources(context) -> None:
             "                        if content is not None:\n"
             "                            break\n"
             "                if content is None:\n"
-            "                    content = stylesheet_path.read_text(encoding='utf-8')\n",
-            1,
+            "                    content = stylesheet_path.read_text(encoding='utf-8')\n"
         )
+        if old_stylesheet in text:
+            text = text.replace(old_stylesheet, new_stylesheet, 1)
+        elif "Path(path).read_text(encoding='utf-8')" in text:
+            raise RuntimeError("docutils stylesheet resource loader anchor not found")
+        return text
 
     transform_source_text(context, "Lib/docutils/writers/_html_base.py", patch_html_base)
 
@@ -67,6 +81,5 @@ def embed_docutils_resources(context) -> None:
 LIBRARY_INTEGRATION = simple_library(
     name="docutils",
     overlay_entries=["Lib/docutils"],
-    materialized_paths=["Lib/docutils/_staticpython_resources.py"],
     post_patch_hooks=[embed_docutils_resources],
 )

@@ -1,4 +1,14 @@
-from libs import simple_library, source_path, transform_source_text, write_source_text
+import re
+
+from libs import (
+    ensure_text_after,
+    replace_function_block_once,
+    replace_regex_once,
+    simple_library,
+    source_path,
+    transform_first_existing_source_text,
+    write_source_text,
+)
 
 
 def embed_parso_grammars(context) -> None:
@@ -7,8 +17,27 @@ def embed_parso_grammars(context) -> None:
         f"python/{path.name}": path.read_text(encoding="utf-8")
         for path in sorted(grammar_root.glob("grammar*.txt"))
     }
-    if not grammars or "python/grammar313.txt" not in grammars:
+    if not grammars:
         raise RuntimeError("expected Parso grammar files were not materialized")
+    target_key = f"python/grammar{context.version_info[0]}{context.version_info[1]}.txt"
+    if target_key not in grammars:
+        target_value = context.version_info[0] * 100 + context.version_info[1]
+        candidates: list[tuple[int, str]] = []
+        for key in grammars:
+            match = re.search(r"grammar(?P<version>\d+(?:\.\d+)?)\.txt$", key)
+            if match is None:
+                continue
+            version_text = match.group("version")
+            if "." in version_text:
+                major_text, minor_text = version_text.split(".", 1)
+                value = int(major_text) * 100 + int(minor_text)
+            else:
+                value = int(version_text[0]) * 100 + int(version_text[1:] or "0")
+            candidates.append((value, key))
+        if candidates:
+            fallback_candidates = [candidate for candidate in candidates if candidate[0] <= target_value]
+            _, fallback_key = max(fallback_candidates or candidates)
+            grammars[target_key] = grammars[fallback_key]
 
     write_source_text(
         context,
@@ -17,52 +46,196 @@ def embed_parso_grammars(context) -> None:
         f"GRAMMARS = {grammars!r}\n",
     )
 
-    def patch_grammar(text: str) -> str:
-        text = text.replace(
-            "from parso.pgen2 import generate_grammar\n",
-            "from parso.pgen2 import generate_grammar\nfrom parso._staticpython_grammars import GRAMMARS as _STATICPYTHON_GRAMMARS\n",
-            1,
-        )
-        if "_STATICPYTHON_GRAMMARS" not in text:
-            raise RuntimeError("failed to patch Parso static grammar import")
-        return text.replace(
-            "        try:\n"
-            "            with open(path) as f:\n"
-            "                bnf_text = f.read()\n"
-            "\n"
-            "            grammar = PythonGrammar(version_info, bnf_text)\n"
-            "            return _loaded_grammars.setdefault(path, grammar)\n"
-            "        except FileNotFoundError:\n"
-            "            message = \"Python version %s.%s is currently not supported.\" % (\n"
-            "                version_info.major, version_info.minor\n"
-            "            )\n"
-            "            raise NotImplementedError(message)\n",
-            "        try:\n"
-            "            grammar_key = file.replace(os.sep, \"/\")\n"
-            "            bnf_text = _STATICPYTHON_GRAMMARS.get(grammar_key)\n"
-            "            if bnf_text is None:\n"
-            "                with open(path) as f:\n"
-            "                    bnf_text = f.read()\n"
-            "\n"
-            "            grammar = PythonGrammar(version_info, bnf_text)\n"
-            "            return _loaded_grammars.setdefault(path, grammar)\n"
-            "        except FileNotFoundError:\n"
-            "            message = \"Python version %s.%s is currently not supported.\" % (\n"
-            "                version_info.major, version_info.minor\n"
-            "            )\n"
-            "            raise NotImplementedError(message)\n",
-            1,
+    def patch_modern_grammar(text: str) -> str:
+        if "from parso._staticpython_grammars import GRAMMARS as _STATICPYTHON_GRAMMARS\n" not in text:
+            if "from parso.pgen2.pgen import generate_grammar\n" in text:
+                text = ensure_text_after(
+                    text,
+                    "from parso.pgen2.pgen import generate_grammar\n",
+                    "from parso._staticpython_grammars import GRAMMARS as _STATICPYTHON_GRAMMARS\n",
+                    label="Parso static grammar import",
+                )
+            elif "from parso.pgen2 import generate_grammar\n" in text:
+                text = ensure_text_after(
+                    text,
+                    "from parso.pgen2 import generate_grammar\n",
+                    "from parso._staticpython_grammars import GRAMMARS as _STATICPYTHON_GRAMMARS\n",
+                    label="Parso static grammar import",
+                )
+            else:
+                raise RuntimeError("expected anchor not found in Parso static grammar import")
+        return replace_function_block_once(
+            text,
+            "load_grammar",
+            """def load_grammar(**kwargs):
+    \"""
+    Loads a :py:class:`parso.Grammar`. The default version is the current Python
+    version.
+
+    :param str version: A python version string, e.g. ``version='3.3'``.
+    \"""
+    def load_grammar(language='python', version=None):
+        if language == 'python':
+            version_info = parse_version_string(version)
+
+            file = 'python/grammar%s%s.txt' % (version_info.major, version_info.minor)
+
+            global _loaded_grammars
+            path = os.path.join(os.path.dirname(__file__), file)
+            try:
+                return _loaded_grammars[path]
+            except KeyError:
+                try:
+                    grammar_key = file.replace(os.sep, '/')
+                    bnf_text = _STATICPYTHON_GRAMMARS.get(grammar_key)
+                    if bnf_text is None:
+                        with open(path) as f:
+                            bnf_text = f.read()
+
+                    grammar = PythonGrammar(version_info, bnf_text)
+                    return _loaded_grammars.setdefault(path, grammar)
+                except FileNotFoundError:
+                    message = "Python version %s is currently not supported." % version
+                    raise NotImplementedError(message)
+        elif language == 'python-f-string':
+            if version is not None:
+                raise NotImplementedError("Currently different versions are not supported.")
+            return PythonFStringGrammar()
+        else:
+            raise NotImplementedError("No support for language %s." % language)
+
+    return load_grammar(**kwargs)
+""",
+            label="Parso nested load_grammar wrapper",
         )
 
-    transform_source_text(context, "Lib/parso/grammar.py", patch_grammar)
+    def patch_python_init(text: str) -> str:
+        text = ensure_text_after(
+            text,
+            "from parso.cache import parser_cache, load_module, save_module\n",
+            "from parso._staticpython_grammars import GRAMMARS as _STATICPYTHON_GRAMMARS\n",
+            label="Parso legacy static grammar import",
+        )
+        return replace_function_block_once(
+            text,
+            "load_grammar",
+            """def load_grammar(version=None):
+    \"""
+    Loads a Python grammar. The default version is always the latest.
+
+    If you need support for a specific version, please use e.g.
+    `version='3.3'`.
+    \"""
+    if version is None:
+        version = '3.6'
+
+    if version in ('3.2', '3.3'):
+        version = '3.4'
+    elif version == '2.6':
+        version = '2.7'
+
+    file = 'grammar' + version + '.txt'
+
+    global _loaded_grammars
+    path = os.path.join(os.path.dirname(__file__), file)
+    try:
+        return _loaded_grammars[path]
+    except KeyError:
+        try:
+            grammar_key = ('python/' + file).replace(os.sep, '/')
+            bnf_text = _STATICPYTHON_GRAMMARS.get(grammar_key)
+            if bnf_text is None:
+                with open(path) as f:
+                    bnf_text = f.read()
+            grammar = generate_grammar(bnf_text)
+            return _loaded_grammars.setdefault(path, grammar)
+        except FileNotFoundError:
+            # Just load the default if the file does not exist.
+            return load_grammar()
+""",
+            label="Parso legacy load_grammar function",
+        )
+
+    def patch_legacy_grammar_module(text: str) -> str:
+        text = ensure_text_after(
+            text,
+            "from parso.cache import parser_cache, load_module, save_module\n",
+            "from parso._staticpython_grammars import GRAMMARS as _STATICPYTHON_GRAMMARS\n",
+            label="Parso legacy grammar module static import",
+        )
+        return replace_function_block_once(
+            text,
+            "load_python_grammar",
+            """def load_python_grammar(version=None):
+    \"""
+    Loads a Python grammar. The default version is always the latest.
+
+    If you need support for a specific version, please use e.g.
+    `version='3.3'`.
+    \"""
+    if version is None:
+        version = '3.6'
+
+    if version in ('3.2', '3.3'):
+        version = '3.4'
+    elif version == '2.6':
+        version = '2.7'
+
+    file = 'python/grammar' + version + '.txt'
+
+    global _loaded_grammars
+    path = os.path.join(os.path.dirname(__file__), file)
+    try:
+        return _loaded_grammars[path]
+    except KeyError:
+        try:
+            grammar_key = file.replace(os.sep, '/')
+            bnf_text = _STATICPYTHON_GRAMMARS.get(grammar_key)
+            if bnf_text is None:
+                with open(path) as f:
+                    bnf_text = f.read()
+            grammar = create_grammar(bnf_text, parser=PythonParser)
+            return _loaded_grammars.setdefault(path, grammar)
+        except FileNotFoundError:
+            # Just load the default if the file does not exist.
+            return load_python_grammar()
+""",
+            label="Parso legacy load_python_grammar function",
+        )
+
+    legacy_python_init = source_path(context, "Lib/parso/python/__init__.py")
+    grammar_py = source_path(context, "Lib/parso/grammar.py")
+    if legacy_python_init.exists() and not grammar_py.exists():
+        transform_first_existing_source_text(
+            context,
+            ["Lib/parso/python/__init__.py"],
+            patch_python_init,
+        )
+        return
+
+    def patch_detected_grammar(text: str) -> str:
+        if "def load_python_grammar(" in text:
+            return patch_legacy_grammar_module(text)
+        if "def load_grammar(**kwargs):" in text:
+            return patch_modern_grammar(text)
+        if "def load_grammar(*, version:" in text or "def load_grammar(*, version: str = None" in text:
+            return patch_modern_grammar(text)
+        if "from parso.cache import parser_cache, load_module, save_module" in text:
+            return patch_python_init(text)
+        return patch_modern_grammar(text)
+
+    transform_first_existing_source_text(
+        context,
+        ["Lib/parso/grammar.py", "Lib/parso/python/__init__.py"],
+        patch_detected_grammar,
+    )
 
 
 LIBRARY_INTEGRATION = simple_library(
     name="parso",
     overlay_entries=["Lib/parso"],
     materialized_paths=[
-        "Lib/parso/python/grammar313.txt",
-        "Lib/parso/python/grammar314.txt",
+        "Lib/parso",
         "Lib/parso/_staticpython_grammars.py",
     ],
     post_patch_hooks=[embed_parso_grammars],

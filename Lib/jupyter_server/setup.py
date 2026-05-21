@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import base64
+import re
 
 from libs import (
     pypi_library,
+    replace_function_block_once,
+    replace_regex_once,
     replace_text_once,
     source_path,
     transform_source_text,
@@ -13,19 +16,34 @@ from libs import (
 
 def embed_jupyter_server_resources(context) -> None:
     package_root = source_path(context, "Lib/jupyter_server")
-    text_resources = {
-        path.relative_to(package_root / "templates").as_posix(): path.read_text(encoding="utf-8")
-        for path in sorted((package_root / "templates").rglob("*"))
-        if path.is_file()
-    }
+    serverapp_path = package_root / "serverapp.py"
+    extension_application_path = package_root / "extension" / "application.py"
+    base_handlers_path = package_root / "base" / "handlers.py"
+    templates_root = package_root / "templates"
+    if templates_root.exists():
+        text_resources = {
+            path.relative_to(templates_root).as_posix(): path.read_text(encoding="utf-8")
+            for path in sorted(templates_root.rglob("*"))
+            if path.is_file()
+        }
+    else:
+        legacy_template_files = [
+            path
+            for path in sorted(package_root.glob("*.html"))
+            if path.is_file()
+        ]
+        text_resources = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in legacy_template_files
+        }
     byte_resources = {
         path.relative_to(package_root).as_posix(): base64.b64encode(path.read_bytes()).decode("ascii")
         for resource_dir in (package_root / "static", package_root / "event_schemas")
+        if resource_dir.exists()
         for path in sorted(resource_dir.rglob("*"))
         if path.is_file()
     }
-    if "main.html" not in text_resources or "static/style/index.css" not in byte_resources:
-        raise RuntimeError("expected jupyter_server templates/static resources were not materialized")
+    has_event_schema_resources = any(path.startswith("event_schemas/") for path in byte_resources)
 
     write_source_text(
         context,
@@ -38,6 +56,8 @@ def embed_jupyter_server_resources(context) -> None:
         "    data = BYTE_RESOURCES.get(path.replace('\\\\', '/'))\n"
         "    return None if data is None else base64.b64decode(data)\n",
     )
+    if not text_resources and not byte_resources:
+        return
 
     def patch_staticpython_resources(text: str) -> str:
         helper = r'''
@@ -135,57 +155,133 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
     )
 
     def patch_serverapp(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "from jinja2 import Environment, FileSystemLoader\n",
-            "from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader\n"
-            "from jupyter_server._staticpython_resources import resource_text as _staticpython_resource_text\n"
-            "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
-            label="jupyter_server serverapp jinja imports",
-        )
-        text = replace_text_once(
-            text,
-            "        env = Environment(  # noqa[S701]\n"
-            "            loader=FileSystemLoader(template_path), extensions=[\"jinja2.ext.i18n\"], **jenv_opt\n"
-            "        )\n",
-            "        env = Environment(  # noqa[S701]\n"
-            "            loader=ChoiceLoader([\n"
-            "                DictLoader(_staticpython_template_dict_for_package(\"jupyter_server\")),\n"
-            "                FileSystemLoader(template_path),\n"
-            "            ]),\n"
-            "            extensions=[\"jinja2.ext.i18n\"],\n"
-            "            **jenv_opt,\n"
-            "        )\n",
-            label="jupyter_server serverapp embedded template loader",
-        )
-        return replace_text_once(
-            text,
-            "            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
-            "            # Use this pathlib object to register the schema\n"
-            "            self.event_logger.register_event_schema(schema_path)\n",
-            "            schema_text = _staticpython_resource_text(\"jupyter_server\", f\"event_schemas/{rel_schema_path}\")\n"
-            "            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
-            "            self.event_logger.register_event_schema(schema_text if schema_text is not None else schema_path)\n",
-            label="jupyter_server embedded event schema registration",
-        )
+        if "_staticpython_template_dict_for_package" not in text:
+            if "from jinja2 import Environment, FileSystemLoader\n" in text:
+                text = replace_text_once(
+                    text,
+                    "from jinja2 import Environment, FileSystemLoader\n",
+                    "from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader\n"
+                    "from jupyter_server._staticpython_resources import resource_text as _staticpython_resource_text\n"
+                    "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
+                    label="jupyter_server serverapp jinja imports",
+                )
+            else:
+                text = replace_regex_once(
+                    text,
+                    r"(?m)^from jinja2 import ([^\n]+)\n",
+                    "from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader\n"
+                    "from jupyter_server._staticpython_resources import resource_text as _staticpython_resource_text\n"
+                    "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
+                    label="jupyter_server serverapp jinja imports",
+                )
+        if "ChoiceLoader([" not in text and "FileSystemLoader(template_path)" in text:
+            exact_loader_block = (
+                "        env = Environment(  # noqa[S701]\n"
+                "            loader=FileSystemLoader(template_path), extensions=[\"jinja2.ext.i18n\"], **jenv_opt\n"
+                "        )\n"
+            )
+            replacement_loader_block = (
+                "        env = Environment(  # noqa[S701]\n"
+                "            loader=ChoiceLoader([\n"
+                "                DictLoader(_staticpython_template_dict_for_package(\"jupyter_server\")),\n"
+                "                FileSystemLoader(template_path),\n"
+                "            ]),\n"
+                "            extensions=[\"jinja2.ext.i18n\"],\n"
+                "            **jenv_opt,\n"
+                "        )\n"
+            )
+            if exact_loader_block in text:
+                text = replace_text_once(
+                    text,
+                    exact_loader_block,
+                    replacement_loader_block,
+                    label="jupyter_server serverapp embedded template loader",
+                )
+            else:
+                updated, count = re.subn(
+                    r"^        env = Environment\(loader=FileSystemLoader\(template_path\), "
+                    r"extensions=\[['\"]jinja2\.ext\.i18n['\"]\], \*\*jenv_opt\)\n"
+                    r"(?=^        sys_info = get_sys_info\(\)\n)",
+                    replacement_loader_block,
+                    text,
+                    count=1,
+                    flags=re.MULTILINE,
+                )
+                if count:
+                    text = updated
+                else:
+                    updated, count = re.subn(
+                        r"^        env = Environment\([^\n]*\n"
+                        r".*?"
+                        r"^        \)\n"
+                        r"(?=^        sys_info = get_sys_info\(\)\n)",
+                        replacement_loader_block,
+                        text,
+                        count=1,
+                        flags=re.MULTILINE | re.DOTALL,
+                    )
+                    if count:
+                        text = updated
+                    else:
+                        raise RuntimeError("jupyter_server serverapp embedded template loader anchor not found")
+        if (
+            has_event_schema_resources
+            and "register_event_schema(schema_text if schema_text is not None else schema_path)" not in text
+        ):
+            exact_schema_block = (
+                "            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
+                "            # Use this pathlib object to register the schema\n"
+                "            self.event_logger.register_event_schema(schema_path)\n"
+            )
+            replacement_schema_block = (
+                "            schema_text = _staticpython_resource_text(\"jupyter_server\", f\"event_schemas/{rel_schema_path}\")\n"
+                "            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
+                "            self.event_logger.register_event_schema(schema_text if schema_text is not None else schema_path)\n"
+            )
+            if exact_schema_block in text:
+                text = replace_text_once(
+                    text,
+                    exact_schema_block,
+                    replacement_schema_block,
+                    label="jupyter_server embedded event schema registration",
+                )
+            else:
+                text = replace_regex_once(
+                    text,
+                    r"(?m)^            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / rel_schema_path\n"
+                    r"(?:            #.*\n)*"
+                    r"            self\.event_logger\.register_event_schema\(schema_path\)\n",
+                    replacement_schema_block,
+                    label="jupyter_server embedded event schema registration",
+                    flags=re.MULTILINE,
+                )
+        return text
 
     def patch_extension_application(text: str) -> str:
-        text = replace_text_once(
+        if "self.jinja2_env = Environment(" not in text and "FileSystemLoader(self.template_paths)" not in text:
+            if "ExtensionApp" in text and ("jinja2_env" in text or "FileSystemLoader" in text):
+                raise RuntimeError("jupyter_server extension embedded template loader anchor not found")
+            return text
+        if "_staticpython_template_dict_for_package" not in text:
+            text = replace_regex_once(
+                text,
+                r"(?m)^from jinja2 import ([^\n]+)\n",
+                "from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader\n"
+                "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
+                label="jupyter_server extension application jinja imports",
+            )
+        if "ChoiceLoader([" in text:
+            return text
+        return replace_regex_once(
             text,
-            "from jinja2 import Environment, FileSystemLoader\n",
-            "from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader\n"
-            "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
-            label="jupyter_server extension application jinja imports",
-        )
-        return replace_text_once(
-            text,
-            "        self.jinja2_env = Environment(\n"
-            "            loader=FileSystemLoader(self.template_paths),\n"
-            "            extensions=[\"jinja2.ext.i18n\"],\n"
-            "            autoescape=True,\n"
-            "            **self.jinja2_options,\n"
-            "        )\n",
-            "        template_package = \"notebook\" if self.name == \"notebook\" else \"jupyterlab\" if self.name == \"lab\" else self.name\n"
+            r"(?ms)^        self\.jinja2_env = Environment\(\n"
+            r"^            loader=FileSystemLoader\(self\.template_paths\),\s*\n"
+            r"^            extensions=\[['\"]jinja2\.ext\.i18n['\"]\],\s*\n"
+            r"^            autoescape=True,\s*\n"
+            r"^            \*\*self\.jinja2_options,?\s*\n"
+            r"^        \)\n",
+            "        template_package = getattr(self, \"name\", getattr(self, \"extension_name\", \"\"))\n"
+            "        template_package = \"notebook\" if template_package == \"notebook\" else \"jupyterlab\" if template_package == \"lab\" else template_package\n"
             "        self.jinja2_env = Environment(\n"
             "            loader=ChoiceLoader([\n"
             "                DictLoader(_staticpython_template_dict_for_package(template_package)),\n"
@@ -199,31 +295,40 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
         )
 
     def patch_base_handlers(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "from jupyter_server.utils import (\n"
-            "    ensure_async,\n"
-            "    filefind,\n"
-            "    url_escape,\n"
-            "    url_is_absolute,\n"
-            "    url_path_join,\n"
-            "    urldecode_unix_socket_path,\n"
-            ")\n",
-            "from jupyter_server.utils import (\n"
-            "    ensure_async,\n"
-            "    filefind,\n"
-            "    url_escape,\n"
-            "    url_is_absolute,\n"
-            "    url_path_join,\n"
-            "    urldecode_unix_socket_path,\n"
-            ")\n"
-            "from jupyter_server._staticpython_resources import resource_bytes_for_path as _staticpython_resource_bytes_for_path\n"
-            "from jupyter_server._staticpython_resources import resolve_resource_from_roots as _staticpython_resolve_resource_from_roots\n",
-            label="jupyter_server base handlers resource imports",
-        )
-        text = replace_text_once(
-            text,
-            "    @classmethod\n"
+        if "_staticpython_resource_bytes_for_path" not in text:
+            helper_imports = (
+                "from jupyter_server._staticpython_resources import resource_bytes_for_path as _staticpython_resource_bytes_for_path\n"
+                "from jupyter_server._staticpython_resources import resolve_resource_from_roots as _staticpython_resolve_resource_from_roots\n"
+            )
+            match = re.search(
+                r"(?ms)^from jupyter_server\.utils import \(\n.*?^\)\n",
+                text,
+            )
+            if match is None:
+                match = re.search(
+                    r"(?m)^(?:from jupyter_server\.utils import [^\n]+\n)+",
+                    text,
+                )
+            if match is None:
+                match = re.search(
+                    r"(?m)^(?:from jupyter_server(?:\.[^\s]+)? import [^\n]+\n|import jupyter_server\n)+",
+                    text,
+                )
+            if match is None:
+                raise RuntimeError("expected snippet not found in jupyter_server base handlers resource imports")
+            text = (
+                text[: match.end()]
+                + helper_imports
+                + text[match.end() :]
+            )
+        class_start = text.find("class FileFindHandler(")
+        if class_start == -1:
+            raise RuntimeError("expected snippet not found in jupyter_server FileFindHandler class")
+        class_end = text.find("\n\nclass ", class_start)
+        if class_end == -1:
+            class_end = len(text)
+        class_block = text[class_start:class_end]
+        get_absolute_path_block = (
             "    def get_absolute_path(cls, roots, path):\n"
             "        \"\"\"locate a file to serve on our static file search path\"\"\"\n"
             "        with cls._lock:\n"
@@ -232,43 +337,22 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             "            try:\n"
             "                abspath = os.path.abspath(filefind(path, roots))\n"
             "            except OSError:\n"
-            "                # IOError means not found\n"
-            "                return \"\"\n"
+            "                abspath = _staticpython_resolve_resource_from_roots(roots, path) or \"\"\n"
             "\n"
             "            cls._static_paths[path] = abspath\n"
             "\n"
             "            log().debug(f\"Path {path} served from {abspath}\")\n"
-            "            return abspath\n",
-            "    @classmethod\n"
-            "    def get_absolute_path(cls, roots, path):\n"
-            "        \"\"\"locate a file to serve on our static file search path\"\"\"\n"
-            "        cache_key = (tuple(roots) if isinstance(roots, list) else roots, path)\n"
-            "        with cls._lock:\n"
-            "            if cache_key in cls._static_paths:\n"
-            "                return cls._static_paths[cache_key]\n"
-            "            try:\n"
-            "                abspath = os.path.abspath(filefind(path, roots))\n"
-            "            except OSError:\n"
-            "                abspath = _staticpython_resolve_resource_from_roots(roots, path) or \"\"\n"
+            "            return abspath\n"
             "\n"
-            "            cls._static_paths[cache_key] = abspath\n"
-            "\n"
-            "            log().debug(f\"Path {path} served from {abspath}\")\n"
-            "            return abspath\n",
-            label="jupyter_server filefind embedded resource lookup",
         )
-        text = replace_text_once(
-            text,
-            "    def validate_absolute_path(self, root, absolute_path):\n"
-            "        \"\"\"check if the file should be served (raises 404, 403, etc.)\"\"\"\n"
-            "        if not absolute_path:\n"
-            "            raise web.HTTPError(404)\n"
-            "\n"
-            "        for root in self.root:\n"
-            "            if (absolute_path + os.sep).startswith(root):\n"
-            "                break\n"
-            "\n"
-            "        return super().validate_absolute_path(root, absolute_path)\n",
+        class_block = replace_function_block_once(
+            class_block,
+            "get_absolute_path",
+            get_absolute_path_block,
+            label="jupyter_server filefind embedded resource lookup",
+            next_name="validate_absolute_path",
+        )
+        validate_absolute_path_block = (
             "    def validate_absolute_path(self, root, absolute_path):\n"
             "        \"\"\"check if the file should be served (raises 404, 403, etc.)\"\"\"\n"
             "        if not absolute_path:\n"
@@ -276,14 +360,18 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             "        if _staticpython_resource_bytes_for_path(absolute_path) is not None:\n"
             "            return absolute_path\n"
             "\n"
-            "        for root in self.root:\n"
-            "            if (absolute_path + os.sep).startswith(root):\n"
-            "                break\n"
+            "        selected_root = root\n"
+            "        if isinstance(selected_root, (list, tuple)):\n"
+            "            selected_root = next((entry for entry in selected_root if isinstance(entry, (str, bytes, os.PathLike))), None)\n"
+            "        if selected_root is None:\n"
+            "            for candidate_root in self.root:\n"
+            "                if isinstance(candidate_root, (str, bytes, os.PathLike)) and (absolute_path + os.sep).startswith(str(candidate_root)):\n"
+            "                    selected_root = candidate_root\n"
+            "                    break\n"
+            "        if selected_root is None:\n"
+            "            raise web.HTTPError(404)\n"
+            "        return super().validate_absolute_path(selected_root, absolute_path)\n"
             "\n"
-            "        return super().validate_absolute_path(root, absolute_path)\n",
-            label="jupyter_server filefind embedded resource validation",
-        )
-        addition = (
             "    @classmethod\n"
             "    def get_content(cls, abspath, start=None, end=None):\n"
             "        data = _staticpython_resource_bytes_for_path(abspath)\n"
@@ -308,42 +396,21 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             "        return super().get_modified_time()\n"
             "\n"
         )
-        if "def get_content(cls, abspath, start=None, end=None):\n        data = _staticpython_resource_bytes_for_path" not in text:
-            text = replace_text_once(
-                text,
-                "    def validate_absolute_path(self, root, absolute_path):\n"
-                "        \"\"\"check if the file should be served (raises 404, 403, etc.)\"\"\"\n"
-                "        if not absolute_path:\n"
-                "            raise web.HTTPError(404)\n"
-                "        if _staticpython_resource_bytes_for_path(absolute_path) is not None:\n"
-                "            return absolute_path\n"
-                "\n"
-                "        for root in self.root:\n"
-                "            if (absolute_path + os.sep).startswith(root):\n"
-                "                break\n"
-                "\n"
-                "        return super().validate_absolute_path(root, absolute_path)\n",
-                "    def validate_absolute_path(self, root, absolute_path):\n"
-                "        \"\"\"check if the file should be served (raises 404, 403, etc.)\"\"\"\n"
-                "        if not absolute_path:\n"
-                "            raise web.HTTPError(404)\n"
-                "        if _staticpython_resource_bytes_for_path(absolute_path) is not None:\n"
-                "            return absolute_path\n"
-                "\n"
-                "        for root in self.root:\n"
-                "            if (absolute_path + os.sep).startswith(root):\n"
-                "                break\n"
-                "\n"
-                "        return super().validate_absolute_path(root, absolute_path)\n"
-                "\n"
-                + addition,
-                label="jupyter_server filefind embedded resource methods",
-            )
+        class_block = replace_function_block_once(
+            class_block,
+            "validate_absolute_path",
+            validate_absolute_path_block,
+            label="jupyter_server filefind embedded resource validation",
+        )
+        text = text[:class_start] + class_block + text[class_end:]
         return text
 
-    transform_source_text(context, "Lib/jupyter_server/serverapp.py", patch_serverapp)
-    transform_source_text(context, "Lib/jupyter_server/extension/application.py", patch_extension_application)
-    transform_source_text(context, "Lib/jupyter_server/base/handlers.py", patch_base_handlers)
+    if serverapp_path.exists():
+        transform_source_text(context, "Lib/jupyter_server/serverapp.py", patch_serverapp)
+    if extension_application_path.exists():
+        transform_source_text(context, "Lib/jupyter_server/extension/application.py", patch_extension_application)
+    if base_handlers_path.exists() and byte_resources:
+        transform_source_text(context, "Lib/jupyter_server/base/handlers.py", patch_base_handlers)
 
 
 LIBRARY_INTEGRATION = pypi_library(
@@ -354,15 +421,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "jupyter_server": "Lib/jupyter_server",
     },
     materialized_paths=[
-        "Lib/jupyter_server/templates/404.html",
-        "Lib/jupyter_server/templates/browser-open.html",
-        "Lib/jupyter_server/templates/login.html",
-        "Lib/jupyter_server/templates/logout.html",
-        "Lib/jupyter_server/templates/page.html",
-        "Lib/jupyter_server/templates/error.html",
-        "Lib/jupyter_server/templates/view.html",
-        "Lib/jupyter_server/templates/main.html",
-        "Lib/jupyter_server/event_schemas/contents_service/v1.yaml",
         "Lib/jupyter_server/_staticpython_resources.py",
     ],
     python_packages=["jupyter_server"],

@@ -50,18 +50,28 @@ def _patch_libui_declarative_init(text: str) -> str:
 
 
 def _patch_libui_declarative_app(text: str) -> str:
-    return replace_text_once(
-        text,
+    old = (
         "                    unsub = state.subscribe(\n"
         "                        lambda it=item, st=state: setattr(it, \"checked\", st.value)\n"
-        "                    )\n",
+        "                    )\n"
+    )
+    old_single_line = (
+        "                    unsub = state.subscribe(lambda it=item, st=state: setattr(it, \"checked\", st.value))\n"
+    )
+    new = (
         "                    unsub = state.subscribe(\n"
         "                        lambda it=item, st=state: core.queue_main(\n"
         "                            lambda it=it, st=st: setattr(it, \"checked\", st.value)\n"
         "                        )\n"
-        "                    )\n",
-        label="libui.declarative.app",
+        "                    )\n"
     )
+    if old in text:
+        return replace_text_once(text, old, new, label="libui.declarative.app")
+    if old_single_line in text:
+        return replace_text_once(text, old_single_line, new, label="libui.declarative.app")
+    if "state.subscribe" in text and 'setattr(it, "checked", st.value)' in text:
+        raise RuntimeError("libui declarative checked-state subscription anchor not found")
+    return text
 
 
 def patch_libui_sources(context) -> None:
@@ -84,7 +94,7 @@ LIBRARY_INTEGRATION = pypi_library(
     source_mapping={
         "libui": "Lib/libui",
         "src/libui-ng": "libui_builtin/libui-ng",
-        "src/py_module": "libui_builtin/py_module",
+        "src/py_module || src/libui": "libui_builtin/py_module",
     },
     overlay_entries=[
         "Lib/test/test_libui.py",

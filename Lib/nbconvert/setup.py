@@ -1,4 +1,8 @@
+import re
+
 from libs import (
+    replace_function_block_once,
+    replace_regex_once,
     replace_text_once,
     simple_library,
     source_path,
@@ -9,10 +13,12 @@ from libs import (
 
 def patch_nbconvert_sources(context) -> None:
     templates_root = source_path(context, "share/jupyter/nbconvert/templates")
+    if not templates_root.exists():
+        templates_root = source_path(context, "Lib/nbconvert/templates")
     templates = {
         path.relative_to(templates_root).as_posix(): path.read_text(encoding="utf-8")
         for path in sorted(templates_root.rglob("*"))
-        if path.is_file() and path.suffix.lower() in {".j2", ".json", ".tpl", ".css", ".md"}
+        if path.is_file() and path.suffix.lower() in {".j2", ".json", ".tpl", ".tplx", ".css", ".md"}
     }
     confs = {
         template_name: templates[f"{template_name}/conf.json"]
@@ -20,7 +26,14 @@ def patch_nbconvert_sources(context) -> None:
         if f"{template_name}/conf.json" in templates
     }
     template_names = sorted({key.split("/", 1)[0] for key in templates})
-    if "lab/index.html.j2" not in templates or "base/display_priority.j2" not in templates:
+    modern_template_layout = "lab/index.html.j2" in templates and "base/display_priority.j2" in templates
+    if not templates:
+        raise RuntimeError("expected nbconvert templates were not materialized")
+    if modern_template_layout is False and "classic/index.html.j2" in templates:
+        modern_template_layout = True
+    if modern_template_layout and (
+        "lab/index.html.j2" not in templates or "base/display_priority.j2" not in templates
+    ):
         raise RuntimeError("expected nbconvert templates were not materialized")
 
     write_source_text(
@@ -33,10 +46,15 @@ def patch_nbconvert_sources(context) -> None:
     )
 
     def patch_exporter_base(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "from .exporter import Exporter\n",
-            """from .exporter import Exporter
+        if "from .exporter import Exporter\n" not in text:
+            if "def get_exporter(" in text or "entry_points" in text or "entrypoints" in text:
+                raise RuntimeError("nbconvert exporter fallback import anchor not found")
+            return text
+        if "_STATICPYTHON_EXPORTERS" not in text:
+            text = replace_text_once(
+                text,
+                "from .exporter import Exporter\n",
+                """from .exporter import Exporter
 
 
 _STATICPYTHON_EXPORTERS = {
@@ -67,7 +85,23 @@ class _StaticPythonExporterEntryPoint:
 
 
 def _iter_exporter_entries():
-    exporters = list(entry_points(group="nbconvert.exporters"))
+    exporters = []
+    if "entry_points" in globals():
+        try:
+            exporters = list(entry_points(group="nbconvert.exporters"))
+        except TypeError:
+            discovered = entry_points()
+            if hasattr(discovered, "select"):
+                exporters = list(discovered.select(group="nbconvert.exporters"))
+            elif isinstance(discovered, dict):
+                exporters = list(discovered.get("nbconvert.exporters", []))
+            else:
+                exporters = [ep for ep in discovered if getattr(ep, "group", None) == "nbconvert.exporters"]
+    elif "entrypoints" in globals():
+        try:
+            exporters = list(entrypoints.get_group_all("nbconvert.exporters"))
+        except Exception:
+            exporters = []
     if exporters:
         return exporters
     return [
@@ -75,37 +109,151 @@ def _iter_exporter_entries():
         for name, value in _STATICPYTHON_EXPORTERS.items()
     ]
 """,
-            label="nbconvert exporter fallback helpers",
-        )
-        text = replace_text_once(
+                label="nbconvert exporter fallback helpers",
+            )
+        text = replace_function_block_once(
             text,
-            '        exporters = entry_points(group="nbconvert.exporters")\n',
-            '        exporters = _iter_exporter_entries()\n',
-            label="nbconvert get_exporter fallback call",
+            "get_exporter",
+            """def get_exporter(name, config=get_config()):  # noqa
+    \"\"\"Given an exporter name or import path, return a class ready to be instantiated
+
+    Raises ExporterName if exporter is not found or ExporterDisabledError if not enabled
+    \"\"\"
+
+    if name == "ipynb":
+        name = "notebook"
+
+    candidates = {name, name.lower()}
+    for ep in _iter_exporter_entries():
+        if ep.name not in candidates:
+            continue
+        exporter = ep.load()
+        if getattr(exporter(config=config), "enabled", True):
+            return exporter
+        raise ExporterDisabledError('Exporter "%s" disabled in configuration' % (name))
+
+    if "." in name:
+        try:
+            exporter = import_item(name)
+            if getattr(exporter(config=config), "enabled", True):
+                return exporter
+            raise ExporterDisabledError('Exporter "%s" disabled in configuration' % (name))
+        except ImportError:
+            log = get_logger()
+            log.error("Error importing %s" % name, exc_info=True)
+
+    raise ExporterNameError(
+        'Unknown exporter "{}", did you mean one of: {}?'.format(
+            name, ", ".join(get_export_names())
         )
-        return replace_text_once(
+    )
+
+""",
+            label="nbconvert get_exporter fallback",
+            next_name="get_export_names",
+        )
+        return replace_function_block_once(
             text,
-            '    exporters = sorted(e.name for e in entry_points(group="nbconvert.exporters"))\n',
-            '    exporters = sorted(e.name for e in _iter_exporter_entries())\n',
-            label="nbconvert get_export_names fallback call",
+            "get_export_names",
+            """def get_export_names(config=get_config()):  # noqa
+    \"\"\"Return a list of the currently supported export targets
+
+    Exporters can be found in external packages by registering
+    them as an nbconvert.exporter entrypoint.
+    \"\"\"
+    exporters = sorted({e.name for e in _iter_exporter_entries()})
+    if os.environ.get("NBCONVERT_DISABLE_CONFIG_EXPORTERS"):
+        get_logger().info(
+            "Config exporter loading disabled, no additional exporters will be automatically included."
+        )
+        return exporters
+
+    enabled_exporters = []
+    for exporter_name in exporters:
+        try:
+            e = get_exporter(exporter_name)(config=config)
+            if e.enabled:
+                enabled_exporters.append(exporter_name)
+        except (ExporterDisabledError, ValueError):
+            pass
+    return enabled_exporters
+
+""",
+            label="nbconvert get_export_names fallback",
         )
 
-    transform_source_text(context, "Lib/nbconvert/exporters/base.py", patch_exporter_base)
+    transform_source_text(context, "Lib/nbconvert/exporters/base.py", patch_exporter_base, allow_missing=True)
 
     def patch_template_exporter(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "from .exporter import Exporter\n",
-            "from .exporter import Exporter\nfrom nbconvert._staticpython_templates import CONFS as _STATICPYTHON_TEMPLATE_CONFS\nfrom nbconvert._staticpython_templates import TEMPLATE_NAMES as _STATICPYTHON_TEMPLATE_NAMES\nfrom nbconvert._staticpython_templates import TEMPLATES as _STATICPYTHON_TEMPLATES\n",
-            label="nbconvert template exporter static imports",
-        )
-        text = replace_text_once(
-            text,
-            "        loaders = [\n"
-            "            *self.extra_loaders,\n"
-            "            ExtensionTolerantLoader(FileSystemLoader(paths), self.template_extension),\n"
-            "            DictLoader({self._raw_template_key: self.raw_template}),\n"
-            "        ]\n",
+        if "from .exporter import Exporter\n" not in text:
+            if "class TemplateExporter" in text:
+                raise RuntimeError("nbconvert template exporter static import anchor not found")
+            return text
+        if "_STATICPYTHON_TEMPLATES" not in text:
+            text = replace_text_once(
+                text,
+                "from .exporter import Exporter\n",
+                "from .exporter import Exporter\nfrom nbconvert._staticpython_templates import CONFS as _STATICPYTHON_TEMPLATE_CONFS\nfrom nbconvert._staticpython_templates import TEMPLATE_NAMES as _STATICPYTHON_TEMPLATE_NAMES\nfrom nbconvert._staticpython_templates import TEMPLATES as _STATICPYTHON_TEMPLATES\n",
+                label="nbconvert template exporter static imports",
+            )
+        if "DictLoader" not in text:
+            updated, count = re.subn(
+                r"(?m)^(?P<indent>\s*)(?P<line>from jinja2 import .*\bFileSystemLoader)(?P<rest>[^\n]*)$",
+                r"\g<indent>\g<line>, DictLoader\g<rest>",
+                text,
+                count=1,
+            )
+            if count == 0:
+                def add_dict_loader(match: re.Match) -> str:
+                    body = match.group("body")
+                    if "FileSystemLoader" not in body:
+                        return match.group(0)
+                    indent = match.group("indent")
+                    if not body.rstrip().endswith(","):
+                        body = body.rstrip("\n") + ",\n"
+                    return f"{indent}from jinja2 import (\n{body}{indent}    DictLoader,\n{indent})\n"
+
+                updated, count = re.subn(
+                    r"(?ms)^(?P<indent>[ \t]*)from jinja2 import \(\n(?P<body>.*?)(?P=indent)\)\n",
+                    add_dict_loader,
+                    text,
+                    count=1,
+                )
+            if count == 0:
+                if "FileSystemLoader" in text and "from jinja2 import" in text:
+                    raise RuntimeError("nbconvert legacy DictLoader import anchor not found")
+            else:
+                text = updated
+        if "def _get_conf(" not in text:
+            if "DictLoader(_STATICPYTHON_TEMPLATES)" in text:
+                return text
+            updated, count = re.subn(
+                r"(?m)^        loaders = self\.extra_loaders \+ \[FileSystemLoader\(paths\)\]\n",
+                "        loaders = self.extra_loaders + [\n"
+                "            DictLoader(_STATICPYTHON_TEMPLATES),\n"
+                "            FileSystemLoader(paths),\n"
+                "        ]\n",
+                text,
+                count=1,
+            )
+            if count == 0:
+                updated, count = re.subn(
+                    r"(?ms)^        loaders = self\.extra_loaders \+ \[\n",
+                    "        loaders = self.extra_loaders + [\n"
+                    "            ExtensionTolerantLoader(DictLoader(_STATICPYTHON_TEMPLATES), self.template_extension),\n",
+                    text,
+                    count=1,
+                )
+            if count:
+                return updated
+            if "template_paths" in text or "FileSystemLoader" in text:
+                raise RuntimeError("nbconvert _get_conf anchor not found")
+            return text
+        updated, count = re.subn(
+            r"^        loaders = (?:\[\n            \*self\.extra_loaders,\n|self\.extra_loaders \+ \[\n)"
+            r".*?"
+            r"^        \]\n"
+            r"(?=^        environment = Environment\()",
             "        static_templates = dict(_STATICPYTHON_TEMPLATES)\n"
             "        for template_name in self.get_template_names():\n"
             "            prefix = template_name + \"/\"\n"
@@ -119,82 +267,181 @@ def _iter_exporter_entries():
             "            ExtensionTolerantLoader(FileSystemLoader(paths), self.template_extension),\n"
             "            DictLoader({self._raw_template_key: self.raw_template}),\n"
             "        ]\n",
-            label="nbconvert embedded jinja template loader",
-        )
-        text = replace_text_once(
             text,
-            "        conf: dict[str, t.Any] = {}  # the configuration once all conf files are merged\n"
-            "        for path in map(Path, self.template_paths):\n"
-            "            conf_path = path / \"conf.json\"\n"
-            "            try:\n"
-            "                conf_path_exists = conf_path.exists()\n"
-            "            except PermissionError:\n"
-            "                # for Python <3.14\n"
-            "                pass\n"
-            "            else:\n"
-            "                if conf_path_exists:\n"
-            "                    with conf_path.open() as f:\n"
-            "                        conf = recursive_update(conf, json.load(f))\n"
-            "        return conf\n",
-            "        conf: dict[str, t.Any] = {}  # the configuration once all conf files are merged\n"
-            "        for template_name in reversed(self.get_template_names()):\n"
-            "            conf_text = _STATICPYTHON_TEMPLATE_CONFS.get(template_name)\n"
-            "            if conf_text:\n"
-            "                conf = recursive_update(conf, json.loads(conf_text))\n"
-            "        for path in map(Path, self.template_paths):\n"
-            "            conf_path = path / \"conf.json\"\n"
-            "            try:\n"
-            "                conf_path_exists = conf_path.exists()\n"
-            "            except PermissionError:\n"
-            "                # for Python <3.14\n"
-            "                pass\n"
-            "            else:\n"
-            "                if conf_path_exists:\n"
-            "                    with conf_path.open() as f:\n"
-            "                        conf = recursive_update(conf, json.load(f))\n"
-            "        return conf\n",
-            label="nbconvert embedded template conf loader",
+            count=1,
+            flags=re.MULTILINE | re.DOTALL,
         )
-        text = replace_text_once(
+        if count:
+            text = updated
+        elif "environment = Environment(" in text:
+            raise RuntimeError("nbconvert template exporter loader anchor not found")
+        updated, count = re.subn(
+            r"^    def _get_conf\(self\):\n.*?^    @default\((['\"])template_paths\1\)\n",
+            """    def _get_conf(self):
+        conf = {}  # the configuration once all conf files are merged
+        for template_name in reversed(self.get_template_names()):
+            conf_text = _STATICPYTHON_TEMPLATE_CONFS.get(template_name)
+            if conf_text:
+                conf = recursive_update(conf, json.loads(conf_text))
+        for path in map(Path, self.template_paths):
+            conf_path = path / "conf.json"
+            try:
+                conf_path_exists = conf_path.exists()
+            except PermissionError:
+                # for Python <3.14
+                pass
+            else:
+                if conf_path_exists:
+                    with conf_path.open() as f:
+                        conf = recursive_update(conf, json.load(f))
+        return conf
+
+    @default("template_paths")
+""",
             text,
-            "                if not found_at_least_one:\n"
-            "                    paths = \"\\n\\t\".join(root_dirs)\n"
-            "                    msg = f\"No template sub-directory with name {base_template!r} found in the following paths:\\n\\t{paths}\"\n"
-            "                    raise ValueError(msg)\n"
-            "            merged_conf = recursive_update(dict(conf), merged_conf)\n"
-            "            base_template = t.cast(t.Any, conf.get(\"base_template\"))\n",
-            "                if not found_at_least_one:\n"
-            "                    static_conf_text = _STATICPYTHON_TEMPLATE_CONFS.get(base_template)\n"
-            "                    if static_conf_text is not None or base_template in _STATICPYTHON_TEMPLATE_NAMES:\n"
-            "                        found_at_least_one = True\n"
-            "                        if static_conf_text is not None:\n"
-            "                            conf = recursive_update(json.loads(static_conf_text), conf)\n"
-            "                if not found_at_least_one:\n"
-            "                    paths = \"\\n\\t\".join(root_dirs)\n"
-            "                    msg = f\"No template sub-directory with name {base_template!r} found in the following paths:\\n\\t{paths}\"\n"
-            "                    raise ValueError(msg)\n"
-            "            merged_conf = recursive_update(dict(conf), merged_conf)\n"
-            "            base_template = t.cast(t.Any, conf.get(\"base_template\"))\n",
-            label="nbconvert embedded template name discovery",
+            count=1,
+            flags=re.MULTILINE | re.DOTALL,
         )
-        return replace_text_once(
+        if count:
+            text = updated
+        else:
+            raise RuntimeError("nbconvert _get_conf template_paths anchor not found")
+        if "def get_template_names(" in text and "def get_prefix_root_dirs(" in text:
+            text = replace_function_block_once(
+                text,
+                "get_template_names",
+                """    def get_template_names(self):  # noqa
+        \"\"\"Finds a list of template names where each successive template name is the base template\"\"\"
+        template_names = []
+        root_dirs = self.get_prefix_root_dirs()
+        base_template = self.template_name
+        merged_conf = {}  # the configuration once all conf files are merged
+        while base_template is not None:
+            template_names.append(base_template)
+            conf = {}
+            found_at_least_one = False
+            for base_dir in self.extra_template_basedirs:
+                template_dir = os.path.join(base_dir, base_template)
+                if os.path.exists(template_dir):
+                    found_at_least_one = True
+                conf_file = os.path.join(template_dir, "conf.json")
+                if os.path.exists(conf_file):
+                    with open(conf_file) as f:
+                        conf = recursive_update(json.load(f), conf)
+            for root_dir in root_dirs:
+                template_dir = os.path.join(root_dir, "nbconvert", "templates", base_template)
+                if os.path.exists(template_dir):
+                    found_at_least_one = True
+                conf_file = os.path.join(template_dir, "conf.json")
+                if os.path.exists(conf_file):
+                    with open(conf_file) as f:
+                        conf = recursive_update(json.load(f), conf)
+            if not found_at_least_one:
+                # Check for backwards compatibility template names
+                for root_dir in root_dirs:
+                    compatibility_file = base_template + ".tpl"
+                    compatibility_path = os.path.join(
+                        root_dir, "nbconvert", "templates", "compatibility", compatibility_file
+                    )
+                    if os.path.exists(compatibility_path):
+                        found_at_least_one = True
+                        warnings.warn(
+                            f"5.x template name passed '{self.template_name}'. Use 'lab' or 'classic' for new template usage.",
+                            DeprecationWarning,
+                            stacklevel=2,
+                        )
+                        self.template_file = compatibility_file
+                        conf = self.get_compatibility_base_template_conf(base_template)
+                        self.template_name = conf.get("base_template")
+                        break
+                if not found_at_least_one:
+                    static_conf_text = _STATICPYTHON_TEMPLATE_CONFS.get(base_template)
+                    if static_conf_text is not None or base_template in _STATICPYTHON_TEMPLATE_NAMES:
+                        found_at_least_one = True
+                        if static_conf_text is not None:
+                            conf = recursive_update(json.loads(static_conf_text), conf)
+                if not found_at_least_one:
+                    paths = "\\n\\t".join(root_dirs)
+                    msg = f"No template sub-directory with name {base_template!r} found in the following paths:\\n\\t{paths}"
+                    raise ValueError(msg)
+            merged_conf = recursive_update(dict(conf), merged_conf)
+            base_template = conf.get("base_template")
+        conf = merged_conf
+        mimetypes = [mimetype for mimetype, enabled in conf.get("mimetypes", {}).items() if enabled]
+        if self.output_mimetype and self.output_mimetype not in mimetypes and mimetypes:
+            supported_mimetypes = "\\n\\t".join(mimetypes)
+            msg = f"Unsupported mimetype {self.output_mimetype!r} for template {self.template_name!r}, mimetypes supported are: \\n\\t{supported_mimetypes}"
+            raise ValueError(msg)
+        return template_names
+
+""",
+                label="nbconvert embedded template name discovery",
+                next_name="get_prefix_root_dirs",
+            )
+        template_paths_replacement = """    def _template_paths(self, prune=True, root_dirs=None):
+        paths = []
+        root_dirs = self.get_prefix_root_dirs()
+        template_names = self.get_template_names()
+        for template_name in template_names:
+            for base_dir in self.extra_template_basedirs:
+                path = os.path.join(base_dir, template_name)
+                try:
+                    if not prune or os.path.exists(path):
+                        paths.append(path)
+                except PermissionError:
+                    pass
+            for root_dir in root_dirs:
+                base_dir = os.path.join(root_dir, "nbconvert", "templates")
+                path = os.path.join(base_dir, template_name)
+                try:
+                    if not prune or os.path.exists(path):
+                        paths.append(path)
+                except PermissionError:
+                    pass
+
+        for root_dir in root_dirs:
+            paths.append(root_dir)
+            base_dir = os.path.join(root_dir, "nbconvert", "templates")
+            paths.append(base_dir)
+
+            compatibility_dir = os.path.join(root_dir, "nbconvert", "templates", "compatibility")
+            paths.append(compatibility_dir)
+
+        additional_paths = []
+        for path in self.template_data_paths:
+            if not prune or os.path.exists(path):
+                additional_paths.append(path)
+
+        if _STATICPYTHON_TEMPLATES:
+            additional_paths.append("staticpython-nbconvert-templates")
+        return paths + self.extra_template_paths + additional_paths
+
+"""
+        updated, count = re.subn(
+            r"^    def _template_paths\(self, prune=True, root_dirs=None\):\n.*?^    @classmethod\n",
+            template_paths_replacement
+            + """
+    @classmethod
+""",
             text,
-            "        additional_paths = []\n"
-            "        for path in self.template_data_paths:\n"
-            "            if not prune or os.path.exists(path):\n"
-            "                additional_paths.append(path)\n"
-            "\n"
-            "        return paths + self.extra_template_paths + additional_paths\n",
-            "        additional_paths = []\n"
-            "        for path in self.template_data_paths:\n"
-            "            if not prune or os.path.exists(path):\n"
-            "                additional_paths.append(path)\n"
-            "\n"
-            "        if _STATICPYTHON_TEMPLATES:\n"
-            "            additional_paths.append(\"staticpython-nbconvert-templates\")\n"
-            "        return paths + self.extra_template_paths + additional_paths\n",
-            label="nbconvert embedded template path marker",
+            count=1,
+            flags=re.MULTILINE | re.DOTALL,
         )
+        if count:
+            text = updated
+        else:
+            updated, count = re.subn(
+                r"^    def _template_paths\(self, prune=True, root_dirs=None\):\n.*?(?=^    def get_template_names\()",
+                template_paths_replacement,
+                text,
+                count=1,
+                flags=re.MULTILINE | re.DOTALL,
+            )
+            if count:
+                text = updated
+            else:
+                raise RuntimeError("nbconvert _template_paths anchor not found")
+        return text
 
     transform_source_text(context, "Lib/nbconvert/exporters/templateexporter.py", patch_template_exporter)
 
@@ -203,7 +450,7 @@ LIBRARY_INTEGRATION = simple_library(
     name="nbconvert",
     source_mapping={
         "nbconvert": "Lib/nbconvert",
-        "share/templates": "share/jupyter/nbconvert/templates",
+        "share/templates || nbconvert/templates": "share/jupyter/nbconvert/templates",
     },
     materialized_paths=["Lib/nbconvert/_staticpython_templates.py"],
     post_patch_hooks=[patch_nbconvert_sources],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from libs import (
     pypi_library,
+    replace_regex_once,
     replace_text_once,
     source_path,
     transform_source_text,
@@ -405,35 +407,162 @@ def _run_with_env(context, command: list[str], *, cwd: Path, timeout: float, env
 
 def _patch_numpy_meson_build(context) -> None:
     meson_build_path = numpy_source_root(context) / "meson.build"
-    launcher = numpy_meson_launcher_path(context).as_posix()
-    original = "py = import('python').find_installation(pure: false)\n"
-    replacement = f"py = import('python').find_installation('{launcher}', pure: false)\n"
-    text = meson_build_path.read_text(encoding="utf-8")
-    if replacement in text:
+    if not meson_build_path.exists():
         return
-    if original not in text:
+    launcher = numpy_meson_launcher_path(context).as_posix()
+    text = meson_build_path.read_text(encoding="utf-8")
+    if launcher in text and "find_installation" in text:
+        return
+    if "project('f2py_examples'" in text or 'project("f2py_examples"' in text:
+        context.log(
+            "detected legacy NumPy source layout without a top-level Meson build; "
+            "skipping Meson python probe patch"
+        )
+        return
+    updated, count = re.subn(
+        r"(?m)^py\s*=\s*import\('python'\)\.find_installation\([^)]*\)\s*$",
+        f"py = import('python').find_installation('{launcher}', pure: false)",
+        text,
+        count=1,
+    )
+    if count != 1:
+        updated, count = re.subn(
+            r"(?m)^(?P<var>\w+)\s*=\s*(?P<module>\w+)\.find_installation\([^)]*\)\s*$",
+            rf"\g<var> = \g<module>.find_installation('{launcher}', pure: false)",
+            text,
+            count=1,
+        )
+    if count != 1:
+        if "find_installation" not in text:
+            context.log(
+                "NumPy source tree does not expose a patchable Meson python probe; "
+                "skipping Meson patch for this release"
+            )
+            return
         raise RuntimeError(f"expected python installation probe not found in {meson_build_path}")
-    meson_build_path.write_text(text.replace(original, replacement, 1), encoding="utf-8", newline="\n")
+    meson_build_path.write_text(updated, encoding="utf-8", newline="\n")
 
 
 def _patch_numpy_top_level_imports(context) -> None:
     def patch(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "    from . import lib, matrixlib as _mat\n",
-            "    from . import lib\n"
-            "    try:\n"
-            "        from . import matrixlib as _mat\n"
-            "    except ImportError:\n"
-            "        _mat = None\n",
-            label="numpy optional matrixlib import",
-        )
-        return replace_text_once(
-            text,
-            "        set(_mat.__all__) |\n",
-            "        (set(_mat.__all__) if _mat is not None else set()) |\n",
-            label="numpy optional matrixlib __all__",
-        )
+        if "try:\n        from . import matrixlib as _mat\n    except ImportError:\n        _mat = None\n" not in text:
+            if "    from . import lib, matrixlib as _mat\n" in text:
+                text = replace_text_once(
+                    text,
+                    "    from . import lib, matrixlib as _mat\n",
+                    "    from . import lib\n"
+                    "    try:\n"
+                    "        from . import matrixlib as _mat\n"
+                    "    except ImportError:\n"
+                    "        _mat = None\n",
+                    label="numpy optional matrixlib combined import",
+                )
+            elif "    from . import matrixlib as _mat\n" in text:
+                text = replace_regex_once(
+                    text,
+                    r"(?ms)^    from \. import matrixlib as _mat\s*\n",
+                    (
+                        "    try:\n"
+                        "        from . import matrixlib as _mat\n"
+                        "    except ImportError:\n"
+                        "        _mat = None\n"
+                    ),
+                    label="numpy optional matrixlib import",
+                )
+            elif "    import matrixlib as _mat\n" in text:
+                text = replace_text_once(
+                    text,
+                    "    import matrixlib as _mat\n",
+                    "    try:\n"
+                    "        import matrixlib as _mat\n"
+                    "    except ImportError:\n"
+                    "        _mat = None\n",
+                    label="numpy optional legacy matrixlib import",
+                )
+            else:
+                if "matrixlib" in text:
+                    raise RuntimeError("numpy matrixlib package import anchor not found")
+                return text
+
+        if "    from .matrixlib import *\n" in text and "asmatrix = bmat = mat = matrix = None\n" not in text:
+            text = replace_text_once(
+                text,
+                "    from .matrixlib import *\n",
+                "    if _mat is not None:\n"
+                "        from .matrixlib import *\n"
+                "    else:\n"
+                "        asmatrix = bmat = mat = matrix = None\n",
+                label="numpy optional matrixlib star import",
+            )
+        elif "    from matrixlib import *\n" in text and "asmatrix = bmat = mat = matrix = None\n" not in text:
+            text = replace_text_once(
+                text,
+                "    from matrixlib import *\n",
+                "    if _mat is not None:\n"
+                "        from matrixlib import *\n"
+                "    else:\n"
+                "        asmatrix = bmat = mat = matrix = None\n",
+                label="numpy optional legacy matrixlib star import",
+            )
+        elif "from .matrixlib import (\n        asmatrix, bmat, matrix\n    )\n" in text:
+            text = replace_text_once(
+                text,
+                "    from .matrixlib import (\n        asmatrix, bmat, matrix\n    )\n",
+                "    if _mat is not None:\n"
+                "        from .matrixlib import (\n"
+                "            asmatrix, bmat, matrix\n"
+                "        )\n"
+                "    else:\n"
+                "        asmatrix = bmat = matrix = None\n",
+                label="numpy optional matrixlib symbol imports",
+            )
+        elif re.search(r"(?m)^    from \.matrixlib import asmatrix,\s*bmat,\s*matrix\s*$", text) and "asmatrix = bmat = matrix = None\n" not in text:
+            text = replace_regex_once(
+                text,
+                r"(?m)^    from \.matrixlib import asmatrix,\s*bmat,\s*matrix\s*$",
+                "    if _mat is not None:\n"
+                "        from .matrixlib import asmatrix, bmat, matrix\n"
+                "    else:\n"
+                "        asmatrix = bmat = matrix = None\n",
+                label="numpy optional matrixlib single-line symbol imports",
+            )
+        elif "from .matrixlib import" in text and "asmatrix = bmat = matrix = None" not in text:
+            updated, count = re.subn(
+                r"(?ms)^    from \.matrixlib import \(\n(?P<body>(?:        .+\n)+)    \)\n",
+                (
+                    "    if _mat is not None:\n"
+                    "        from .matrixlib import (\n"
+                    "\\g<body>"
+                    "        )\n"
+                    "    else:\n"
+                    "        asmatrix = bmat = matrix = None\n"
+                ),
+                text,
+                count=1,
+            )
+            if count == 1:
+                text = updated
+            else:
+                raise RuntimeError("numpy optional matrixlib symbol import anchor not found")
+        if "set(_mat.__all__) if _mat is not None else set()" in text:
+            return text
+        if "        set(_mat.__all__) |\n" in text:
+            return replace_text_once(
+                text,
+                "        set(_mat.__all__) |\n",
+                "        (set(_mat.__all__) if _mat is not None else set()) |\n",
+                label="numpy optional matrixlib __all__ set-union",
+            )
+        if "    __all__.extend(_mat.__all__)\n" in text:
+            return replace_text_once(
+                text,
+                "    __all__.extend(_mat.__all__)\n",
+                "    if _mat is not None:\n        __all__.extend(_mat.__all__)\n",
+                label="numpy optional matrixlib __all__ extend",
+            )
+        if "_mat.__all__" in text:
+            raise RuntimeError("numpy optional matrixlib __all__ anchor not found")
+        return text
 
     transform_source_text(context, "Lib/numpy/__init__.py", patch)
 
@@ -489,6 +618,47 @@ def _ensure_generated_pyconfig_header(context) -> None:
         )
 
 
+def _normalize_numpy_runtime_config_module(context) -> None:
+    config_path = numpy_runtime_dir(context) / "__config__.py"
+    if not config_path.exists():
+        write_source_text(
+            context,
+            "Lib/numpy/__config__.py",
+            "# Auto-generated by StaticPython to keep NumPy importable before native build artifacts exist.\n"
+            "__all__ = [\"show_config\"]\n\n"
+            "def show(*args, **kwargs):\n"
+            "    return None\n\n"
+            "def show_config(*args, **kwargs):\n"
+            "    return show(*args, **kwargs)\n",
+        )
+        return
+
+    text = config_path.read_text(encoding="utf-8")
+    updated = text
+    if '__all__ = ["show"]\n' in updated and "show_config" not in updated:
+        updated = updated.replace('__all__ = ["show"]\n', '__all__ = ["show_config"]\n', 1)
+    if "def show_config(" not in updated:
+        if "def show(" in updated:
+            if not updated.endswith("\n"):
+                updated += "\n"
+            updated += (
+                "\n"
+                "def show_config(*args, **kwargs):\n"
+                "    return show(*args, **kwargs)\n"
+            )
+        else:
+            updated = (
+                "# Auto-generated by StaticPython to keep NumPy importable before native build artifacts exist.\n"
+                "__all__ = [\"show_config\"]\n\n"
+                "def show(*args, **kwargs):\n"
+                "    return None\n\n"
+                "def show_config(*args, **kwargs):\n"
+                "    return show(*args, **kwargs)\n"
+            )
+    if updated != text:
+        write_source_text(context, "Lib/numpy/__config__.py", updated)
+
+
 def prepare_numpy_project(context) -> None:
     if context.platform != "x64":
         raise RuntimeError(f"numpy builtin integration currently supports only x64, not {context.platform}")
@@ -498,6 +668,7 @@ def prepare_numpy_project(context) -> None:
     if not runtime_dir.exists():
         raise RuntimeError(f"expected NumPy runtime package at {runtime_dir}")
     _replace_tree(runtime_dir, build_source_dir)
+    _normalize_numpy_runtime_config_module(context)
 
     write_source_text(
         context,
@@ -758,6 +929,7 @@ def prepare_numpy_artifacts(context) -> None:
         raise RuntimeError("NumPy build did not produce the expected core artifacts")
 
     shutil.copy2(numpy_build_config_path(context), numpy_runtime_dir(context) / "__config__.py")
+    _normalize_numpy_runtime_config_module(context)
     _ensure_generated_headers(context)
     _archive_numpy_core_builtin(context)
     _archive_numpy_linalg_builtin(context)
@@ -770,15 +942,15 @@ LIBRARY_INTEGRATION = pypi_library(
     release_version="2.4.4",
     source_mapping={
         "numpy": "Lib/numpy",
-        "LICENSE.txt": "numpy_builtin/source/LICENSE.txt",
-        "README.md": "numpy_builtin/source/README.md",
-        "meson.build": "numpy_builtin/source/meson.build",
-        "meson.options": "numpy_builtin/source/meson.options",
-        "meson_cpu": "numpy_builtin/source/meson_cpu",
-        "pyproject.toml": "numpy_builtin/source/pyproject.toml",
-        "tools": "numpy_builtin/source/tools",
-        "vendored-meson/meson/meson.py": "numpy_builtin/source/vendored-meson/meson.py",
-        "vendored-meson/meson/mesonbuild": "numpy_builtin/source/vendored-meson/mesonbuild",
+        "?LICENSE.txt": "numpy_builtin/source/LICENSE.txt",
+        "?README.md || ?README.txt || ?README.rst": "numpy_builtin/source/README.md",
+        "?meson.build": "numpy_builtin/source/meson.build",
+        "?meson.options || ?meson_options.txt": "numpy_builtin/source/meson.options",
+        "?meson_cpu": "numpy_builtin/source/meson_cpu",
+        "?pyproject.toml": "numpy_builtin/source/pyproject.toml",
+        "?tools": "numpy_builtin/source/tools",
+        "?vendored-meson/meson/meson.py": "numpy_builtin/source/vendored-meson/meson.py",
+        "?vendored-meson/meson/mesonbuild": "numpy_builtin/source/vendored-meson/mesonbuild",
     },
     materialized_paths=[
         "numpy_builtin/_multiarray_umath_marker.c",
@@ -787,7 +959,9 @@ LIBRARY_INTEGRATION = pypi_library(
         "numpy_builtin/meson_target_python.py",
         "numpy_builtin/meson_target_python.cmd",
         "numpy_builtin/meson-python.ini",
-        "numpy_builtin/tools/cython.cmd",
+    ],
+    cleanup_paths=[
+        "numpy_builtin/source",
     ],
     python_packages=["numpy"],
     static_library_projects_release_x64=[
@@ -820,38 +994,47 @@ LIBRARY_INTEGRATION = pypi_library(
         {
             "name": "numpy.random._bounded_integers",
             "pyinit": "PyInit__bounded_integers",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random._common",
             "pyinit": "PyInit__common",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random._philox",
             "pyinit": "PyInit__philox",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random._sfc64",
             "pyinit": "PyInit__sfc64",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random.bit_generator",
             "pyinit": "PyInit_bit_generator",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random._generator",
             "pyinit": "PyInit__generator",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random._mt19937",
             "pyinit": "PyInit__mt19937",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random._pcg64",
             "pyinit": "PyInit__pcg64",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
         {
             "name": "numpy.random.mtrand",
             "pyinit": "PyInit_mtrand",
+            "library": f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
         },
     ],
     python_link_dependencies_release_x64=[
@@ -867,5 +1050,5 @@ LIBRARY_INTEGRATION = pypi_library(
         f"{NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib",
     ],
     prepare_source_hooks=[prepare_numpy_project],
-    post_patch_hooks=[prepare_numpy_artifacts],
+    pre_build_hooks=[prepare_numpy_artifacts],
 )

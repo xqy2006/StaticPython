@@ -1,25 +1,74 @@
-from libs import replace_text_once, simple_library, transform_source_text
+from libs import replace_function_block_once, simple_library, transform_source_text
 
 
 def patch_jupyter_client_sources(context):
     def patch_provisioning_factory(text: str) -> str:
-        text = replace_text_once(
+        if "def _get_provisioner(" not in text:
+            if "KernelProvisionerFactory" in text or "local-provisioner" in text:
+                raise RuntimeError("jupyter_client provisioner fallback anchor not found")
+            return text
+        return replace_function_block_once(
             text,
-            '            return EntryPoint(\n                "local-provisioner", "jupyter_client.provisioning", "LocalProvisioner"\n            )\n',
-            '            return EntryPoint(\n                "local-provisioner",\n                "jupyter_client.provisioning:LocalProvisioner",\n                KernelProvisionerFactory.GROUP_NAME,\n            )\n',
+            "_get_provisioner",
+            """    def _get_provisioner(self, name: str) -> EntryPoint:
+        \"\"\"Wrapper around entry_points (to fetch a single provisioner) - primarily to facilitate testing.\"\"\"
+        try:
+            eps = entry_points(group=KernelProvisionerFactory.GROUP_NAME, name=name)
+        except TypeError:
+            try:
+                discovered = entry_points(group=KernelProvisionerFactory.GROUP_NAME)
+            except TypeError:
+                discovered = entry_points()
+            if hasattr(discovered, "select"):
+                eps = list(discovered.select(group=KernelProvisionerFactory.GROUP_NAME, name=name))
+            elif isinstance(discovered, dict):
+                eps = [ep for ep in discovered.get(KernelProvisionerFactory.GROUP_NAME, []) if ep.name == name]
+            else:
+                eps = [
+                    ep for ep in discovered
+                    if getattr(ep, "group", None) == KernelProvisionerFactory.GROUP_NAME and ep.name == name
+                ]
+        if eps:
+            return list(eps)[0]
+
+        if name == 'local-provisioner':
+            distros = glob.glob(f"{path.dirname(path.dirname(__file__))}-*")
+            if distros:
+                self.log.warning(
+                    f"Kernel Provisioning: The 'local-provisioner' is not found.  This is likely "
+                    f"due to the presence of multiple jupyter_client distributions and a previous "
+                    f"distribution is being used as the source for entrypoints - which does not "
+                    f"include 'local-provisioner'.  That distribution should be removed such that "
+                    f"only the version-appropriate distribution remains (version >= 7).  Until "
+                    f"then, a 'local-provisioner' entrypoint will be automatically constructed "
+                    f"and used.\\nThe candidate distribution locations are: {distros}"
+                )
+            else:
+                self.log.info(
+                    "Kernel Provisioning: Constructing 'local-provisioner' directly because "
+                    "entry-point metadata is unavailable in this frozen runtime."
+                )
+            try:
+                return EntryPoint(
+                    'local-provisioner',
+                    'jupyter_client.provisioning:LocalProvisioner',
+                    KernelProvisionerFactory.GROUP_NAME,
+                )
+            except TypeError:
+                return EntryPoint(
+                    'local-provisioner', 'jupyter_client.provisioning', 'LocalProvisioner'
+                )
+
+        raise ModuleNotFoundError(name)
+""",
             label="jupyter_client local provisioner fallback",
-        )
-        return replace_text_once(
-            text,
-            '            self.log.warning(\n                f"Kernel Provisioning: The \'local-provisioner\' is not found.  This is likely "\n                f"due to the presence of multiple jupyter_client distributions and a previous "\n                f"distribution is being used as the source for entrypoints - which does not "\n                f"include \'local-provisioner\'.  That distribution should be removed such that "\n                f"only the version-appropriate distribution remains (version >= 7).  Until "\n                f"then, a \'local-provisioner\' entrypoint will be automatically constructed "\n                f"and used.\\nThe candidate distribution locations are: {distros}"\n            )\n',
-            '            if distros:\n                self.log.warning(\n                    f"Kernel Provisioning: The \'local-provisioner\' is not found.  This is likely "\n                    f"due to the presence of multiple jupyter_client distributions and a previous "\n                    f"distribution is being used as the source for entrypoints - which does not "\n                    f"include \'local-provisioner\'.  That distribution should be removed such that "\n                    f"only the version-appropriate distribution remains (version >= 7).  Until "\n                    f"then, a \'local-provisioner\' entrypoint will be automatically constructed "\n                    f"and used.\\nThe candidate distribution locations are: {distros}"\n                )\n            else:\n                self.log.info(\n                    "Kernel Provisioning: Constructing \'local-provisioner\' directly because "\n                    "entry-point metadata is unavailable in this frozen runtime."\n                )\n',
-            label="jupyter_client frozen local provisioner log level",
         )
 
     transform_source_text(
         context,
         "Lib/jupyter_client/provisioning/factory.py",
         patch_provisioning_factory,
+        allow_missing=True,
     )
 
 

@@ -1,6 +1,20 @@
 from __future__ import annotations
 
-from libs import pypi_library, source_path, transform_source_text, write_source_text
+from packaging.version import Version
+
+from libs import (
+    LibraryIntegration,
+    _copy_entry,
+    _download_file,
+    _extract_archive,
+    _find_cached_pypi_archive,
+    _normalized_project_name,
+    _resolve_source_entry,
+    _select_pypi_file,
+    source_path,
+    transform_source_text,
+    write_source_text,
+)
 
 
 PROTOBUF_UPB_PROJECT_GUID = "{49F92857-8E8C-42B7-B81A-1DB737C9570A}"
@@ -85,7 +99,72 @@ def _render_protobuf_upb_project(sources: list[str]) -> str:
 """
 
 
-def _discover_sources(context) -> list[str]:
+def _prepare_protobuf_source(context) -> None:
+    integration = LIBRARY_INTEGRATION
+    project_name = integration.project_name or integration.name
+    normalized = _normalized_project_name(project_name)
+    release_version = integration.release_version
+    target_version = Version(".".join(str(part) for part in context.version_info))
+    cached_archive_path = None
+
+    if release_version is not None:
+        cached_archive_path = _find_cached_pypi_archive(
+            context.download_cache_root,
+            normalized,
+            release_version,
+            target_version,
+        )
+        if cached_archive_path is not None:
+            context.log(f"reusing cached {project_name} {release_version} archive without refreshing PyPI metadata")
+            resolved_release_version = release_version
+            archive_path = cached_archive_path
+        else:
+            resolved_release_version, file_info = _select_pypi_file(project_name, target_version, release_version)
+            archive_path = (
+                context.download_cache_root
+                / "pypi"
+                / normalized
+                / resolved_release_version
+                / file_info["filename"]
+            )
+            url = file_info["url"]
+    else:
+        resolved_release_version, file_info = _select_pypi_file(project_name, target_version, release_version)
+        archive_path = (
+            context.download_cache_root
+            / "pypi"
+            / normalized
+            / resolved_release_version
+            / file_info["filename"]
+        )
+        url = file_info["url"]
+
+    extract_root = context.work_cache_root / "pypi" / normalized / resolved_release_version / "extracted"
+
+    if not archive_path.exists():
+        context.log(f"downloading {project_name} {resolved_release_version} from PyPI")
+        _download_file(url, archive_path)
+    elif cached_archive_path is None:
+        context.log(f"reusing cached {project_name} {resolved_release_version} archive")
+
+    extracted_root = _extract_archive(archive_path, extract_root, context.log)
+    context.log(f"using {project_name} {resolved_release_version} source from {extracted_root}")
+
+    _copy_entry(_resolve_source_entry(extracted_root, "google/protobuf"), context.source_root / "Lib" / "google" / "protobuf")
+
+    for selector, target in (
+        ("python", context.source_root / "protobuf_builtin" / "python"),
+        ("upb", context.source_root / "protobuf_builtin" / "upb"),
+        ("utf8_range", context.source_root / "protobuf_builtin" / "utf8_range"),
+    ):
+        try:
+            src = _resolve_source_entry(extracted_root, selector)
+        except RuntimeError:
+            continue
+        _copy_entry(src, target)
+
+
+def _discover_upb_sources(context) -> list[str]:
     groups = [
         ("Lib/google/protobuf", "*.c", False),
         ("protobuf_builtin/python", "*.c", False),
@@ -96,68 +175,127 @@ def _discover_sources(context) -> list[str]:
     for relative, pattern, recursive in groups:
         root = source_path(context, relative)
         if not root.exists():
-            raise RuntimeError(f"protobuf source directory is missing: {root}")
+            continue
         paths = root.rglob(pattern) if recursive else root.glob(pattern)
         for path in sorted(paths):
             source = path.relative_to(context.source_root).as_posix()
             if "decode_fast" not in source:
                 sources.append(source)
 
-    required = {
+    required = [
         "protobuf_builtin/python/protobuf.c",
-        "protobuf_builtin/upb/mem/arena.c",
-        "protobuf_builtin/utf8_range/utf8_range.c",
         "Lib/google/protobuf/descriptor.upb.c",
         "Lib/google/protobuf/descriptor.upbdefs.c",
-        "Lib/google/protobuf/descriptor.upb_minitable.c",
-    }
-    missing = sorted(source for source in required if source not in sources)
-    if missing:
-        raise RuntimeError("protobuf source files are missing: " + ", ".join(missing))
+    ]
+    if not all(source_path(context, rel).exists() for rel in required):
+        return []
+    if not any(source.startswith("protobuf_builtin/upb/") for source in sources):
+        return []
     return sources
 
 
 def patch_protobuf_namespace(context) -> None:
-    write_source_text(
-        context,
-        "Lib/google/__init__.py",
-        "# Namespace package marker generated by StaticPython.\n",
-    )
-    write_source_text(
-        context,
-        "Lib/google/_upb/__init__.py",
-        "# Package marker generated by StaticPython for the builtin google._upb._message module.\n",
-    )
+    google_init = source_path(context, "Lib/google/__init__.py")
+    if not google_init.exists():
+        write_source_text(
+            context,
+            "Lib/google/__init__.py",
+            "# Namespace package marker generated by StaticPython.\n",
+        )
+    upb_init = source_path(context, "Lib/google/_upb/__init__.py")
+    if not upb_init.exists():
+        write_source_text(
+            context,
+            "Lib/google/_upb/__init__.py",
+            "# Package marker generated by StaticPython for the builtin google._upb._message module.\n",
+        )
 
 
 def patch_protobuf_sources(context) -> None:
+    def patch_protobuf_c(text: str) -> str:
+        old = (
+            "typedef struct {\n"
+            "#ifdef ENABLE_MUTEX\n"
+            "  pthread_mutex_t mutex;\n"
+            "#endif\n"
+            "} FreeThreadingMutex;\n"
+            "\n"
+            "#ifdef ENABLE_MUTEX\n"
+            "static FreeThreadingMutex obj_cache_mutex = {PTHREAD_MUTEX_INITIALIZER};\n"
+            "#else\n"
+            "static FreeThreadingMutex obj_cache_mutex = {};\n"
+            "#endif\n"
+        )
+        new = (
+            "typedef struct {\n"
+            "#ifdef ENABLE_MUTEX\n"
+            "  pthread_mutex_t mutex;\n"
+            "#else\n"
+            "  char unused;\n"
+            "#endif\n"
+            "} FreeThreadingMutex;\n"
+            "\n"
+            "#ifdef ENABLE_MUTEX\n"
+            "static FreeThreadingMutex obj_cache_mutex = {PTHREAD_MUTEX_INITIALIZER};\n"
+            "#else\n"
+            "static FreeThreadingMutex obj_cache_mutex = {0};\n"
+            "#endif\n"
+        )
+        if new in text:
+            return text
+        if old not in text:
+            if "FreeThreadingMutex" in text and "static FreeThreadingMutex obj_cache_mutex" in text:
+                raise RuntimeError("protobuf free-threading mutex anchor not found")
+            return text
+        return text.replace(old, new, 1)
+
+    def patch_message_c(text: str) -> str:
+        updated = text.replace(
+            "__attribute__((flatten)) static PyObject* PyUpb_Message_GetAttr(",
+            "static PyObject* PyUpb_Message_GetAttr(",
+        )
+        if "__attribute__((flatten))" in updated:
+            raise RuntimeError("protobuf message flatten attribute anchor not patched")
+        return updated
+
+    transform_source_text(
+        context,
+        "protobuf_builtin/python/protobuf.c",
+        patch_protobuf_c,
+        allow_missing=True,
+    )
     transform_source_text(
         context,
         "protobuf_builtin/python/message.c",
-        lambda text: text.replace(
-            "__attribute__((flatten)) static PyObject* PyUpb_Message_GetAttr(",
-            "static PyObject* PyUpb_Message_GetAttr(",
-        ),
+        patch_message_c,
+        allow_missing=True,
     )
 
 
 def prepare_protobuf_project(context) -> None:
     patch_protobuf_sources(context)
+    sources = _discover_upb_sources(context)
+    if not sources:
+        context.log("protobuf upb source tree is absent in this release; keeping pure Python build")
+        return
     write_source_text(
         context,
         f"PCbuild/{PROTOBUF_UPB_PROJECT}.vcxproj",
-        _render_protobuf_upb_project(_discover_sources(context)),
+        _render_protobuf_upb_project(sources),
     )
 
 
-LIBRARY_INTEGRATION = pypi_library(
+LIBRARY_INTEGRATION = LibraryIntegration(
     name="protobuf",
-    source_mapping={
-        "google/protobuf": "Lib/google/protobuf",
-        "python": "protobuf_builtin/python",
-        "upb": "protobuf_builtin/upb",
-        "utf8_range": "protobuf_builtin/utf8_range",
-    },
+    source_provider="pypi",
+    project_name="protobuf",
+    dependencies=[],
+    auto_resolve_dependencies=True,
+    overlay_entries=[],
+    materialized_paths=[
+        "Lib/google/protobuf",
+    ],
+    cleanup_paths=[],
     python_packages=["google.protobuf", "google._upb"],
     static_library_projects_release_x64=[f"{PROTOBUF_UPB_PROJECT}.vcxproj"],
     native_static_projects=[
@@ -172,7 +310,11 @@ LIBRARY_INTEGRATION = pypi_library(
             "pyinit": "PyInit__message",
         }
     ],
+    staged_static_libraries_release_x64=[],
     python_link_dependencies_release_x64=[f"{PROTOBUF_UPB_PROJECT}.lib"],
-    prepare_source_hooks=[prepare_protobuf_project],
+    python_link_wholearchive_release_x64=[],
+    prepare_source_hooks=[_prepare_protobuf_source, prepare_protobuf_project],
+    pre_patch_hooks=[],
     post_patch_hooks=[patch_protobuf_namespace],
+    pre_build_hooks=[],
 )

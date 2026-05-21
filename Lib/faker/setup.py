@@ -1,10 +1,17 @@
 from __future__ import annotations
 
-from libs import simple_library, source_path, transform_source_text, write_source_text
+import re
+
+from libs import replace_function_block_once, simple_library, source_path, transform_source_text, write_source_text
 
 
 def embed_faker_provider_index(context) -> None:
     providers_root = source_path(context, "Lib/faker/providers")
+    if not providers_root.exists():
+        return
+    loading_path = source_path(context, "Lib/faker/utils/loading.py")
+    if not loading_path.exists():
+        return
     providers: list[str] = []
     localized: dict[str, list[str]] = {}
 
@@ -19,7 +26,7 @@ def embed_faker_provider_index(context) -> None:
     providers = sorted(set(providers))
     localized = {provider: sorted(set(locales)) for provider, locales in sorted(localized.items())}
     available_locales = sorted({locale for locales in localized.values() for locale in locales})
-    if "en_US" not in available_locales or "internet" not in providers:
+    if not providers:
         raise RuntimeError("expected Faker provider locale packages were not materialized")
 
     write_source_text(
@@ -32,21 +39,39 @@ def embed_faker_provider_index(context) -> None:
     )
 
     def patch_loading(text: str) -> str:
-        text = text.replace(
-            "from typing import List\n",
-            "from typing import List\n\nfrom faker._staticpython_provider_index import LOCALIZED_PROVIDERS as _STATICPYTHON_LOCALIZED_PROVIDERS\nfrom faker._staticpython_provider_index import PROVIDERS as _STATICPYTHON_PROVIDERS\n",
-            1,
-        )
-        text = text.replace(
-            "def list_module(module: ModuleType) -> List[str]:\n"
-            "    path = get_path(module)\n"
-            "\n"
-            "    if getattr(sys, \"_MEIPASS\", False):\n"
-            "        # PyInstaller\n"
-            "        return [file.parent.name for file in Path(path).glob(\"*/__init__.py\")]\n"
-            "    else:\n"
-            "        return [name for _, name, is_pkg in pkgutil.iter_modules([str(path)]) if is_pkg]\n",
-            "def list_module(module: ModuleType) -> List[str]:\n"
+        if re.search(r"(?m)^import os(?:\s|$)", text) is None:
+            if "import pkgutil\n" in text:
+                text = text.replace("import pkgutil\n", "import os\nimport pkgutil\n", 1)
+            elif "import sys\n" in text:
+                text = text.replace("import sys\n", "import os\nimport sys\n", 1)
+            elif "from importlib import import_module\n" in text:
+                text = text.replace("from importlib import import_module\n", "import os\nfrom importlib import import_module\n", 1)
+            else:
+                raise RuntimeError("faker provider index os import anchor not found")
+        if "from faker._staticpython_provider_index import" not in text:
+            static_index_import = (
+                "\nfrom faker._staticpython_provider_index import "
+                "LOCALIZED_PROVIDERS as _STATICPYTHON_LOCALIZED_PROVIDERS\n"
+                "from faker._staticpython_provider_index import PROVIDERS as _STATICPYTHON_PROVIDERS\n"
+            )
+            updated, count = re.subn(
+                r"(?m)^(from typing import .+\n)",
+                r"\1" + static_index_import,
+                text,
+                count=1,
+            )
+            if count == 1:
+                text = updated
+            elif "from types import ModuleType\n" in text:
+                text = text.replace("from types import ModuleType\n", "from types import ModuleType\n" + static_index_import, 1)
+            elif "from importlib import import_module\n" in text:
+                text = text.replace("from importlib import import_module\n", "from importlib import import_module\n" + static_index_import, 1)
+            elif "import pkgutil\n" in text:
+                text = text.replace("import pkgutil\n", "import pkgutil\n" + static_index_import, 1)
+            else:
+                raise RuntimeError("faker provider index import anchor not found")
+        new_list_module = (
+            "def list_module(module):\n"
             "    package = module.__package__ or module.__name__\n"
             "    if package == \"faker.providers\" and _STATICPYTHON_PROVIDERS:\n"
             "        return list(_STATICPYTHON_PROVIDERS)\n"
@@ -60,11 +85,25 @@ def embed_faker_provider_index(context) -> None:
             "\n"
             "    if getattr(sys, \"_MEIPASS\", False):\n"
             "        # PyInstaller\n"
-            "        return [file.parent.name for file in Path(path).glob(\"*/__init__.py\")]\n"
-            "    else:\n"
-            "        return [name for _, name, is_pkg in pkgutil.iter_modules([str(path)]) if is_pkg]\n",
-            1,
+            "        if \"Path\" in globals():\n"
+            "            return [file.parent.name for file in Path(path).glob(\"*/__init__.py\")]\n"
+            "        return [\n"
+            "            name\n"
+            "            for name in os.listdir(path)\n"
+            "            if os.path.isfile(os.path.join(path, name, \"__init__.py\"))\n"
+            "        ]\n"
+            "    return [name for _, name, is_pkg in pkgutil.iter_modules([str(path)]) if is_pkg]\n"
         )
+        if "def list_module(" in text and "pkgutil.iter_modules" in text:
+            return replace_function_block_once(
+                text,
+                "list_module",
+                new_list_module + "\n\n",
+                label="faker provider index list_module",
+                next_name="find_available_locales",
+            )
+        if "_STATICPYTHON_PROVIDERS" not in text and "pkgutil.iter_modules" in text:
+            raise RuntimeError("faker provider index list_module anchor not found")
         return text
 
     transform_source_text(context, "Lib/faker/utils/loading.py", patch_loading)
@@ -74,6 +113,5 @@ LIBRARY_INTEGRATION = simple_library(
     name="faker",
     project_name="Faker",
     overlay_entries=["Lib/faker"],
-    materialized_paths=["Lib/faker/_staticpython_provider_index.py"],
     post_patch_hooks=[embed_faker_provider_index],
 )

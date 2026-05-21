@@ -6,6 +6,8 @@ import re
 
 from libs import (
     pypi_library,
+    replace_function_block_once,
+    replace_regex_once,
     replace_text_once,
     source_path,
     transform_source_text,
@@ -263,133 +265,130 @@ def prepare_pycryptodome_project(context) -> None:
 
 
 def _patch_raw_api(text: str) -> str:
-    text = replace_text_once(
-        text,
-        "    _PyBUF_SIMPLE = 0\n"
-        "    _PyObject_GetBuffer = ctypes.pythonapi.PyObject_GetBuffer\n"
-        "    _PyBuffer_Release = ctypes.pythonapi.PyBuffer_Release\n",
-        "    _PyBUF_SIMPLE = 0\n"
-        "    try:\n"
-        "        _PyObject_GetBuffer = ctypes.pythonapi.PyObject_GetBuffer\n"
-        "        _PyBuffer_Release = ctypes.pythonapi.PyBuffer_Release\n"
-        "    except AttributeError:\n"
-        "        _PyObject_GetBuffer = None\n"
-        "        _PyBuffer_Release = None\n",
-        label="Crypto.Util._raw_api.buffer-api",
-    )
-    text = replace_text_once(
-        text,
-        "    def c_uint8_ptr(data):\n"
-        "        if byte_string(data) or isinstance(data, _Array):\n"
-        "            return data\n"
-        "        elif isinstance(data, _buffer_type):\n"
-        "            obj = _py_object(data)\n"
-        "            buf = _Py_buffer()\n"
-        "            _PyObject_GetBuffer(obj, byref(buf), _PyBUF_SIMPLE)\n",
-        "    def _buffer_as_ubyte_array(data):\n"
-        "        view = memoryview(data)\n"
-        "        if view.format not in (\"B\", \"b\", \"c\") or view.itemsize != 1:\n"
-        "            view = view.cast(\"B\")\n"
-        "\n"
-        "        if view.readonly:\n"
-        "            return (ctypes.c_ubyte * view.nbytes).from_buffer_copy(view.tobytes())\n"
-        "\n"
-        "        try:\n"
-        "            return (ctypes.c_ubyte * view.nbytes).from_buffer(data)\n"
-        "        except TypeError:\n"
-        "            return (ctypes.c_ubyte * view.nbytes).from_buffer(view)\n"
-        "\n"
-        "    def c_uint8_ptr(data):\n"
-        "        if byte_string(data) or isinstance(data, _Array):\n"
-        "            return data\n"
-        "        elif isinstance(data, _buffer_type):\n"
-        "            if _PyObject_GetBuffer is None:\n"
-        "                return _buffer_as_ubyte_array(data)\n"
-        "            obj = _py_object(data)\n"
-        "            buf = _Py_buffer()\n"
-        "            _PyObject_GetBuffer(obj, byref(buf), _PyBUF_SIMPLE)\n",
-        label="Crypto.Util._raw_api.c_uint8_ptr",
-    )
-    text = replace_text_once(
-        text,
-        "\n\ndef load_pycryptodome_raw_lib(name, cdecl):\n",
-        "\n\n_EMBEDDED_PROCESS_LIB = None\n\n\n"
-        "def _load_embedded_process_lib():\n"
-        "    global _EMBEDDED_PROCESS_LIB\n\n"
-        "    if _EMBEDDED_PROCESS_LIB is False:\n"
-        "        return None\n"
-        "    if _EMBEDDED_PROCESS_LIB is not None:\n"
-        "        return _EMBEDDED_PROCESS_LIB\n\n"
-        "    if backend != \"ctypes\" or os.name != \"nt\":\n"
-        "        _EMBEDDED_PROCESS_LIB = False\n"
-        "        return None\n\n"
-        "    executable = getattr(sys, \"executable\", None)\n"
-        "    if not executable:\n"
-        "        _EMBEDDED_PROCESS_LIB = False\n"
-        "        return None\n\n"
-        "    try:\n"
-        "        lib = load_lib(executable, \"\")\n"
-        "        getattr(lib, \"pycryptodome_embedded\")\n"
-        "    except (AttributeError, OSError):\n"
-        "        _EMBEDDED_PROCESS_LIB = False\n"
-        "        return None\n\n"
-        "    _EMBEDDED_PROCESS_LIB = lib\n"
-        "    return lib\n\n\n"
-        "def load_pycryptodome_raw_lib(name, cdecl):\n",
-        label="Crypto.Util._raw_api.embedded-loader",
-    )
-    misplaced_embedded_usage = (
-        "        @cdecl, the C function declarations.\n"
-        "        \"\"\"\n"
-        "    embedded_process_lib = _load_embedded_process_lib()\n"
-        "    if embedded_process_lib is not None:\n"
-        "        return embedded_process_lib\n\n\n"
-        "        if hasattr(ffi, \"RTLD_DEEPBIND\") and not os.getenv('PYCRYPTODOME_DISABLE_DEEPBIND'):\n"
-    )
-    if misplaced_embedded_usage in text:
-        text = text.replace(
-            misplaced_embedded_usage,
-            "        @cdecl, the C function declarations.\n"
-            "        \"\"\"\n"
-            "        if hasattr(ffi, \"RTLD_DEEPBIND\") and not os.getenv('PYCRYPTODOME_DISABLE_DEEPBIND'):\n",
-            1,
+    if not text:
+        return text
+    if "_PyObject_GetBuffer = None" not in text and "_PyObject_GetBuffer = ctypes.pythonapi.PyObject_GetBuffer" in text:
+        text = replace_regex_once(
+            text,
+            r"(?m)^    _PyBUF_SIMPLE = 0\n"
+            r"    _PyObject_GetBuffer = ctypes\.pythonapi\.PyObject_GetBuffer\n"
+            r"(?:    _PyBuffer_Release = ctypes\.pythonapi\.PyBuffer_Release\n)?",
+            "    _PyBUF_SIMPLE = 0\n"
+            "    try:\n"
+            "        _PyObject_GetBuffer = ctypes.pythonapi.PyObject_GetBuffer\n"
+            "        _PyBuffer_Release = ctypes.pythonapi.PyBuffer_Release\n"
+            "    except AttributeError:\n"
+            "        _PyObject_GetBuffer = None\n"
+            "        _PyBuffer_Release = None\n",
+            label="Crypto.Util._raw_api.buffer-api",
         )
-    text = replace_text_once(
+    if "_buffer_as_ubyte_array" not in text and "except ImportError:\n" in text and "class _Py_buffer" in text:
+        head, tail = text.split("except ImportError:\n", 1)
+        tail = replace_function_block_once(
+            tail,
+            "c_uint8_ptr",
+            "def _buffer_as_ubyte_array(data):\n"
+            "    view = memoryview(data)\n"
+            "    if view.format not in (\"B\", \"b\", \"c\") or view.itemsize != 1:\n"
+            "        view = view.cast(\"B\")\n"
+            "\n"
+            "    if view.readonly:\n"
+            "        return (ctypes.c_ubyte * view.nbytes).from_buffer_copy(view.tobytes())\n"
+            "\n"
+            "    try:\n"
+            "        return (ctypes.c_ubyte * view.nbytes).from_buffer(data)\n"
+            "    except TypeError:\n"
+            "        return (ctypes.c_ubyte * view.nbytes).from_buffer(view)\n"
+            "\n"
+            "def c_uint8_ptr(data):\n"
+            "    if byte_string(data) or isinstance(data, _Array):\n"
+            "        return data\n"
+            "    elif isinstance(data, _buffer_type):\n"
+            "        if _PyObject_GetBuffer is None:\n"
+            "            return _buffer_as_ubyte_array(data)\n"
+            "        obj = _py_object(data)\n"
+            "        buf = _Py_buffer()\n"
+            "        _PyObject_GetBuffer(obj, byref(buf), _PyBUF_SIMPLE)\n"
+            "        try:\n"
+            "            buffer_type = ctypes.c_ubyte * buf.len\n"
+            "            return buffer_type.from_address(buf.buf)\n"
+            "        finally:\n"
+            "            if _PyBuffer_Release is not None:\n"
+            "                _PyBuffer_Release(byref(buf))\n"
+            "    else:\n"
+            "        raise TypeError(\"Object type %s cannot be passed to C code\" % type(data))\n",
+            label="Crypto.Util._raw_api.c_uint8_ptr",
+        )
+        text = head + "except ImportError:\n" + tail
+    if "_load_embedded_process_lib" not in text:
+        embedded_loader = (
+            "_EMBEDDED_PROCESS_LIB = None\n\n\n"
+            "def _load_embedded_process_lib():\n"
+            "    global _EMBEDDED_PROCESS_LIB\n\n"
+            "    if _EMBEDDED_PROCESS_LIB is False:\n"
+            "        return None\n"
+            "    if _EMBEDDED_PROCESS_LIB is not None:\n"
+            "        return _EMBEDDED_PROCESS_LIB\n\n"
+            "    if backend != \"ctypes\" or os.name != \"nt\":\n"
+            "        _EMBEDDED_PROCESS_LIB = False\n"
+            "        return None\n\n"
+            "    executable = getattr(sys, \"executable\", None)\n"
+            "    if not executable:\n"
+            "        _EMBEDDED_PROCESS_LIB = False\n"
+            "        return None\n\n"
+            "    try:\n"
+            "        lib = load_lib(executable, \"\")\n"
+            "        getattr(lib, \"pycryptodome_embedded\")\n"
+            "    except (AttributeError, OSError):\n"
+            "        _EMBEDDED_PROCESS_LIB = False\n"
+            "        return None\n\n"
+            "    _EMBEDDED_PROCESS_LIB = lib\n"
+            "    return lib\n\n\n"
+        )
+        text, count = re.subn(
+            r"(?m)^def load_pycryptodome_raw_lib\([^\n]*\):\n",
+            lambda match: embedded_loader + match.group(0),
+            text,
+            count=1,
+        )
+        if count == 0:
+            if "load_pycryptodome_raw_lib" in text or "load_lib(" in text:
+                raise RuntimeError("Crypto.Util._raw_api embedded loader anchor not found")
+            return text
+    text = replace_function_block_once(
         text,
-        "    @cdecl, the C function declarations.\n"
-        "    \"\"\"\n\n"
-        "    split = name.split(\".\")\n",
+        "load_pycryptodome_raw_lib",
+        "def load_pycryptodome_raw_lib(name, cdecl):\n"
+        "    \"\"\"Load a shared library and return a handle to it.\n\n"
+        "    @name,  the name of the library expressed as a PyCryptodome module,\n"
+        "            for instance Crypto.Cipher._raw_cbc.\n\n"
         "    @cdecl, the C function declarations.\n"
         "    \"\"\"\n\n"
         "    embedded_process_lib = _load_embedded_process_lib()\n"
         "    if embedded_process_lib is not None:\n"
         "        return embedded_process_lib\n\n"
-        "    split = name.split(\".\")\n",
-        label="Crypto.Util._raw_api.embedded-usage",
-    )
-    text = replace_text_once(
-        text,
-        "    for ext in extension_suffixes:\n"
-        "        try:\n"
-        "            filename = basename + ext\n"
-        "            full_name = pycryptodome_filename(dir_comps, filename)\n"
-        "            if not os.path.isfile(full_name):\n"
-        "                attempts.append(\"Not found '%s'\" % filename)\n"
-        "                continue\n"
-        "            return load_lib(full_name, cdecl)\n"
-        "        except OSError as exp:\n"
-        "            attempts.append(\"Cannot load '%s': %s\" % (filename, str(exp)))\n",
-        "    for ext in extension_suffixes:\n"
+        "    split = name.split(\".\")\n"
+        "    dir_comps, basename = split[:-1], split[-1]\n"
+        "    attempts = []\n"
+        "    suffixes = globals().get('extension_suffixes')\n"
+        "    if suffixes is None:\n"
+        "        suffixes = [ext for ext, mod, typ in imp.get_suffixes() if typ == imp.C_EXTENSION]\n"
+        "    for ext in suffixes:\n"
         "        filename = basename + ext\n"
         "        try:\n"
-        "            full_name = pycryptodome_filename(dir_comps, filename)\n"
-        "            if not os.path.isfile(full_name):\n"
-        "                attempts.append(\"Not found '%s'\" % filename)\n"
-        "                continue\n"
+        "            if \"pycryptodome_filename\" in globals():\n"
+        "                full_name = pycryptodome_filename(dir_comps, filename)\n"
+        "                if not os.path.isfile(full_name):\n"
+        "                    attempts.append(\"Not found '%s'\" % filename)\n"
+        "                    continue\n"
+        "            else:\n"
+        "                full_name = _get_mod_name(name, ext)\n"
         "            return load_lib(full_name, cdecl)\n"
         "        except (NameError, OSError, TypeError, ValueError) as exp:\n"
-        "            attempts.append(\"Cannot load '%s': %s\" % (filename, str(exp)))\n",
-        label="Crypto.Util._raw_api.load-loop",
+        "            attempts.append(\"Cannot load '%s': %s\" % (filename, str(exp)))\n"
+        "    raise OSError(\"Cannot load native module '%s': %s\" % (name, \", \".join(attempts)))\n\n",
+        label="Crypto.Util._raw_api.load-function",
+        next_name=None,
     )
     return text
 
@@ -498,14 +497,21 @@ def _patch_bignum_c(text: str) -> str:
 
 
 def patch_crypto_sources(context) -> None:
-    transform_source_text(context, "Lib/Crypto/Util/_raw_api.py", _patch_raw_api)
-    transform_source_text(context, "pycryptodome_builtin/src/bignum.c", _patch_bignum_c)
-    transform_source_text(context, "pycryptodome_builtin/src/blake2b.c", _patch_blake2b_c)
-    transform_source_text(context, "Lib/Crypto/Hash/BLAKE2b.py", _patch_blake2b_py)
-    transform_source_text(context, "pycryptodome_builtin/src/blake2s.c", _patch_blake2s_c)
-    transform_source_text(context, "Lib/Crypto/Hash/BLAKE2s.py", _patch_blake2s_py)
-    transform_source_text(context, "pycryptodome_builtin/src/poly1305.c", _patch_poly1305_c)
-    transform_source_text(context, "Lib/Crypto/Hash/Poly1305.py", _patch_poly1305_py)
+    transform_source_text(context, "Lib/Crypto/Util/_raw_api.py", _patch_raw_api, allow_missing=True)
+    if source_path(context, "pycryptodome_builtin/src/bignum.c").exists():
+        transform_source_text(context, "pycryptodome_builtin/src/bignum.c", _patch_bignum_c)
+    if source_path(context, "pycryptodome_builtin/src/blake2b.c").exists():
+        transform_source_text(context, "pycryptodome_builtin/src/blake2b.c", _patch_blake2b_c)
+    if source_path(context, "Lib/Crypto/Hash/BLAKE2b.py").exists():
+        transform_source_text(context, "Lib/Crypto/Hash/BLAKE2b.py", _patch_blake2b_py)
+    if source_path(context, "pycryptodome_builtin/src/blake2s.c").exists():
+        transform_source_text(context, "pycryptodome_builtin/src/blake2s.c", _patch_blake2s_c)
+    if source_path(context, "Lib/Crypto/Hash/BLAKE2s.py").exists():
+        transform_source_text(context, "Lib/Crypto/Hash/BLAKE2s.py", _patch_blake2s_py)
+    if source_path(context, "pycryptodome_builtin/src/poly1305.c").exists():
+        transform_source_text(context, "pycryptodome_builtin/src/poly1305.c", _patch_poly1305_c)
+    if source_path(context, "Lib/Crypto/Hash/Poly1305.py").exists():
+        transform_source_text(context, "Lib/Crypto/Hash/Poly1305.py", _patch_poly1305_py)
 
 
 LIBRARY_INTEGRATION = pypi_library(

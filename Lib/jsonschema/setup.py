@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import json
+import re
 
-from libs import pypi_library, replace_text_once, source_path, transform_source_text, write_source_text
+from libs import (
+    ensure_text_after,
+    ensure_text_before,
+    pypi_library,
+    replace_function_block_once,
+    source_path,
+    transform_source_text,
+    write_source_text,
+)
 
 
 def embed_jsonschema_schemas(context) -> None:
     package_root = source_path(context, "Lib/jsonschema")
+    schema_root = package_root / "schemas"
+    if not schema_root.exists():
+        return
     schemas = {}
-    for path in sorted((package_root / "schemas").rglob("*")):
+    for path in sorted(schema_root.rglob("*")):
         if not path.is_file():
             continue
         schemas[path.relative_to(package_root).as_posix()] = json.loads(path.read_text(encoding="utf-8"))
@@ -23,71 +35,103 @@ def embed_jsonschema_schemas(context) -> None:
     )
 
     def patch_utils(text: str) -> str:
-        text = replace_text_once(
+        if "def load_schema(" not in text or "resources.files(__package__)" not in text:
+            if "resources.files(__package__)" in text and "schemas" in text:
+                raise RuntimeError("jsonschema schema loader anchor not found")
+            return text
+        if "from copy import deepcopy\n" not in text:
+            if "import sys\n" in text:
+                text = ensure_text_after(
+                    text,
+                    "import sys\n",
+                    "from copy import deepcopy\n",
+                    label="jsonschema deepcopy import",
+                )
+            elif "import json\n" in text:
+                text = ensure_text_after(
+                    text,
+                    "import json\n",
+                    "from copy import deepcopy\n",
+                    label="jsonschema deepcopy import",
+                )
+            else:
+                raise RuntimeError("expected jsonschema import anchor for deepcopy")
+        if "from ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n" not in text:
+            if "\n\nclass " in text:
+                text = ensure_text_before(
+                    text,
+                    "\n\nclass ",
+                    "\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS",
+                    label="jsonschema static schema import",
+                )
+            else:
+                raise RuntimeError("expected jsonschema class anchor for static schema import")
+        return replace_function_block_once(
             text,
-            "import itertools\nimport json\nimport re\nimport sys\n",
-            "import itertools\nimport json\nimport re\nimport sys\nfrom copy import deepcopy\n",
-            label="jsonschema deepcopy import",
-        )
-        text = replace_text_once(
-            text,
-            '    import importlib_resources as resources  # type: ignore\n',
-            '    import importlib_resources as resources  # type: ignore\n\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n',
-            label="jsonschema static schema import",
-        )
-        return replace_text_once(
-            text,
-            '    path = resources.files(__package__).joinpath(f"schemas/{name}.json")\n'
-            '    data = path.read_text(encoding="utf-8")\n'
-            "    return json.loads(data)\n",
+            "load_schema",
+            "def load_schema(name):\n"
+            "    \"\"\"\n"
+            "    Load a schema from ./schemas/``name``.json and return it.\n"
+            "    \"\"\"\n"
+            "\n"
             '    schema_path = f"schemas/{name}.json"\n'
             "    if schema_path in _STATICPYTHON_SCHEMAS:\n"
             "        return deepcopy(_STATICPYTHON_SCHEMAS[schema_path])\n"
-            '    path = resources.files(__package__).joinpath(schema_path)\n'
+            "    path = resources.files(__package__).joinpath(schema_path)\n"
             '    data = path.read_text(encoding="utf-8")\n'
-            "    return json.loads(data)\n",
+            "    return json.loads(data)\n\n",
             label="jsonschema schema loader",
+            next_name="format_as_index",
         )
 
     def patch_validators(text: str) -> str:
-        text = replace_text_once(
+        if "def _store_schema_list(" not in text:
+            if "_VOCABULARIES" in text or "vocabularies" in text:
+                raise RuntimeError("jsonschema vocabulary loader anchor not found")
+            return text
+        if "from ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n" not in text:
+            text, count = re.subn(
+                r"(?m)^(?P<anchor>_UNSET\s*=\s*_utils\.Unset\(\)|_VALIDATORS(?:\s*:\s*[^=]+)?\s*=\s*\{\}|_META_SCHEMAS(?:\s*:\s*[^=]+)?\s*=.*|_VOCABULARIES(?:\s*:\s*[^=]+)?\s*=.*)\n",
+                "from ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n\\g<anchor>\n",
+                text,
+                count=1,
+            )
+            if count != 1:
+                raise RuntimeError("expected anchor not found in jsonschema validators static schema import")
+        return replace_function_block_once(
             text,
-            "    _validators,\n    exceptions,\n)\n",
-            "    _validators,\n    exceptions,\n)\nfrom ._static_schemas import SCHEMAS as _STATICPYTHON_SCHEMAS\n",
-            label="jsonschema validators static schema import",
-        )
-        return replace_text_once(
-            text,
+            "_store_schema_list",
             "def _store_schema_list():\n"
             "    if not _VOCABULARIES:\n"
-            "        package = _utils.resources.files(__package__)\n"
-            '        for version in package.joinpath("schemas", "vocabularies").iterdir():\n'
-            "            for path in version.iterdir():\n"
-            "                vocabulary = json.loads(path.read_text())\n"
-            '                _VOCABULARIES.append((vocabulary["$id"], vocabulary))\n'
-            "    return [\n"
-            "        (id, validator.META_SCHEMA) for id, validator in _META_SCHEMAS.items()\n"
-            "    ] + _VOCABULARIES\n",
-            "def _store_schema_list():\n"
-            "    if not _VOCABULARIES:\n"
-            "        embedded_vocabularies = [\n"
-            "            _STATICPYTHON_SCHEMAS[path]\n"
-            "            for path in sorted(_STATICPYTHON_SCHEMAS)\n"
-            '            if path.startswith("schemas/vocabularies/")\n'
-            "        ]\n"
+            "        embedded_vocabularies = []\n"
+            '        embedded_mapping = _STATICPYTHON_SCHEMAS.get("schemas/vocabularies.json")\n'
+            "        if isinstance(embedded_mapping, dict):\n"
+            "            embedded_vocabularies.extend(embedded_mapping.items())\n"
+            "        else:\n"
+            "            for path in sorted(_STATICPYTHON_SCHEMAS):\n"
+            '                if not path.startswith("schemas/vocabularies/"):\n'
+            "                    continue\n"
+            "                vocabulary = _STATICPYTHON_SCHEMAS[path]\n"
+            '                if isinstance(vocabulary, dict) and "$id" in vocabulary:\n'
+            '                    embedded_vocabularies.append((vocabulary["$id"], vocabulary))\n'
             "        if embedded_vocabularies:\n"
-            "            for vocabulary in embedded_vocabularies:\n"
-            '                _VOCABULARIES.append((vocabulary["$id"], vocabulary))\n'
+            "            _VOCABULARIES.extend(embedded_vocabularies)\n"
             "        else:\n"
             "            package = _utils.resources.files(__package__)\n"
-            '            for version in package.joinpath("schemas").joinpath("vocabularies").iterdir():\n'
-            "                for path in version.iterdir():\n"
-            "                    vocabulary = json.loads(path.read_text())\n"
-            '                    _VOCABULARIES.append((vocabulary["$id"], vocabulary))\n'
+            "            try:\n"
+            '                for version in package.joinpath("schemas", "vocabularies").iterdir():\n'
+            "                    for path in version.iterdir():\n"
+            "                        vocabulary = json.loads(path.read_text())\n"
+            '                        _VOCABULARIES.append((vocabulary["$id"], vocabulary))\n'
+            "            except Exception:\n"
+            '                loaded_vocabularies = _utils.load_schema("vocabularies")\n'
+            "                if isinstance(loaded_vocabularies, dict):\n"
+            "                    _VOCABULARIES.extend(loaded_vocabularies.items())\n"
             "    return [\n"
             "        (id, validator.META_SCHEMA) for id, validator in _META_SCHEMAS.items()\n"
-            "    ] + _VOCABULARIES\n",
+            "    ] + _VOCABULARIES\n\n",
             label="jsonschema vocabulary loader",
+            next_name="create",
         )
 
     transform_source_text(context, "Lib/jsonschema/_utils.py", patch_utils)

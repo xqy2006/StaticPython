@@ -1,22 +1,35 @@
-from libs import replace_text_once, simple_library, transform_source_text
+import re
+
+from libs import simple_library, transform_first_existing_source_text
 
 
 def patch_isort_sources(context):
     def patch_version(text: str) -> str:
-        return replace_text_once(
-            text,
-            'from importlib import metadata\n\n__version__ = metadata.version("isort")\n',
+        if "metadata.PackageNotFoundError" in text:
+            return text
+        updated, count = re.subn(
+            r'(?m)^__version__\s*=\s*metadata\.version\("isort"\)\s*$',
             (
-                "from importlib import metadata\n\n"
                 "try:\n"
                 '    __version__ = metadata.version("isort")\n'
                 "except metadata.PackageNotFoundError:\n"
-                '    __version__ = "0+staticpython"\n'
+                '    __version__ = "0+staticpython"'
             ),
-            label="isort metadata-free version fallback",
+            text,
+            count=1,
         )
+        if count == 1:
+            return updated
+        if "metadata.version" in text and "isort" in text:
+            raise RuntimeError("isort version metadata anchor not found")
+        return text
 
-    transform_source_text(context, "Lib/isort/_version.py", patch_version)
+    transform_first_existing_source_text(
+        context,
+        ["Lib/isort/_version.py", "Lib/isort/__init__.py"],
+        patch_version,
+        allow_all_missing=True,
+    )
 
 
 LIBRARY_INTEGRATION = simple_library(

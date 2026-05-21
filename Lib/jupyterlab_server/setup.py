@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import re
+
 from libs import (
     pypi_library,
+    replace_regex_once,
     replace_text_once,
     source_path,
+    transform_first_existing_source_text,
     transform_source_text,
     write_source_text,
 )
@@ -11,10 +15,17 @@ from libs import (
 
 def patch_jupyterlab_server_resources(context) -> None:
     package_root = source_path(context, "Lib/jupyterlab_server")
-    templates = {
-        path.name: path.read_text(encoding="utf-8")
-        for path in sorted((package_root / "templates").glob("*.html"))
-    }
+    templates_root = package_root / "templates"
+    if templates_root.exists():
+        templates = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in sorted(templates_root.glob("*.html"))
+        }
+    else:
+        templates = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in sorted(package_root.glob("*.html"))
+        }
     if "index.html" not in templates:
         raise RuntimeError("expected jupyterlab_server templates were not materialized")
 
@@ -26,84 +37,96 @@ def patch_jupyterlab_server_resources(context) -> None:
     )
 
     def patch_config(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "from traitlets import Bool, HasTraits, List, Unicode, default\n",
-            "from traitlets import Bool, HasTraits, List, Unicode, default\n"
-            "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
-            label="jupyterlab_server config static import",
-        )
-        text = replace_text_once(
-            text,
-            "    federated_extensions = {}\n"
-            "    for ext_dir in labextensions_path:\n"
-            "        # extensions are either top-level directories, or two-deep in @org directories\n"
-            "        for ext_path in chain(\n"
-            "            iglob(pjoin(ext_dir, \"[!@]*\", \"package.json\")),\n"
-            "            iglob(pjoin(ext_dir, \"@*\", \"*\", \"package.json\")),\n"
-            "        ):\n"
-            "            with open(ext_path, encoding=\"utf-8\") as fid:\n"
-            "                pkgdata = json.load(fid)\n",
-            "    federated_extensions = {}\n"
-            "    static_extensions = []\n"
-            "    try:\n"
-            "        from notebook._staticpython_resources import FEDERATED_EXTENSIONS as static_extensions\n"
-            "    except Exception:\n"
-            "        static_extensions = []\n"
-            "    for static_entry in static_extensions:\n"
-            "        pkgdata = static_entry[\"package\"]\n"
-            "        ext_dir = static_entry.get(\"ext_dir\", \"\")\n"
-            "        ext_path = static_entry.get(\"ext_path\", \"\")\n"
-            "        if pkgdata[\"name\"] not in federated_extensions:\n"
-            "            data = dict(\n"
-            "                name=pkgdata[\"name\"],\n"
-            "                version=pkgdata[\"version\"],\n"
-            "                description=pkgdata.get(\"description\", \"\"),\n"
-            "                url=get_package_url(pkgdata),\n"
-            "                ext_dir=ext_dir,\n"
-            "                ext_path=ext_path,\n"
-            "                is_local=False,\n"
-            "                dependencies=pkgdata.get(\"dependencies\", dict()),\n"
-            "                jupyterlab=pkgdata.get(\"jupyterlab\", dict()),\n"
-            "            )\n"
-            "            install_data = static_entry.get(\"install\")\n"
-            "            if install_data is not None:\n"
-            "                data[\"install\"] = install_data\n"
-            "            federated_extensions[data[\"name\"]] = data\n"
-            "    for ext_dir in labextensions_path:\n"
-            "        # extensions are either top-level directories, or two-deep in @org directories\n"
-            "        for ext_path in chain(\n"
-            "            iglob(pjoin(ext_dir, \"[!@]*\", \"package.json\")),\n"
-            "            iglob(pjoin(ext_dir, \"@*\", \"*\", \"package.json\")),\n"
-            "        ):\n"
-            "            with open(ext_path, encoding=\"utf-8\") as fid:\n"
-            "                pkgdata = json.load(fid)\n",
-            label="jupyterlab_server federated extension metadata fallback",
-        )
-        return replace_text_once(
-            text,
-            "        package_data_file = pjoin(app_dir, \"static\", \"package.json\")\n"
-            "        if osp.exists(package_data_file):\n"
-            "            with open(package_data_file, encoding=\"utf-8\") as fid:\n"
-            "                app_data = json.load(fid)\n",
-            "        package_data_file = pjoin(app_dir, \"static\", \"package.json\")\n"
-            "        app_data = None\n"
-            "        try:\n"
-            "            from jupyterlab._staticpython_resources import STATIC_PACKAGE_DATA as app_data\n"
-            "        except Exception:\n"
-            "            app_data = None\n"
-            "        if app_data is None and osp.exists(package_data_file):\n"
-            "            with open(package_data_file, encoding=\"utf-8\") as fid:\n"
-            "                app_data = json.load(fid)\n"
-            "        if app_data is not None:\n",
-            label="jupyterlab_server app package metadata fallback",
-        )
+        if "from traitlets import Bool, HasTraits, List, Unicode, default\n" in text:
+            text = replace_text_once(
+                text,
+                "from traitlets import Bool, HasTraits, List, Unicode, default\n",
+                "from traitlets import Bool, HasTraits, List, Unicode, default\n"
+                "from jupyter_server._staticpython_resources import template_dict_for_package as _staticpython_template_dict_for_package\n",
+                label="jupyterlab_server config static import",
+            )
+        if "    federated_extensions = {}\n" in text and "from notebook._staticpython_resources import FEDERATED_EXTENSIONS" not in text:
+            text = replace_text_once(
+                text,
+                "    federated_extensions = {}\n"
+                "    for ext_dir in labextensions_path:\n"
+                "        # extensions are either top-level directories, or two-deep in @org directories\n"
+                "        for ext_path in chain(\n"
+                "            iglob(pjoin(ext_dir, \"[!@]*\", \"package.json\")),\n"
+                "            iglob(pjoin(ext_dir, \"@*\", \"*\", \"package.json\")),\n"
+                "        ):\n"
+                "            with open(ext_path, encoding=\"utf-8\") as fid:\n"
+                "                pkgdata = json.load(fid)\n",
+                "    federated_extensions = {}\n"
+                "    static_extensions = []\n"
+                "    try:\n"
+                "        from notebook._staticpython_resources import FEDERATED_EXTENSIONS as static_extensions\n"
+                "    except Exception:\n"
+                "        static_extensions = []\n"
+                "    for static_entry in static_extensions:\n"
+                "        pkgdata = static_entry[\"package\"]\n"
+                "        ext_dir = static_entry.get(\"ext_dir\", \"\")\n"
+                "        ext_path = static_entry.get(\"ext_path\", \"\")\n"
+                "        if pkgdata[\"name\"] not in federated_extensions:\n"
+                "            data = dict(\n"
+                "                name=pkgdata[\"name\"],\n"
+                "                version=pkgdata[\"version\"],\n"
+                "                description=pkgdata.get(\"description\", \"\"),\n"
+                "                url=get_package_url(pkgdata),\n"
+                "                ext_dir=ext_dir,\n"
+                "                ext_path=ext_path,\n"
+                "                is_local=False,\n"
+                "                dependencies=pkgdata.get(\"dependencies\", dict()),\n"
+                "                jupyterlab=pkgdata.get(\"jupyterlab\", dict()),\n"
+                "            )\n"
+                "            install_data = static_entry.get(\"install\")\n"
+                "            if install_data is not None:\n"
+                "                data[\"install\"] = install_data\n"
+                "            federated_extensions[data[\"name\"]] = data\n"
+                "    for ext_dir in labextensions_path:\n"
+                "        # extensions are either top-level directories, or two-deep in @org directories\n"
+                "        for ext_path in chain(\n"
+                "            iglob(pjoin(ext_dir, \"[!@]*\", \"package.json\")),\n"
+                "            iglob(pjoin(ext_dir, \"@*\", \"*\", \"package.json\")),\n"
+                "        ):\n"
+                "            with open(ext_path, encoding=\"utf-8\") as fid:\n"
+                "                pkgdata = json.load(fid)\n",
+                label="jupyterlab_server federated extension metadata fallback",
+            )
+        if "        package_data_file = pjoin(app_dir, \"static\", \"package.json\")\n" in text and "from jupyterlab._staticpython_resources import STATIC_PACKAGE_DATA" not in text:
+            text = replace_text_once(
+                text,
+                "        package_data_file = pjoin(app_dir, \"static\", \"package.json\")\n"
+                "        if osp.exists(package_data_file):\n"
+                "            with open(package_data_file, encoding=\"utf-8\") as fid:\n"
+                "                app_data = json.load(fid)\n",
+                "        package_data_file = pjoin(app_dir, \"static\", \"package.json\")\n"
+                "        app_data = None\n"
+                "        try:\n"
+                "            from jupyterlab._staticpython_resources import STATIC_PACKAGE_DATA as app_data\n"
+                "        except Exception:\n"
+                "            app_data = None\n"
+                "        if app_data is None and osp.exists(package_data_file):\n"
+                "            with open(package_data_file, encoding=\"utf-8\") as fid:\n"
+                "                app_data = json.load(fid)\n"
+                "        if app_data is not None:\n",
+                label="jupyterlab_server app package metadata fallback",
+            )
+        if (
+            "for ext_path in chain(" in text
+            and "with open(ext_path, encoding=\"utf-8\") as fid:" in text
+            and "FEDERATED_EXTENSIONS as static_extensions" not in text
+        ):
+            raise RuntimeError("jupyterlab_server federated extension metadata anchor not found")
+        if (
+            "package_data_file = pjoin(app_dir, \"static\", \"package.json\")" in text
+            and "STATIC_PACKAGE_DATA as app_data" not in text
+        ):
+            raise RuntimeError("jupyterlab_server app package metadata anchor not found")
+        return text
 
     def patch_settings_utils(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "from .translation_utils import DEFAULT_LOCALE, L10N_SCHEMA_NAME, SYS_LOCALE, is_valid_locale\n",
-            "from .translation_utils import DEFAULT_LOCALE, L10N_SCHEMA_NAME, SYS_LOCALE, is_valid_locale\n\n"
+        schema_helpers = (
             "def _staticpython_schema_data(schema_name):\n"
             "    try:\n"
             "        from jupyterlab._staticpython_resources import SCHEMAS as lab_schemas\n"
@@ -126,82 +149,205 @@ def patch_jupyterlab_server_resources(context) -> None:
             "        names.update(notebook_schemas)\n"
             "    except Exception:\n"
             "        pass\n"
-            "    return sorted(names)\n",
-            label="jupyterlab_server settings static schema helpers",
+            "    return sorted(names)\n\n"
         )
-        text = replace_text_once(
-            text,
-            "    path = None\n"
-            "\n"
-            "    # Look for the setting in all of the labextension paths first\n",
-            "    path = None\n"
-            "    static_entry = _staticpython_schema_data(schema_name)\n"
-            "    if static_entry is not None:\n"
-            "        schema = _override(schema_name, static_entry[\"schema\"].copy(), overrides)\n"
-            "        try:\n"
-            "            Validator.check_schema(schema)\n"
-            "        except Exception as e:\n"
-            "            name = schema_name\n"
-            "            raise web.HTTPError(500, validation_error % (name, str(e))) from None\n"
-            "        return schema, static_entry.get(\"version\", \"N/A\")\n"
-            "\n"
-            "    # Look for the setting in all of the labextension paths first\n",
-            label="jupyterlab_server direct schema fallback",
-        )
-        text = replace_text_once(
-            text,
-            "    if not os.path.exists(schemas_dir):\n"
-            "        warnings = [\"Settings directory does not exist at %s\" % schemas_dir]\n"
-            "        return ([], warnings)\n"
-            "\n"
-            "    schema_pattern = schemas_dir + \"/**/*\" + extension\n"
-            "    schema_paths = [path for path in glob(schema_pattern, recursive=True)]\n"
-            "    schema_paths.sort()\n",
-            "    schema_paths = []\n"
-            "    if os.path.exists(schemas_dir):\n"
-            "        schema_pattern = schemas_dir + \"/**/*\" + extension\n"
-            "        schema_paths = [path for path in glob(schema_pattern, recursive=True)]\n"
-            "        schema_paths.sort()\n"
-            "\n"
-            "    for static_schema_name in _staticpython_schema_names():\n"
-            "        if ids_only:\n"
-            "            settings[static_schema_name] = dict(id=static_schema_name)\n"
-            "        else:\n"
-            "            schema, version = _get_schema(schemas_dir, static_schema_name, overrides, labextensions_path=None)\n"
-            "            if translator is not None:\n"
-            "                schema = translator(schema)\n"
-            "            user_settings = _get_user_settings(settings_dir, static_schema_name, schema)\n"
-            "            if user_settings[\"warning\"]:\n"
-            "                warnings.append(user_settings.pop(\"warning\"))\n"
-            "            settings[static_schema_name] = dict(id=static_schema_name, schema=schema, version=version, **user_settings)\n",
-            label="jupyterlab_server list embedded schemas",
-        )
+        if "from .translation_utils import DEFAULT_LOCALE, L10N_SCHEMA_NAME, SYS_LOCALE, is_valid_locale\n" in text:
+            text = replace_text_once(
+                text,
+                "from .translation_utils import DEFAULT_LOCALE, L10N_SCHEMA_NAME, SYS_LOCALE, is_valid_locale\n",
+                "from .translation_utils import DEFAULT_LOCALE, L10N_SCHEMA_NAME, SYS_LOCALE, is_valid_locale\n\n"
+                + schema_helpers.rstrip("\n"),
+                label="jupyterlab_server settings static schema helpers",
+            )
+        elif "def _staticpython_schema_data(schema_name):" not in text:
+            text = replace_regex_once(
+                text,
+                r"(?m)^def _get_schema\(",
+                schema_helpers + "def _get_schema(",
+                label="jupyterlab_server settings static schema helpers",
+            )
+        if "    path = None\n" in text and "static_entry = _staticpython_schema_data(schema_name)\n" not in text:
+            text = replace_text_once(
+                text,
+                "    path = None\n"
+                "\n"
+                "    # Look for the setting in all of the labextension paths first\n",
+                "    path = None\n"
+                "    static_entry = _staticpython_schema_data(schema_name)\n"
+                "    if static_entry is not None:\n"
+                "        schema = _override(schema_name, static_entry[\"schema\"].copy(), overrides)\n"
+                "        try:\n"
+                "            Validator.check_schema(schema)\n"
+                "        except Exception as e:\n"
+                "            name = schema_name\n"
+                "            raise web.HTTPError(500, validation_error % (name, str(e))) from None\n"
+                "        return schema, static_entry.get(\"version\", \"N/A\")\n"
+                "\n"
+                "    # Look for the setting in all of the labextension paths first\n",
+                label="jupyterlab_server direct schema fallback",
+            )
+        elif "    path = _path(schemas_dir, schema_name)\n" in text and "static_entry = _staticpython_schema_data(schema_name)\n" not in text:
+            text = replace_text_once(
+                text,
+                "    path = _path(schemas_dir, schema_name)\n",
+                "    path = _path(schemas_dir, schema_name)\n"
+                "    static_entry = _staticpython_schema_data(schema_name)\n"
+                "    if static_entry is not None:\n"
+                "        schema = _override(schema_name, static_entry[\"schema\"].copy(), overrides)\n"
+                "        try:\n"
+                "            Validator.check_schema(schema)\n"
+                "        except Exception as e:\n"
+                "            name = schema_name\n"
+                "            raise web.HTTPError(500, validation_error % (name, str(e))) from None\n"
+                "        return schema\n",
+                label="jupyterlab_server legacy direct schema fallback",
+            )
+        if (
+            "    if not os.path.exists(schemas_dir):\n" in text
+            and "Settings directory does not exist at %s" in text
+            and "for static_schema_name in _staticpython_schema_names()" not in text
+        ):
+            text = replace_regex_once(
+                text,
+                r"(?ms)^    if not os\.path\.exists\(schemas_dir\):\n"
+                r"^        warnings = \[(?:'|\")Settings directory does not exist at %s(?:'|\") % schemas_dir\]\n"
+                r"^        return \(\[\], warnings\)\n"
+                r"^\n"
+                r"^    schema_pattern = schemas_dir \+ (?:'|\")/\*\*/\*(?:'|\") \+ extension\n"
+                r"^    schema_paths = \[path for path in glob\(schema_pattern, recursive=True\)\](?:\s*#.*)?\n"
+                r"^    schema_paths\.sort\(\)\n",
+                "    schema_paths = []\n"
+                "    if os.path.exists(schemas_dir):\n"
+                "        schema_pattern = schemas_dir + \"/**/*\" + extension\n"
+                "        schema_paths = [path for path in glob(schema_pattern, recursive=True)]\n"
+                "        schema_paths.sort()\n"
+                "\n"
+                "    for static_schema_name in _staticpython_schema_names():\n"
+                "        if ids_only:\n"
+                "            settings[static_schema_name] = dict(id=static_schema_name)\n"
+                "        else:\n"
+                "            schema, version = _get_schema(schemas_dir, static_schema_name, overrides, labextensions_path=None)\n"
+                "            if translator is not None:\n"
+                "                schema = translator(schema)\n"
+                "            user_settings = _get_user_settings(settings_dir, static_schema_name, schema)\n"
+                "            if user_settings[\"warning\"]:\n"
+                "                warnings.append(user_settings.pop(\"warning\"))\n"
+                "            settings[static_schema_name] = dict(id=static_schema_name, schema=schema, version=version, **user_settings)\n",
+                label="jupyterlab_server list embedded schemas",
+                flags=re.MULTILINE | re.DOTALL,
+            )
+        if (
+            "    if not os.path.exists(schemas_dir):\n        return (settings_list, warnings)\n" in text
+            and "for static_schema_name in _staticpython_schema_names()" not in text
+        ):
+            text = replace_text_once(
+                text,
+                "    if not os.path.exists(schemas_dir):\n"
+                "        return (settings_list, warnings)\n"
+                "\n"
+                "    schema_pattern = schemas_dir + '/**/*' + extension\n"
+                "    schema_paths = [path for path in glob(schema_pattern, recursive=True)]\n"
+                "    schema_paths.sort()\n",
+                "    schema_paths = []\n"
+                "    if os.path.exists(schemas_dir):\n"
+                "        schema_pattern = schemas_dir + '/**/*' + extension\n"
+                "        schema_paths = [path for path in glob(schema_pattern, recursive=True)]\n"
+                "        schema_paths.sort()\n",
+                label="jupyterlab_server legacy list embedded schemas setup",
+            )
+            text = replace_text_once(
+                text,
+                "    return (settings_list, warnings)\n",
+                "    existing_ids = {entry['id'] for entry in settings_list}\n"
+                "    for static_schema_name in _staticpython_schema_names():\n"
+                "        if static_schema_name in existing_ids:\n"
+                "            continue\n"
+                "        schema = _get_schema(schemas_dir, static_schema_name, overrides)\n"
+                "        raw, settings, warning = _get_settings(settings_dir, static_schema_name, schema)\n"
+                "        version = _get_version(schemas_dir, static_schema_name)\n"
+                "        if warning:\n"
+                "            warnings.append(warning)\n"
+                "        settings_list.append(dict(\n"
+                "            id=static_schema_name,\n"
+                "            raw=raw,\n"
+                "            schema=schema,\n"
+                "            settings=settings,\n"
+                "            version=version,\n"
+                "        ))\n"
+                "\n"
+                "    return (settings_list, warnings)\n",
+                label="jupyterlab_server legacy list embedded schemas",
+            )
+        if (
+            "def _get_schema(" in text
+            and "static_entry = _staticpython_schema_data(schema_name)" not in text
+        ):
+            raise RuntimeError("jupyterlab_server direct schema fallback anchor not found")
+        if (
+            "def _list_settings(" in text
+            and "for static_schema_name in _staticpython_schema_names()" not in text
+        ):
+            raise RuntimeError("jupyterlab_server list embedded schemas anchor not found")
+        if (
+            ("_staticpython_schema_data(" in text or "_staticpython_schema_names()" in text)
+            and "def _staticpython_schema_data(schema_name):" not in text
+        ):
+            raise RuntimeError("jupyterlab_server static schema helper import anchor not found")
         return text
 
     def patch_themes_handler(text: str) -> str:
-        text = replace_text_once(
-            text,
-            "from jupyter_server.base.handlers import FileFindHandler\n",
-            "from jupyter_server.base.handlers import FileFindHandler\n"
-            "from jupyter_server._staticpython_resources import resource_bytes_for_path as _staticpython_resource_bytes_for_path\n",
-            label="jupyterlab_server themes static import",
-        )
-        return replace_text_once(
-            text,
-            "        with open(self.absolute_path, \"rb\") as fid:\n"
-            "            data = fid.read().decode(\"utf-8\")\n",
-            "        resource_data = _staticpython_resource_bytes_for_path(self.absolute_path)\n"
-            "        if resource_data is None:\n"
-            "            with open(self.absolute_path, \"rb\") as fid:\n"
-            "                data = fid.read().decode(\"utf-8\")\n"
-            "        else:\n"
-            "            data = resource_data.decode(\"utf-8\")\n",
-            label="jupyterlab_server themes embedded css read",
-        )
+        if "from jupyter_server.base.handlers import FileFindHandler\n" in text:
+            text = replace_text_once(
+                text,
+                "from jupyter_server.base.handlers import FileFindHandler\n",
+                "from jupyter_server.base.handlers import FileFindHandler\n"
+                "from jupyter_server._staticpython_resources import resource_bytes_for_path as _staticpython_resource_bytes_for_path\n",
+                label="jupyterlab_server themes static import",
+            )
+        elif "from .server import FileFindHandler\n" in text:
+            text = replace_text_once(
+                text,
+                "from .server import FileFindHandler\n",
+                "from .server import FileFindHandler\n"
+                "from jupyter_server._staticpython_resources import resource_bytes_for_path as _staticpython_resource_bytes_for_path\n",
+                label="jupyterlab_server themes static import",
+            )
+        if "        with open(self.absolute_path, \"rb\") as fid:\n" in text and "_staticpython_resource_bytes_for_path(self.absolute_path)" not in text:
+            text = replace_text_once(
+                text,
+                "        with open(self.absolute_path, \"rb\") as fid:\n"
+                "            data = fid.read().decode(\"utf-8\")\n",
+                "        resource_data = _staticpython_resource_bytes_for_path(self.absolute_path)\n"
+                "        if resource_data is None:\n"
+                "            with open(self.absolute_path, \"rb\") as fid:\n"
+                "                data = fid.read().decode(\"utf-8\")\n"
+                "        else:\n"
+                "            data = resource_data.decode(\"utf-8\")\n",
+                label="jupyterlab_server themes embedded css read",
+            )
+        if (
+            "with open(self.absolute_path, \"rb\") as fid:" in text
+            and "_staticpython_resource_bytes_for_path(self.absolute_path)" not in text
+        ):
+            raise RuntimeError("jupyterlab_server themes embedded css read anchor not found")
+        if (
+            "_staticpython_resource_bytes_for_path(self.absolute_path)" in text
+            and "resource_bytes_for_path as _staticpython_resource_bytes_for_path" not in text
+        ):
+            raise RuntimeError("jupyterlab_server themes static import anchor not found")
+        return text
 
-    transform_source_text(context, "Lib/jupyterlab_server/config.py", patch_config)
-    transform_source_text(context, "Lib/jupyterlab_server/settings_utils.py", patch_settings_utils)
-    transform_source_text(context, "Lib/jupyterlab_server/themes_handler.py", patch_themes_handler)
+    transform_source_text(context, "Lib/jupyterlab_server/config.py", patch_config, allow_missing=True)
+    transform_first_existing_source_text(
+        context,
+        [
+            "Lib/jupyterlab_server/settings_utils.py",
+            "Lib/jupyterlab_server/settings_handler.py",
+        ],
+        patch_settings_utils,
+        allow_all_missing=True,
+    )
+    transform_source_text(context, "Lib/jupyterlab_server/themes_handler.py", patch_themes_handler, allow_missing=True)
 
 
 LIBRARY_INTEGRATION = pypi_library(
@@ -212,9 +358,6 @@ LIBRARY_INTEGRATION = pypi_library(
         "jupyterlab_server": "Lib/jupyterlab_server",
     },
     materialized_paths=[
-        "Lib/jupyterlab_server/templates/index.html",
-        "Lib/jupyterlab_server/templates/error.html",
-        "Lib/jupyterlab_server/templates/403.html",
         "Lib/jupyterlab_server/_staticpython_resources.py",
     ],
     python_packages=["jupyterlab_server"],
