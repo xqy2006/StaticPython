@@ -205,7 +205,30 @@ def _patch_generated_cython_cpp(text: str) -> str:
 
 def _patch_imgui_generated_sources(context) -> None:
     transform_source_text(context, "Lib/imgui/core.cpp", _patch_generated_cython_cpp)
-    transform_source_text(context, "Lib/imgui/internal.cpp", _patch_generated_cython_cpp, allow_missing=True)
+
+    def patch_internal(text: str) -> str:
+        text = _patch_generated_cython_cpp(text)
+        # core.cpp and internal.cpp both publish a Cython-level ImGuiError
+        # variable. They are separate extension modules, but static linking
+        # merges them into one executable, so keep the internal module's C
+        # symbol private while preserving the Python attribute name.
+        return re.sub(
+            r'(?<![A-Za-z0-9_"\'_])ImGuiError(?![A-Za-z0-9_"\'_])',
+            "StaticPythonImguiInternal_ImGuiError",
+            text,
+        )
+
+    transform_source_text(context, "Lib/imgui/internal.cpp", patch_internal, allow_missing=True)
+    transform_source_text(
+        context,
+        "Lib/imgui/internal.h",
+        lambda text: re.sub(
+            r'(?<![A-Za-z0-9_"\'_])ImGuiError(?![A-Za-z0-9_"\'_])',
+            "StaticPythonImguiInternal_ImGuiError",
+            text,
+        ),
+        allow_missing=True,
+    )
 
 
 def _patch_imgui_private_symbols(context) -> None:
