@@ -29,8 +29,14 @@ def _patch_remi_init(text: str) -> str:
     )
 
 
+def _patch_remi_server(text: str) -> str:
+    # CPython's _freeze_module can fail internally on Remi's raw non-ASCII URL regex.
+    return text.replace("£", "\\xa3").replace("°", "\\xb0").replace("§", "\\xa7")
+
+
 def patch_remi_sources(context) -> None:
     transform_source_text(context, "Lib/remi/__init__.py", _patch_remi_init)
+    transform_source_text(context, "Lib/remi/server.py", _patch_remi_server, allow_missing=True)
 
 
 LIBRARY_INTEGRATION = pypi_library(
