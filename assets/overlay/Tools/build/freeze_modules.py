@@ -399,6 +399,8 @@ def _inject_package_header(content, fullname):
 
     newline = _detect_newline(lines)
     insert_pos = _find_package_insert_index(payload, lines) if lines else 0
+    if insert_pos > 0 and not lines[insert_pos - 1].endswith((b'\n', b'\r\n')):
+        lines[insert_pos - 1] += newline
     lines[insert_pos:insert_pos] = [
         f"__package__ = '{fullname}'".encode('utf-8') + newline,
         b"__path__ = [__name__]" + newline,
