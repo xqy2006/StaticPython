@@ -88,6 +88,7 @@ class LibraryIntegration:
     source_provider: str = "local"
     project_name: str | None = None
     release_version: str | None = None
+    minimum_release_version: str | None = None
     dependencies: list[str] = field(default_factory=list)
     auto_resolve_dependencies: bool = False
     overlay_entries: list[str] = field(default_factory=list)
@@ -1339,6 +1340,7 @@ def pypi_library(
     *,
     project_name: str | None = None,
     release_version: str | None = None,
+    minimum_release_version: str | None = None,
     dependencies: list[str] | None = None,
     auto_resolve_dependencies: bool = True,
     source_entries: list[str] | None = None,
@@ -1373,6 +1375,7 @@ def pypi_library(
         source_provider="pypi",
         project_name=project_name or name,
         release_version=release_version,
+        minimum_release_version=minimum_release_version,
         dependencies=list(dependencies or []),
         auto_resolve_dependencies=auto_resolve_dependencies,
         overlay_entries=normalized_overlay_entries,
@@ -1414,6 +1417,7 @@ def github_library(
     ref: str,
     ref_kind: str = "tags",
     archive_url_template: str | None = None,
+    minimum_release_version: str | None = None,
     dependencies: list[str] | None = None,
     auto_resolve_dependencies: bool = False,
     source_entries: list[str] | None = None,
@@ -1448,6 +1452,7 @@ def github_library(
         source_provider="github",
         project_name=repo,
         release_version=ref,
+        minimum_release_version=minimum_release_version,
         dependencies=list(dependencies or []),
         auto_resolve_dependencies=auto_resolve_dependencies,
         overlay_entries=normalized_overlay_entries,
@@ -1497,6 +1502,7 @@ def simple_library(
     *,
     project_name: str | None = None,
     release_version: str | None = None,
+    minimum_release_version: str | None = None,
     dependencies: list[str] | None = None,
     auto_resolve_dependencies: bool | None = None,
     source_entries: list[str] | None = None,
@@ -1524,6 +1530,7 @@ def simple_library(
 
     common_kwargs = {
         "name": name,
+        "minimum_release_version": minimum_release_version,
         "dependencies": dependencies,
         "source_entries": source_entries,
         "source_mapping": resolved_mapping,
@@ -1593,6 +1600,7 @@ def _integration_from_catalog_entry(entry: dict) -> LibraryIntegration:
         "name",
         "project_name",
         "release_version",
+        "minimum_release_version",
         "dependencies",
         "auto_resolve_dependencies",
         "source_entries",

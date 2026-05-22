@@ -340,8 +340,15 @@ jobs:
               payload = libs._load_pypi_release_payload(project_name, None)
               releases = payload.get("releases", {})
               project_requires_python = payload.get("info", {}).get("requires_python")
+              minimum_release_version = getattr(integration, "minimum_release_version", None)
               versions: list[str] = []
               for raw_version in libs._sorted_release_versions(releases):
+                  if minimum_release_version is not None:
+                      try:
+                          if build.Version(raw_version) < build.Version(minimum_release_version):
+                              continue
+                      except Exception:
+                          pass
                   files = releases.get(raw_version, [])
                   compatible = False
                   for file_info in files:

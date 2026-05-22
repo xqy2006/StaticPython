@@ -4006,6 +4006,123 @@ assert "items:" in rendered and "name: codex" in rendered
         """,
     ),
     (
+        'dialite-smoke',
+        r"""
+import dialite
+
+with dialite.NoDialogs():
+    supported = dialite.is_supported()
+assert supported in (True, False)
+assert hasattr(dialite, "inform")
+        """,
+    ),
+    (
+        'flexx-smoke',
+        r"""
+import flexx
+from flexx import event, flx
+
+data = event.Dict(answer=42)
+assert data.answer == 42
+assert flexx.__version__
+assert hasattr(flx, "Widget")
+        """,
+    ),
+    (
+        'opengl-smoke',
+        r"""
+from OpenGL import GL
+
+assert GL.GL_TRIANGLES == 0x0004
+assert callable(GL.glGetError)
+        """,
+    ),
+    (
+        'pscript-smoke',
+        r"""
+from pscript import py2js
+
+js = py2js("def add(a, b):\n    return a + b\n")
+assert "add" in js and "return" in js and "a + b" in js
+        """,
+    ),
+    (
+        'pyglet-smoke',
+        r"""
+import pyglet
+from pyglet.event import EventDispatcher
+from pyglet.math import Vec2
+
+vector = Vec2(3, 4)
+length = vector.length() if callable(vector.length) else vector.length
+assert length == 5
+
+class Demo(EventDispatcher):
+    pass
+
+Demo.register_event_type("on_ping")
+demo = Demo()
+events = []
+
+@demo.event
+def on_ping(value):
+    events.append(value)
+
+demo.dispatch_event("on_ping", 7)
+assert events == [7]
+assert pyglet.version
+        """,
+    ),
+    (
+        'pywebio-smoke',
+        r"""
+import pywebio
+from pywebio.output import put_text
+from pywebio.session import local
+
+assert pywebio.__version__
+assert callable(put_text)
+local.answer = 42
+assert local.answer == 42
+        """,
+    ),
+    (
+        'remi-smoke',
+        r"""
+from remi import gui
+
+container = gui.VBox(width=120, height=80)
+button = gui.Button("Run")
+button.style["color"] = "red"
+container.append(button, "button")
+assert container.children["button"] is button
+assert button.get_text() == "Run"
+        """,
+    ),
+    (
+        'user-agents-smoke',
+        r"""
+from ua_parser import user_agent_parser
+from user_agents import parse
+
+text = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+ua = parse(text)
+assert ua.browser.family
+parsed = user_agent_parser.Parse(text)
+assert parsed["user_agent"]["family"]
+        """,
+    ),
+    (
+        'webruntime-smoke',
+        r"""
+import webruntime
+
+assert hasattr(webruntime, "launch")
+assert hasattr(webruntime, "BaseRuntime")
+assert "browser" in webruntime._runtimes
+        """,
+    ),
+    (
         'yarl-smoke',
         r"""
 from yarl import URL

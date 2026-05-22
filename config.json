@@ -199,6 +199,13 @@
         "source_provider": "pypi"
       },
       {
+        "name": "dialite",
+        "overlay_entries": [
+          "Lib/dialite"
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "dill",
         "overlay_entries": [
           "Lib/dill"
@@ -260,6 +267,13 @@
         "name": "filelock",
         "overlay_entries": [
           "Lib/filelock"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "flexx",
+        "overlay_entries": [
+          "Lib/flexx"
         ],
         "source_provider": "pypi"
       },
@@ -573,6 +587,18 @@
         "source_provider": "pypi"
       },
       {
+        "name": "OpenGL",
+        "project_name": "PyOpenGL",
+        "minimum_release_version": "3.1.0",
+        "overlay_entries": [
+          "Lib/OpenGL"
+        ],
+        "python_packages": [
+          "OpenGL"
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "outcome",
         "overlay_entries": [
           "Lib/outcome"
@@ -625,6 +651,13 @@
         "name": "pluggy",
         "overlay_entries": [
           "Lib/pluggy"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pscript",
+        "overlay_entries": [
+          "Lib/pscript"
         ],
         "source_provider": "pypi"
       },
@@ -696,6 +729,14 @@
         "source_provider": "pypi"
       },
       {
+        "name": "pyglet",
+        "minimum_release_version": "1.5.0",
+        "overlay_entries": [
+          "Lib/pyglet"
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "pymongo",
         "source_mapping": {
           "pymongo": "Lib/pymongo",
@@ -727,6 +768,13 @@
         "name": "pyperclip",
         "overlay_entries": [
           "Lib/pyperclip"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "pywebio",
+        "overlay_entries": [
+          "Lib/pywebio"
         ],
         "source_provider": "pypi"
       },
@@ -1062,6 +1110,14 @@
         "source_provider": "pypi"
       },
       {
+        "name": "ua_parser",
+        "project_name": "ua-parser",
+        "overlay_entries": [
+          "Lib/ua_parser"
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "urllib3",
         "overlay_entries": [
           "Lib/urllib3"
@@ -1069,9 +1125,24 @@
         "source_provider": "pypi"
       },
       {
+        "name": "user_agents",
+        "project_name": "user-agents",
+        "overlay_entries": [
+          "Lib/user_agents"
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "uvicorn",
         "overlay_entries": [
           "Lib/uvicorn"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "webruntime",
+        "overlay_entries": [
+          "Lib/webruntime"
         ],
         "source_provider": "pypi"
       },
@@ -1200,6 +1271,7 @@
         "dateutil",
         "decorator",
         "defusedxml",
+        "dialite",
         "dill",
         "django",
         "dns",
@@ -1212,6 +1284,7 @@
         "fastjsonschema",
         "filelock",
         "flask",
+        "flexx",
         "fontTools",
         "freezegun",
         "frozenlist",
@@ -1277,6 +1350,7 @@
         "numpy",
         "oauthlib",
         "openpyxl",
+        "OpenGL",
         "outcome",
         "overrides",
         "packaging",
@@ -1291,6 +1365,7 @@
         "pluggy",
         "portalocker",
         "prometheus_client",
+        "pscript",
         "prompt_toolkit",
         "propcache",
         "protobuf",
@@ -1302,11 +1377,13 @@
         "pybind11",
         "pycparser",
         "pygments",
+        "pyglet",
         "pymongo",
         "pymysql",
         "pyparsing",
         "pypdf",
         "pyperclip",
+        "pywebio",
         "pyrsistent",
         "pytest",
         "python_multipart",
@@ -1316,6 +1393,7 @@
         "pyzmq",
         "rapidfuzz",
         "redis",
+        "remi",
         "regex",
         "requests",
         "requests_oauthlib",
@@ -1354,10 +1432,13 @@
         "typing_inspect",
         "typing_inspection",
         "tzdata",
+        "ua_parser",
         "ujson",
         "urllib3",
+        "user_agents",
         "uvicorn",
         "wcwidth",
+        "webruntime",
         "webencodings",
         "websocket",
         "websockets",
