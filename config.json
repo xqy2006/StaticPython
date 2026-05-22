@@ -1144,6 +1144,14 @@
         "source_provider": "pypi"
       },
       {
+        "name": "ua_parser_builtins",
+        "project_name": "ua-parser-builtins",
+        "overlay_entries": [
+          "Lib/ua_parser_builtins"
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "ua_parser",
         "project_name": "ua-parser",
         "overlay_entries": [
@@ -1477,6 +1485,7 @@
         "typing_inspect",
         "typing_inspection",
         "tzdata",
+        "ua_parser_builtins",
         "ua_parser",
         "ujson",
         "urllib3",

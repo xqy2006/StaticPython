@@ -100,7 +100,11 @@ def patch_plotly_sources(context):
         )
 
     def patch_version_metadata(text: str) -> str:
-        if "PackageNotFoundError" in text and "__version__" in text:
+        if (
+            "PackageNotFoundError" in text
+            and "__version__" in text
+            and "0+staticpython" in text
+        ):
             return text
         if '__version__ = importlib.metadata.version("plotly")' in text:
             return text.replace(
