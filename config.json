@@ -1352,6 +1352,7 @@
         "idna",
         "importlib_metadata",
         "iniconfig",
+        "imgui",
         "ipykernel",
         "IPython",
         "ipython_pygments_lexers",

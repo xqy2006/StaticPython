@@ -4062,6 +4062,21 @@ assert callable(GL.glGetError)
         """,
     ),
     (
+        'imgui-smoke',
+        r"""
+import imgui
+
+ctx = imgui.create_context()
+try:
+    assert imgui.__version__
+    assert imgui.VERTEX_SIZE > 0
+    io = imgui.get_io()
+    assert io is not None
+finally:
+    imgui.destroy_context(ctx)
+        """,
+    ),
+    (
         'pscript-smoke',
         r"""
 from pscript import py2js

@@ -1,0 +1,314 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from libs import pypi_library, source_path, transform_source_text, write_source_text
+
+
+IMGUI_CPP_PROJECT_GUID = "{8E9B677E-21D6-4E6C-B44C-F6C1AB9AE017}"
+IMGUI_CORE_PROJECT_GUID = "{9F9DEBD8-11F6-4D3E-9C49-9E71F7647DD7}"
+IMGUI_INTERNAL_PROJECT_GUID = "{A75B159A-18F1-4F71-993B-78618872E88A}"
+
+IMGUI_CPP_CANDIDATE_SOURCES = [
+    "config-cpp/py_imconfig.cpp",
+    "imgui-cpp/imgui.cpp",
+    "imgui-cpp/imgui_draw.cpp",
+    "imgui-cpp/imgui_demo.cpp",
+    "imgui-cpp/imgui_widgets.cpp",
+    "imgui-cpp/imgui_tables.cpp",
+]
+
+IMGUI_CYTHON_COMPAT_DEFINES = [
+    "CYTHON_USE_PYLONG_INTERNALS=0",
+    "CYTHON_FAST_THREAD_STATE=0",
+    "CYTHON_USE_EXC_INFO_STACK=0",
+    "CYTHON_USE_UNICODE_INTERNALS=0",
+    "HAVE_STDARG_PROTOTYPES=1",
+]
+
+
+def _project_configurations() -> str:
+    return """  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+"""
+
+
+def _imgui_include_dirs() -> str:
+    return (
+        "..\\Lib\\imgui;"
+        "..\\config-cpp;"
+        "..\\imgui-cpp;"
+        "..\\Lib\\ansifeed-cpp;"
+        "%(AdditionalIncludeDirectories)"
+    )
+
+
+def _imgui_preprocessor_definitions(*extra_defines: str) -> str:
+    defines = [
+        "Py_NO_ENABLE_SHARED",
+        "PYIMGUI_CUSTOM_EXCEPTION",
+        "_CRT_SECURE_NO_WARNINGS",
+        *IMGUI_CYTHON_COMPAT_DEFINES,
+        *extra_defines,
+        "%(PreprocessorDefinitions)",
+    ]
+    return ";".join(defines)
+
+
+def _compile_items(sources: list[str]) -> str:
+    items = []
+    for source in sources:
+        windows_source = source.replace("/", "\\")
+        items.append(f'    <ClCompile Include="..\\{windows_source}" />')
+    return "\n".join(items)
+
+
+def _render_static_project(
+    *,
+    guid: str,
+    root_namespace: str,
+    target_name: str,
+    sources: list[str],
+    extra_defines: list[str] | None = None,
+) -> str:
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+{_project_configurations()}  <PropertyGroup Label="Globals">
+    <ProjectGuid>{guid}</ProjectGuid>
+    <RootNamespace>{root_namespace}</RootNamespace>
+    <Keyword>Win32Proj</Keyword>
+    <SupportPGO>false</SupportPGO>
+    <WindowsTargetPlatformVersion>$(DefaultWindowsSDKVersion)</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="python.props" />
+  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="pyproject.props" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <TargetName>{target_name}</TargetName>
+    <TargetExt>.lib</TargetExt>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>{_imgui_include_dirs()}</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>{_imgui_preprocessor_definitions(*(extra_defines or []))}</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4244;4267;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <AdditionalOptions>/bigobj /EHsc /FIpy_imconfig.h %(AdditionalOptions)</AdditionalOptions>
+      <RuntimeLibrary Condition="'$(Configuration)|$(Platform)'=='Release|x64'">MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+{_compile_items(sources)}
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />
+</Project>
+"""
+
+
+def _patch_generated_cython_cpp(text: str) -> str:
+    replacements = {
+        "#define __Pyx_PyFrame_SetLineNumber(frame, lineno)  (frame)->f_lineno = (lineno)": (
+            "#if PY_VERSION_HEX >= 0x030B0000\n"
+            "  #define __Pyx_PyFrame_SetLineNumber(frame, lineno)  ((void)0)\n"
+            "#else\n"
+            "  #define __Pyx_PyFrame_SetLineNumber(frame, lineno)  (frame)->f_lineno = (lineno)\n"
+            "#endif"
+        ),
+        "#define __Pyx_PyUnicode_READY(op)       (likely(PyUnicode_IS_READY(op)) ?\\\n"
+        "                                              0 : _PyUnicode_Ready((PyObject *)(op)))": (
+            "#if PY_VERSION_HEX >= 0x030C0000\n"
+            "  #define __Pyx_PyUnicode_READY(op)       (0)\n"
+            "  #else\n"
+            "  #define __Pyx_PyUnicode_READY(op)       (likely(PyUnicode_IS_READY(op)) ?\\\n"
+            "                                              0 : _PyUnicode_Ready((PyObject *)(op)))\n"
+            "  #endif"
+        ),
+        "        PyThreadState *tstate = __Pyx_PyThreadState_Current;\n"
+        "        PyObject* tmp_tb = tstate->curexc_traceback;\n"
+        "        if (tb != tmp_tb) {\n"
+        "            Py_INCREF(tb);\n"
+        "            tstate->curexc_traceback = tb;\n"
+        "            Py_XDECREF(tmp_tb);\n"
+        "        }": (
+            "        #if PY_VERSION_HEX >= 0x030C0000\n"
+            "        PyObject *tmp_type, *tmp_value, *tmp_tb;\n"
+            "        PyErr_Fetch(&tmp_type, &tmp_value, &tmp_tb);\n"
+            "        Py_INCREF(tb);\n"
+            "        PyErr_Restore(tmp_type, tmp_value, tb);\n"
+            "        Py_XDECREF(tmp_tb);\n"
+            "        #else\n"
+            "        PyThreadState *tstate = __Pyx_PyThreadState_Current;\n"
+            "        PyObject* tmp_tb = tstate->curexc_traceback;\n"
+            "        if (tb != tmp_tb) {\n"
+            "            Py_INCREF(tb);\n"
+            "            tstate->curexc_traceback = tb;\n"
+            "            Py_XDECREF(tmp_tb);\n"
+            "        }\n"
+            "        #endif"
+        ),
+        "        PyTracebackObject *tb = (PyTracebackObject *) exc_tb;\n"
+        "        PyFrameObject *f = tb->tb_frame;\n"
+        "        Py_CLEAR(f->f_back);": (
+            "        #if PY_VERSION_HEX < 0x030B0000\n"
+            "        PyTracebackObject *tb = (PyTracebackObject *) exc_tb;\n"
+            "        PyFrameObject *f = tb->tb_frame;\n"
+            "        Py_CLEAR(f->f_back);\n"
+            "        #endif"
+        ),
+        "        if (exc_state->exc_traceback) {\n"
+        "            PyTracebackObject *tb = (PyTracebackObject *) exc_state->exc_traceback;\n"
+        "            PyFrameObject *f = tb->tb_frame;\n"
+        "            assert(f->f_back == NULL);\n"
+        "            #if PY_VERSION_HEX >= 0x030B00A1\n"
+        "            f->f_back = PyThreadState_GetFrame(tstate);\n"
+        "            #else\n"
+        "            Py_XINCREF(tstate->frame);\n"
+        "            f->f_back = tstate->frame;\n"
+        "            #endif\n"
+        "        }": (
+            "        #if PY_VERSION_HEX < 0x030B0000\n"
+            "        if (exc_state->exc_traceback) {\n"
+            "            PyTracebackObject *tb = (PyTracebackObject *) exc_state->exc_traceback;\n"
+            "            PyFrameObject *f = tb->tb_frame;\n"
+            "            assert(f->f_back == NULL);\n"
+            "            Py_XINCREF(tstate->frame);\n"
+            "            f->f_back = tstate->frame;\n"
+            "        }\n"
+            "        #endif"
+        ),
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+def _patch_imgui_generated_sources(context) -> None:
+    transform_source_text(context, "Lib/imgui/core.cpp", _patch_generated_cython_cpp)
+    transform_source_text(context, "Lib/imgui/internal.cpp", _patch_generated_cython_cpp, allow_missing=True)
+
+
+def _existing_sources(context, candidates: list[str]) -> list[str]:
+    return [candidate for candidate in candidates if source_path(context, candidate).exists()]
+
+
+def _render_imgui_projects(context) -> None:
+    common_sources = _existing_sources(context, IMGUI_CPP_CANDIDATE_SOURCES)
+    if "config-cpp/py_imconfig.cpp" not in common_sources or "imgui-cpp/imgui.cpp" not in common_sources:
+        raise RuntimeError("imgui native sources are missing required Dear ImGui files")
+    has_internal = source_path(context, "Lib/imgui/internal.cpp").exists()
+    write_source_text(
+        context,
+        "PCbuild/imgui_cpp.vcxproj",
+        _render_static_project(
+            guid=IMGUI_CPP_PROJECT_GUID,
+            root_namespace="imgui_cpp",
+            target_name="imgui_cpp",
+            sources=common_sources,
+        ),
+    )
+    write_source_text(
+        context,
+        "PCbuild/imgui.core.vcxproj",
+        _render_static_project(
+            guid=IMGUI_CORE_PROJECT_GUID,
+            root_namespace="imgui_core",
+            target_name="imgui.core",
+            sources=["Lib/imgui/core.cpp"],
+        ),
+    )
+    if has_internal:
+        write_source_text(
+            context,
+            "PCbuild/imgui.internal.vcxproj",
+            _render_static_project(
+                guid=IMGUI_INTERNAL_PROJECT_GUID,
+                root_namespace="imgui_internal",
+                target_name="imgui.internal",
+                sources=["Lib/imgui/internal.cpp"],
+            ),
+        )
+    _configure_imgui_integration(has_internal)
+
+
+def _configure_imgui_integration(has_internal: bool) -> None:
+    projects = ["imgui_cpp.vcxproj", "imgui.core.vcxproj"]
+    native_projects = [
+        {"project": "imgui_cpp.vcxproj", "guid": IMGUI_CPP_PROJECT_GUID},
+        {"project": "imgui.core.vcxproj", "guid": IMGUI_CORE_PROJECT_GUID},
+    ]
+    registrations = [
+        {
+            "name": "imgui.core",
+            "pyinit": "PyInit_core",
+        }
+    ]
+    link_dependencies = ["imgui.core.lib", "imgui_cpp.lib"]
+    if has_internal:
+        projects.append("imgui.internal.vcxproj")
+        native_projects.append({"project": "imgui.internal.vcxproj", "guid": IMGUI_INTERNAL_PROJECT_GUID})
+        registrations.append(
+            {
+                "name": "imgui.internal",
+                "pyinit": "PyInit_internal",
+            }
+        )
+        link_dependencies.insert(1, "imgui.internal.lib")
+    LIBRARY_INTEGRATION.static_library_projects_release_x64 = projects
+    LIBRARY_INTEGRATION.native_static_projects = native_projects
+    LIBRARY_INTEGRATION.builtin_module_registrations = registrations
+    LIBRARY_INTEGRATION.python_link_dependencies_release_x64 = link_dependencies
+
+
+def prepare_imgui_project(context) -> None:
+    _patch_imgui_generated_sources(context)
+    _render_imgui_projects(context)
+
+
+LIBRARY_INTEGRATION = pypi_library(
+    name="imgui",
+    source_mapping={
+        "imgui": "Lib/imgui",
+        "config-cpp": "config-cpp",
+        "imgui-cpp": "imgui-cpp",
+        "?ansifeed-cpp": "Lib/ansifeed-cpp",
+    },
+    materialized_paths=[
+        "Lib/imgui",
+        "config-cpp",
+        "imgui-cpp",
+    ],
+    python_packages=["imgui"],
+    static_library_projects_release_x64=[
+        "imgui_cpp.vcxproj",
+        "imgui.core.vcxproj",
+    ],
+    native_static_projects=[
+        {"project": "imgui_cpp.vcxproj", "guid": IMGUI_CPP_PROJECT_GUID},
+        {"project": "imgui.core.vcxproj", "guid": IMGUI_CORE_PROJECT_GUID},
+    ],
+    builtin_module_registrations=[
+        {
+            "name": "imgui.core",
+            "pyinit": "PyInit_core",
+        },
+    ],
+    python_link_dependencies_release_x64=[
+        "imgui.core.lib",
+        "imgui_cpp.lib",
+    ],
+    prepare_source_hooks=[prepare_imgui_project],
+)

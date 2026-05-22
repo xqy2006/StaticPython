@@ -294,6 +294,7 @@ jobs:
           import re
           import shutil
           import sys
+          import time
           import traceback
           from pathlib import Path
 
@@ -407,6 +408,29 @@ jobs:
               result_path.parent.mkdir(parents=True, exist_ok=True)
               result_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
+
+          def download_cpython_source_with_retries(version: str, root: Path) -> Path:
+              attempts = 3
+              for attempt in range(1, attempts + 1):
+                  try:
+                      return build.download_cpython_source(
+                          version,
+                          root,
+                          None,
+                          reuse_existing=True,
+                      )
+                  except Exception as exc:
+                      if attempt == attempts:
+                          raise
+                      wait_seconds = attempt * 10
+                      print(
+                          f"[library-patch-matrix] CPython {version} download failed "
+                          f"on attempt {attempt}/{attempts}: {type(exc).__name__}: {exc}; "
+                          f"retrying in {wait_seconds}s"
+                      )
+                      time.sleep(wait_seconds)
+              raise RuntimeError(f"failed to download CPython {version}")
+
           try:
               manifest = build.load_manifest()
               config = build.load_config()
@@ -414,12 +438,7 @@ jobs:
               third_party_catalog = build.profile_library_catalog(config, profile, "third_party_library_catalog")
 
               cpython_download_root = work_root / "cpython"
-              base_source_root = build.download_cpython_source(
-                  cpython_version,
-                  cpython_download_root,
-                  None,
-                  reuse_existing=True,
-              )
+              base_source_root = download_cpython_source_with_retries(cpython_version, cpython_download_root)
               version_info, version_mm, version_full = build.parse_cpython_version(base_source_root)
               target_version = build.Version(version_full)
               integrations = libs.load_integrations(
