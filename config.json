@@ -105,6 +105,13 @@
         "source_provider": "pypi"
       },
       {
+        "name": "bokeh",
+        "overlay_entries": [
+          "Lib/bokeh"
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "bs4",
         "overlay_entries": [
           "Lib/bs4"
@@ -174,6 +181,13 @@
         "name": "cycler",
         "overlay_entries": [
           "Lib/cycler"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "dash",
+        "overlay_entries": [
+          "Lib/dash"
         ],
         "source_provider": "pypi"
       },
@@ -873,6 +887,13 @@
         "source_provider": "pypi"
       },
       {
+        "name": "retrying",
+        "overlay_entries": [
+          "Lib/retrying.py"
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "responses",
         "overlay_entries": [
           "Lib/responses"
@@ -1200,6 +1221,13 @@
         "source_provider": "pypi"
       },
       {
+        "name": "xyzservices",
+        "overlay_entries": [
+          "Lib/xyzservices"
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "yaml",
         "project_name": "PyYAML",
         "source_mapping": {
@@ -1252,6 +1280,7 @@
         "black",
         "bleach",
         "blinker",
+        "bokeh",
         "bs4",
         "cachetools",
         "cattr",
@@ -1268,6 +1297,7 @@
         "cppy",
         "Crypto",
         "cycler",
+        "dash",
         "dateutil",
         "decorator",
         "defusedxml",
@@ -1398,6 +1428,7 @@
         "requests",
         "requests_oauthlib",
         "requests_toolbelt",
+        "retrying",
         "responses",
         "rfc3339_validator",
         "rfc3986_validator",
@@ -1447,6 +1478,7 @@
         "wsproto",
         "xlsxwriter",
         "xmltodict",
+        "xyzservices",
         "yaml",
         "yarl",
         "zipp"

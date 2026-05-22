@@ -4006,6 +4006,30 @@ assert "items:" in rendered and "name: codex" in rendered
         """,
     ),
     (
+        'bokeh-smoke',
+        r"""
+from bokeh.embed import json_item
+from bokeh.plotting import figure
+
+plot = figure(title="StaticPython", width=320, height=240)
+plot.line([1, 2, 3], [2, 4, 6])
+item = json_item(plot, "target")
+assert item["target_id"] == "target"
+assert "doc" in item
+        """,
+    ),
+    (
+        'dash-smoke',
+        r"""
+from dash import Dash, dcc, html
+
+app = Dash("staticpython_dash_smoke", server=False)
+app.layout = html.Div([html.H1("StaticPython"), dcc.Graph(id="plot")])
+assert app.layout.children[0].children == "StaticPython"
+assert app.layout.children[1].id == "plot"
+        """,
+    ),
+    (
         'dialite-smoke',
         r"""
 import dialite
@@ -4100,6 +4124,21 @@ assert button.get_text() == "Run"
         """,
     ),
     (
+        'retrying-smoke',
+        r"""
+from retrying import Retrying
+
+attempts = []
+
+def work():
+    attempts.append("called")
+    return "ok"
+
+assert Retrying(stop_max_attempt_number=1).call(work) == "ok"
+assert attempts == ["called"]
+        """,
+    ),
+    (
         'user-agents-smoke',
         r"""
 from ua_parser import user_agent_parser
@@ -4120,6 +4159,14 @@ import webruntime
 assert hasattr(webruntime, "launch")
 assert hasattr(webruntime, "BaseRuntime")
 assert "browser" in webruntime._runtimes
+        """,
+    ),
+    (
+        'xyzservices-smoke',
+        r"""
+import xyzservices.providers as xyz
+
+assert xyz.OpenStreetMap.Mapnik.name
         """,
     ),
     (
