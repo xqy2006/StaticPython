@@ -4123,6 +4123,19 @@ assert hasattr(fltk, "Fl_Button")
         """,
     ),
     (
+        'dearpygui-smoke',
+        r"""
+import dearpygui
+import dearpygui.dearpygui as dpg
+
+assert dearpygui.__version__
+assert hasattr(dpg, "create_context")
+assert hasattr(dpg, "create_viewport")
+dpg.create_context()
+dpg.destroy_context()
+        """,
+    ),
+    (
         'pywebio-smoke',
         r"""
 import pywebio

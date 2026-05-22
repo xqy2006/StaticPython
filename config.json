@@ -1320,6 +1320,7 @@
         "cycler",
         "dash",
         "dateutil",
+        "dearpygui",
         "decorator",
         "defusedxml",
         "dialite",
