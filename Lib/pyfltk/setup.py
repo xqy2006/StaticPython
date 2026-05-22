@@ -263,6 +263,26 @@ def _copy_built_fltk_libraries(context, build_dir: Path) -> None:
         raise RuntimeError(f"FLTK build did not produce required static libraries: {', '.join(missing)}")
 
 
+def _force_fltk_static_runtime(context, build_dir: Path) -> None:
+    changed = 0
+    for project in build_dir.rglob("*.vcxproj"):
+        text = project.read_text(encoding="utf-8")
+        updated = text
+        updated = updated.replace("MultiThreadedDebugDLL", "MultiThreadedDebug")
+        updated = updated.replace("MultiThreadedDLL", "MultiThreaded")
+        updated = updated.replace("/MDd", "/MTd")
+        updated = updated.replace("/MD", "/MT")
+        updated = updated.replace("FL_DLL;", "")
+        updated = updated.replace(";FL_DLL", "")
+        updated = updated.replace("_DLL;", "")
+        updated = updated.replace(";_DLL", "")
+        if updated != text:
+            project.write_text(updated, encoding="utf-8")
+            changed += 1
+    if changed:
+        context.log(f"forced FLTK static runtime in {changed} generated project(s)")
+
+
 def prepare_pyfltk_artifacts(context) -> None:
     output_dir = get_pcbuild_output_dir(context.source_root, context.platform)
     if all((output_dir / name).exists() for name in FLTK_LIBRARY_NAMES):
@@ -289,8 +309,11 @@ def prepare_pyfltk_artifacts(context) -> None:
             "x64",
             "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW",
             "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+            "-DCMAKE_C_FLAGS:STRING=/MT",
+            "-DCMAKE_CXX_FLAGS:STRING=/MT",
             "-DCMAKE_C_FLAGS_RELEASE:STRING=/MT /O2 /Ob2 /DNDEBUG",
             "-DCMAKE_CXX_FLAGS_RELEASE:STRING=/MT /O2 /Ob2 /DNDEBUG",
+            "-DBUILD_SHARED_LIBS=OFF",
             "-DFLTK_BUILD_SHARED_LIBS=OFF",
             "-DFLTK_BUILD_TEST=OFF",
             "-DFLTK_BUILD_EXAMPLES=OFF",
@@ -307,6 +330,7 @@ def prepare_pyfltk_artifacts(context) -> None:
         cwd=source_dir,
         timeout=60 * 15,
     )
+    _force_fltk_static_runtime(context, build_dir)
     run(
         context.log,
         [

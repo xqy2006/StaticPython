@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from libs import pypi_library, source_path, transform_source_text, write_source_text
@@ -25,6 +26,12 @@ IMGUI_CYTHON_COMPAT_DEFINES = [
     "CYTHON_USE_UNICODE_INTERNALS=0",
     "HAVE_STDARG_PROTOTYPES=1",
 ]
+
+IMGUI_PRIVATE_SYMBOL_MARKER = "STATICPYTHON_IMGUI_PRIVATE_SYMBOLS"
+IMGUI_PRIVATE_SYMBOL_SKIP = {
+    # py_imconfig.h intentionally exposes this as a configurable typedef-like macro.
+    "ImDrawIdx",
+}
 
 
 def _project_configurations() -> str:
@@ -201,6 +208,43 @@ def _patch_imgui_generated_sources(context) -> None:
     transform_source_text(context, "Lib/imgui/internal.cpp", _patch_generated_cython_cpp, allow_missing=True)
 
 
+def _patch_imgui_private_symbols(context) -> None:
+    tokens: set[str] = {"GImGui", "ImGui"}
+    for root_name in ("imgui-cpp", "config-cpp"):
+        root = source_path(context, root_name)
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.suffix.lower() not in {".h", ".hpp", ".cpp", ".cxx", ".cc"}:
+                continue
+            tokens.update(re.findall(r"\bIm[A-Z][A-Za-z0-9_]*\b", path.read_text(encoding="utf-8", errors="ignore")))
+    tokens.difference_update(IMGUI_PRIVATE_SYMBOL_SKIP)
+
+    lines = [
+        "",
+        f"#ifndef {IMGUI_PRIVATE_SYMBOL_MARKER}",
+        f"#define {IMGUI_PRIVATE_SYMBOL_MARKER}",
+        "/* Keep pyimgui's bundled Dear ImGui private when DearPyGui is linked too. */",
+    ]
+    for token in sorted(tokens):
+        lines.extend(
+            [
+                f"#ifndef {token}",
+                f"#define {token} StaticPythonImgui_{token}",
+                "#endif",
+            ]
+        )
+    lines.append("#endif")
+    block = "\n".join(lines) + "\n"
+
+    def patch(text: str) -> str:
+        if IMGUI_PRIVATE_SYMBOL_MARKER in text:
+            return text
+        return text.rstrip() + "\n" + block
+
+    transform_source_text(context, "config-cpp/py_imconfig.h", patch)
+
+
 def _existing_sources(context, candidates: list[str]) -> list[str]:
     return [candidate for candidate in candidates if source_path(context, candidate).exists()]
 
@@ -275,6 +319,7 @@ def _configure_imgui_integration(has_internal: bool) -> None:
 
 def prepare_imgui_project(context) -> None:
     _patch_imgui_generated_sources(context)
+    _patch_imgui_private_symbols(context)
     _render_imgui_projects(context)
 
 
