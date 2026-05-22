@@ -109,6 +109,9 @@
         "overlay_entries": [
           "Lib/bokeh"
         ],
+        "source_ignore_patterns": [
+          "tests"
+        ],
         "source_provider": "pypi"
       },
       {
@@ -188,6 +191,9 @@
         "name": "dash",
         "overlay_entries": [
           "Lib/dash"
+        ],
+        "source_ignore_patterns": [
+          "tests"
         ],
         "source_provider": "pypi"
       },
