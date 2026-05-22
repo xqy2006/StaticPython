@@ -210,6 +210,7 @@ def _patch_imgui_generated_sources(context) -> None:
 
 def _patch_imgui_private_symbols(context) -> None:
     tokens: set[str] = {"GImGui", "ImGui"}
+    guarded_config_tokens: set[str] = set()
     for root_name in ("imgui-cpp", "config-cpp"):
         root = source_path(context, root_name)
         if not root.exists():
@@ -217,8 +218,10 @@ def _patch_imgui_private_symbols(context) -> None:
         for path in root.rglob("*"):
             if path.suffix.lower() not in {".h", ".hpp", ".cpp", ".cxx", ".cc"}:
                 continue
-            tokens.update(re.findall(r"\bIm[A-Z][A-Za-z0-9_]*\b", path.read_text(encoding="utf-8", errors="ignore")))
-    tokens.difference_update(IMGUI_PRIVATE_SYMBOL_SKIP)
+            source = path.read_text(encoding="utf-8", errors="ignore")
+            tokens.update(re.findall(r"\bIm[A-Z][A-Za-z0-9_]*\b", source))
+            guarded_config_tokens.update(re.findall(r"^\s*#\s*ifndef\s+(Im[A-Z][A-Za-z0-9_]*)\b", source, re.MULTILINE))
+    tokens.difference_update(IMGUI_PRIVATE_SYMBOL_SKIP | (guarded_config_tokens - {"GImGui"}))
 
     lines = [
         "",
@@ -234,6 +237,13 @@ def _patch_imgui_private_symbols(context) -> None:
                 "#endif",
             ]
         )
+    if "GImGui" in tokens:
+        lines.extend(
+            [
+                "struct ImGuiContext;",
+                "extern ImGuiContext* GImGui;",
+            ]
+        )
     lines.append("#endif")
     block = "\n".join(lines) + "\n"
 
@@ -243,6 +253,22 @@ def _patch_imgui_private_symbols(context) -> None:
         return text.rstrip() + "\n" + block
 
     transform_source_text(context, "config-cpp/py_imconfig.h", patch)
+
+    if "GImGui" in tokens:
+        def patch_storage(text: str) -> str:
+            marker = "STATICPYTHON_IMGUI_PRIVATE_GIMGUI_STORAGE"
+            if marker in text:
+                return text
+            return (
+                text.rstrip()
+                + "\n\n"
+                + f"#ifndef {marker}\n"
+                + f"#define {marker}\n"
+                + "ImGuiContext* GImGui = NULL;\n"
+                + "#endif\n"
+            )
+
+        transform_source_text(context, "config-cpp/py_imconfig.cpp", patch_storage)
 
 
 def _existing_sources(context, candidates: list[str]) -> list[str]:
