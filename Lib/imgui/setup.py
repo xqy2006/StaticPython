@@ -280,6 +280,7 @@ def prepare_imgui_project(context) -> None:
 
 LIBRARY_INTEGRATION = pypi_library(
     name="imgui",
+    minimum_release_version="1.0.0a2",
     source_mapping={
         "imgui": "Lib/imgui",
         "config-cpp": "config-cpp",

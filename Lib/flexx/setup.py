@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from libs import pypi_library, replace_regex_once, source_path, transform_source_text
 
@@ -49,10 +51,36 @@ def _render_static_js_block(payload: dict) -> str:
     )
 
 
+def _build_flexx_generator_import_root(context):
+    base = context.work_cache_root.resolve()
+    root = (context.work_cache_root / "flexx-jsgen-import" / context.version_full / context.source_root.name).resolve()
+    if root != base and base not in root.parents:
+        raise RuntimeError(f"refusing to prepare flexx generator import root outside work cache: {root}")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=True)
+    for package in ("flexx", "pscript"):
+        source = source_path(context, f"Lib/{package}")
+        if source.exists():
+            shutil.copytree(
+                source,
+                root / package,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+            )
+    if not (root / "flexx").exists():
+        raise RuntimeError("flexx package is missing from the materialized source tree")
+    return root
+
+
 def _run_flexx_js_generator(context, script: str, label: str) -> dict:
     env = os.environ.copy()
-    lib_path = str(source_path(context, "Lib"))
-    env["PYTHONPATH"] = lib_path + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    import_root = str(_build_flexx_generator_import_root(context))
+    existing_pythonpath = [
+        path
+        for path in env.get("PYTHONPATH", "").split(os.pathsep)
+        if path and Path(path).resolve() != source_path(context, "Lib").resolve()
+    ]
+    env["PYTHONPATH"] = os.pathsep.join([import_root, *existing_pythonpath])
     completed = subprocess.run(
         [sys.executable, "-c", script],
         cwd=str(context.source_root),
