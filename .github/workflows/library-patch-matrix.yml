@@ -337,6 +337,9 @@ jobs:
 
 
           def compatible_release_versions(integration, target_version) -> list[str]:
+              if integration.source_provider != "pypi":
+                  return [integration.release_version or integration.source_provider]
+
               project_name = integration.project_name or integration.name
               payload = libs._load_pypi_release_payload(project_name, None)
               releases = payload.get("releases", {})
@@ -512,7 +515,10 @@ jobs:
                       for index, raw_version in enumerate(release_versions, start=1):
                           try:
                               for item in selected_integrations:
-                                  if item.name.casefold() == integration.name.casefold():
+                                  if (
+                                      item.source_provider == "pypi"
+                                      and item.name.casefold() == integration.name.casefold()
+                                  ):
                                       item.release_version = raw_version
                               cleanup_integrations(source_root, selected_integrations)
                               libs.run_prepare_source_hooks(selected_integrations, hook_context)
