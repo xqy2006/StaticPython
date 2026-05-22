@@ -108,6 +108,7 @@ WINDOWS_SYSTEM_LIBRARY_NAMES = {
     "odbc32.lib",
     "ole32.lib",
     "oleaut32.lib",
+    "opengl32.lib",
     "pathcch.lib",
     "pdh.lib",
     "powrprof.lib",
@@ -125,9 +126,11 @@ WINDOWS_SYSTEM_LIBRARY_NAMES = {
     "wbemuuid.lib",
     "winmm.lib",
     "winspool.lib",
+    "wsock32.lib",
     "ws2_32.lib",
 }
 WINDOWS_SDK_LIBRARY_NAMES = {
+    "glu32.lib",
     "imm32.lib",
     "msimg32.lib",
     "netapi32.lib",

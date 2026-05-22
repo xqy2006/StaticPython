@@ -4113,6 +4113,16 @@ assert pyglet.version
         """,
     ),
     (
+        'pyfltk-smoke',
+        r"""
+import fltk
+
+assert fltk.__version__
+assert hasattr(fltk, "Fl_Window")
+assert hasattr(fltk, "Fl_Button")
+        """,
+    ),
+    (
         'pywebio-smoke',
         r"""
 import pywebio

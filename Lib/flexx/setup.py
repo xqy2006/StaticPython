@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -49,6 +50,15 @@ def _render_static_js_block(payload: dict) -> str:
         "JS_FUNCS = JS_LOOP = JS_COMPONENT = JS_PROP = JS_EVENT\n"
         "assert JS_LOOP.count('._scheduled_call_to_iter') > 2  # prevent error after refactor\n"
     )
+
+
+def _replace_regex_once_literal(text: str, pattern: str, replacement: str, *, label: str) -> str:
+    if replacement in text:
+        return text
+    updated, count = re.subn(pattern, lambda _match: replacement, text, count=1)
+    if count != 1:
+        raise RuntimeError(f"expected regex not found in {label}: {pattern}")
+    return updated
 
 
 def _build_flexx_generator_import_root(context):
@@ -140,7 +150,7 @@ def _patch_flexx_static_event_js(context) -> None:
     if "JS_EVENT = JS_FUNCS + JS_LOGGER + JS_LOOP + JS_COMPONENT + JS_PROP" in text:
         payload = _generate_static_js_event(context)
         static_block = _render_static_js_block(payload)
-        updated = replace_regex_once(
+        updated = _replace_regex_once_literal(
             text,
             r"(?ms)^# Generate the code\nmc = MetaCollector\(\)\nJS_FUNCS = .*?^assert JS_LOOP\.count\('\._scheduled_call_to_iter'\) > 2  # prevent error after refactor\n",
             static_block,
@@ -150,7 +160,7 @@ def _patch_flexx_static_event_js(context) -> None:
         jscode = _try_generate_static_hasevents_js(context)
         if jscode is None:
             return
-        updated = replace_regex_once(
+        updated = _replace_regex_once_literal(
             text,
             r"(?m)^HasEventsJS\.JSCODE = get_HasEvents_js\(\)\s*$",
             f"# StaticPython pre-generates this because frozen modules do not expose\n"

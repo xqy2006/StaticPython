@@ -1428,6 +1428,7 @@
         "pyasn1_modules",
         "pybind11",
         "pycparser",
+        "pyfltk",
         "pygments",
         "pyglet",
         "pymongo",
