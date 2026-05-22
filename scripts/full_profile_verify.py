@@ -4111,6 +4111,22 @@ assert local.answer == 42
         """,
     ),
     (
+        'pystray-smoke',
+        r"""
+from PIL import Image
+from pystray import Icon, Menu, MenuItem
+
+image = Image.new("RGBA", (16, 16), (255, 0, 0, 255))
+item = MenuItem("Quit", lambda icon, item: None)
+menu = Menu(item)
+icon = Icon("staticpython", image, "StaticPython", menu)
+assert icon.name == "staticpython"
+assert icon.title == "StaticPython"
+assert tuple(icon.icon.size) == (16, 16)
+assert len(tuple(menu)) == 1
+        """,
+    ),
+    (
         'remi-smoke',
         r"""
 from remi import gui

@@ -792,6 +792,13 @@
         "source_provider": "pypi"
       },
       {
+        "name": "pystray",
+        "overlay_entries": [
+          "Lib/pystray"
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "pywebio",
         "overlay_entries": [
           "Lib/pywebio"
@@ -1419,6 +1426,7 @@
         "pyparsing",
         "pypdf",
         "pyperclip",
+        "pystray",
         "pywebio",
         "pyrsistent",
         "pytest",
