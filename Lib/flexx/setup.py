@@ -52,11 +52,12 @@ def _render_static_js_block(payload: dict) -> str:
     )
 
 
-def _render_static_component_js_block(payload: dict) -> str:
+def _render_static_component_js_block(component_payload: dict, module_payload: dict) -> str:
     return (
         "# StaticPython pre-generates base app component JS because frozen\n"
         "# modules do not expose inspectable Python source code for PScript.\n"
-        f"_STATICPYTHON_COMPONENT_JS = {payload!r}\n"
+        f"_STATICPYTHON_COMPONENT_JS = {component_payload!r}\n"
+        f"_STATICPYTHON_MODULE_JS = {module_payload!r}\n"
     )
 
 
@@ -172,6 +173,44 @@ print(json.dumps(payload, ensure_ascii=False))
     return _run_flexx_js_generator(context, script, "app component")
 
 
+def _generate_static_module_js(context) -> dict:
+    script = r"""
+import importlib.util
+import json
+import logging
+import sys
+import types
+from pathlib import Path
+
+import flexx
+from pscript import py2js
+
+app_dir = Path(flexx.__file__).parent / "app"
+app_pkg = types.ModuleType("flexx.app")
+app_pkg.__path__ = [str(app_dir)]
+app_pkg.logger = logging.getLogger("flexx.app")
+sys.modules["flexx.app"] = app_pkg
+
+spec = importlib.util.spec_from_file_location("flexx.app._component2", app_dir / "_component2.py")
+_component2 = importlib.util.module_from_spec(spec)
+sys.modules["flexx.app._component2"] = _component2
+spec.loader.exec_module(_component2)
+
+payload = {}
+for name in ("LocalProperty",):
+    code = py2js(getattr(_component2, name), inline_stdlib=False, docstrings=False)
+    meta = {}
+    for key, value in getattr(code, "meta", {}).items():
+        if isinstance(value, set):
+            meta[key] = sorted(value)
+        else:
+            meta[key] = value
+    payload[name] = {"source": str(code), "meta": meta}
+print(json.dumps(payload, ensure_ascii=False))
+"""
+    return _run_flexx_js_generator(context, script, "app module")
+
+
 def _try_generate_static_hasevents_js(context) -> str | None:
     script = r"""
 import json
@@ -230,8 +269,9 @@ def _patch_flexx_static_component_js(context) -> None:
     if "def _get_js(cls):" not in text or "cls.JS.CODE = cls._get_js()" not in text:
         return
 
-    payload = _generate_static_component_js(context)
-    static_block = _render_static_component_js_block(payload)
+    component_payload = _generate_static_component_js(context)
+    module_payload = _generate_static_module_js(context)
+    static_block = _render_static_component_js_block(component_payload, module_payload)
     updated = _replace_regex_once_literal(
         text,
         r"(?m)^manager = None  # Set by __init__ to prevent circular dependencies\s*$",
@@ -259,10 +299,53 @@ def _patch_flexx_static_component_js(context) -> None:
         context.log(f"updated {path.relative_to(context.source_root)}")
 
 
+def _patch_flexx_static_module_js(context) -> None:
+    component_path = source_path(context, "Lib/flexx/app/_component2.py")
+
+    def patch(text: str) -> str:
+        if not component_path.exists():
+            return text
+        if "_STATICPYTHON_MODULE_JS" not in component_path.read_text(encoding="utf-8", errors="ignore"):
+            return text
+        if "staticpython_payload = getattr(self._pymodule, '_STATICPYTHON_MODULE_JS', {}).get(name)" in text:
+            return text
+        target = (
+            "                try:\n"
+            "                    js = py2js(val, inline_stdlib=False, docstrings=False)\n"
+            "                except Exception as err:\n"
+            "                    t = 'JS in \"%s\" uses %r but cannot transpile it with PScript:\\n%s'\n"
+            "                    raise ValueError(t % (self.filename, name, str(err)))"
+        )
+        replacement = (
+            "                staticpython_payload = getattr(self._pymodule, '_STATICPYTHON_MODULE_JS', {}).get(name)\n"
+            "                if staticpython_payload is not None:\n"
+            "                    js = JSString(staticpython_payload['source'])\n"
+            "                    js.meta = {\n"
+            "                        key: set(value) if isinstance(value, list) else value\n"
+            "                        for key, value in staticpython_payload.get('meta', {}).items()\n"
+            "                    }\n"
+            "                else:\n"
+            "                    try:\n"
+            "                        js = py2js(val, inline_stdlib=False, docstrings=False)\n"
+            "                    except Exception as err:\n"
+            "                        t = 'JS in \"%s\" uses %r but cannot transpile it with PScript:\\n%s'\n"
+            "                        raise ValueError(t % (self.filename, name, str(err)))"
+        )
+        return _replace_regex_once_literal(
+            text,
+            re.escape(target),
+            replacement,
+            label="flexx pre-generated app module JS lookup",
+        )
+
+    transform_source_text(context, "Lib/flexx/app/_modules.py", patch, allow_missing=True)
+
+
 def patch_flexx_sources(context) -> None:
     transform_source_text(context, "Lib/flexx/event/_loop.py", _patch_flexx_event_loop, allow_missing=True)
     _patch_flexx_static_event_js(context)
     _patch_flexx_static_component_js(context)
+    _patch_flexx_static_module_js(context)
 
 
 LIBRARY_INTEGRATION = pypi_library(
