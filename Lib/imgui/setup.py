@@ -128,6 +128,34 @@ def _render_static_project(
 
 def _patch_generated_cython_cpp(text: str) -> str:
     replacements = {
+        "#if CYTHON_USE_DICT_VERSIONS && CYTHON_USE_TYPE_SLOTS": (
+            "#if CYTHON_USE_DICT_VERSIONS && CYTHON_USE_TYPE_SLOTS && PY_VERSION_HEX < 0x030F0000"
+        ),
+        "static CYTHON_INLINE int __Pyx_PyList_Extend(PyObject* L, PyObject* v) {\n"
+        "#if CYTHON_COMPILING_IN_CPYTHON\n"
+        "    PyObject* none = _PyList_Extend((PyListObject*)L, v);\n"
+        "    if (unlikely(!none))\n"
+        "        return -1;\n"
+        "    Py_DECREF(none);\n"
+        "    return 0;\n"
+        "#else\n"
+        "    return PyList_SetSlice(L, PY_SSIZE_T_MAX, PY_SSIZE_T_MAX, v);\n"
+        "#endif\n"
+        "}": (
+            "static CYTHON_INLINE int __Pyx_PyList_Extend(PyObject* L, PyObject* v) {\n"
+            "#if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030D0000\n"
+            "    return PyList_Extend(L, v);\n"
+            "#elif CYTHON_COMPILING_IN_CPYTHON\n"
+            "    PyObject* none = _PyList_Extend((PyListObject*)L, v);\n"
+            "    if (unlikely(!none))\n"
+            "        return -1;\n"
+            "    Py_DECREF(none);\n"
+            "    return 0;\n"
+            "#else\n"
+            "    return PyList_SetSlice(L, PY_SSIZE_T_MAX, PY_SSIZE_T_MAX, v);\n"
+            "#endif\n"
+            "}"
+        ),
         "#define __Pyx_PyFrame_SetLineNumber(frame, lineno)  (frame)->f_lineno = (lineno)": (
             "#if PY_VERSION_HEX >= 0x030B0000\n"
             "  #define __Pyx_PyFrame_SetLineNumber(frame, lineno)  ((void)0)\n"
@@ -200,6 +228,34 @@ def _patch_generated_cython_cpp(text: str) -> str:
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
+    text = text.replace("_PyGC_FINALIZED(o)", "PyObject_GC_IsFinalized(o)")
+    text = text.replace(
+        "                int ret = _PyLong_AsByteArray((PyLongObject *)v,\n"
+        "                                              bytes, sizeof(val),\n"
+        "                                              is_little, !is_unsigned);",
+        "                int ret = _PyLong_AsByteArray((PyLongObject *)v,\n"
+        "                                              bytes, sizeof(val),\n"
+        "                                              is_little, !is_unsigned\n"
+        "#if PY_VERSION_HEX >= 0x030D0000\n"
+        "                                              , 1\n"
+        "#endif\n"
+        "                );",
+    )
+    text = text.replace(
+        "            _PyGen_SetStopIterationValue(result);",
+        "            #if PY_VERSION_HEX >= 0x030D0000\n"
+        "            {\n"
+        "                PyObject *exc = PyObject_CallOneArg(PyExc_StopIteration, result);\n"
+        "                if (unlikely(!exc)) {\n"
+        "                    Py_CLEAR(result);\n"
+        "                    return NULL;\n"
+        "                }\n"
+        "                PyErr_SetRaisedException(exc);\n"
+        "            }\n"
+        "            #else\n"
+        "            _PyGen_SetStopIterationValue(result);\n"
+        "            #endif",
+    )
     return text
 
 

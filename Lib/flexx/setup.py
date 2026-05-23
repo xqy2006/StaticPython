@@ -52,6 +52,14 @@ def _render_static_js_block(payload: dict) -> str:
     )
 
 
+def _render_static_component_js_block(payload: dict) -> str:
+    return (
+        "# StaticPython pre-generates base app component JS because frozen\n"
+        "# modules do not expose inspectable Python source code for PScript.\n"
+        f"_STATICPYTHON_COMPONENT_JS = {payload!r}\n"
+    )
+
+
 def _replace_regex_once_literal(text: str, pattern: str, replacement: str, *, label: str) -> str:
     if replacement in text:
         return text
@@ -127,6 +135,43 @@ print(json.dumps({"source": str(_js.JS_EVENT), "meta": meta}, ensure_ascii=False
     return _run_flexx_js_generator(context, script, "event")
 
 
+def _generate_static_component_js(context) -> dict:
+    script = r"""
+import importlib.util
+import json
+import logging
+import sys
+import types
+from pathlib import Path
+
+import flexx
+
+app_dir = Path(flexx.__file__).parent / "app"
+app_pkg = types.ModuleType("flexx.app")
+app_pkg.__path__ = [str(app_dir)]
+app_pkg.logger = logging.getLogger("flexx.app")
+sys.modules["flexx.app"] = app_pkg
+
+spec = importlib.util.spec_from_file_location("flexx.app._component2", app_dir / "_component2.py")
+_component2 = importlib.util.module_from_spec(spec)
+sys.modules["flexx.app._component2"] = _component2
+spec.loader.exec_module(_component2)
+
+payload = {}
+for cls in (_component2.JsComponent, _component2.PyComponent):
+    code = cls.JS.CODE
+    meta = {}
+    for key, value in getattr(code, "meta", {}).items():
+        if isinstance(value, set):
+            meta[key] = sorted(value)
+        else:
+            meta[key] = value
+    payload[cls.__name__] = {"source": str(code), "meta": meta}
+print(json.dumps(payload, ensure_ascii=False))
+"""
+    return _run_flexx_js_generator(context, script, "app component")
+
+
 def _try_generate_static_hasevents_js(context) -> str | None:
     script = r"""
 import json
@@ -175,9 +220,49 @@ def _patch_flexx_static_event_js(context) -> None:
         context.log(f"updated {path.relative_to(context.source_root)}")
 
 
+def _patch_flexx_static_component_js(context) -> None:
+    path = source_path(context, "Lib/flexx/app/_component2.py")
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    if "_STATICPYTHON_COMPONENT_JS" in text:
+        return
+    if "def _get_js(cls):" not in text or "cls.JS.CODE = cls._get_js()" not in text:
+        return
+
+    payload = _generate_static_component_js(context)
+    static_block = _render_static_component_js_block(payload)
+    updated = _replace_regex_once_literal(
+        text,
+        r"(?m)^manager = None  # Set by __init__ to prevent circular dependencies\s*$",
+        "manager = None  # Set by __init__ to prevent circular dependencies\n\n" + static_block,
+        label="flexx static app component JS payload",
+    )
+    match = re.search(r"(?m)^(?P<indent>\s*)cls_name = cls\.__name__\s*$", updated)
+    if match is None:
+        raise RuntimeError("expected regex not found in flexx static app component JS lookup")
+    indent = match.group("indent")
+    replacement = (
+        f"{indent}cls_name = cls.__name__\n"
+        f"{indent}staticpython_payload = _STATICPYTHON_COMPONENT_JS.get(cls_name)\n"
+        f"{indent}if staticpython_payload is not None:\n"
+        f"{indent}    js = JSString(staticpython_payload['source'])\n"
+        f"{indent}    js.meta = {{\n"
+        f"{indent}        key: set(value) if isinstance(value, list) else value\n"
+        f"{indent}        for key, value in staticpython_payload.get('meta', {{}}).items()\n"
+        f"{indent}    }}\n"
+        f"{indent}    return js"
+    )
+    updated = updated[: match.start()] + replacement + updated[match.end():]
+    if updated != text:
+        path.write_text(updated, encoding="utf-8", newline="\n")
+        context.log(f"updated {path.relative_to(context.source_root)}")
+
+
 def patch_flexx_sources(context) -> None:
     transform_source_text(context, "Lib/flexx/event/_loop.py", _patch_flexx_event_loop, allow_missing=True)
     _patch_flexx_static_event_js(context)
+    _patch_flexx_static_component_js(context)
 
 
 LIBRARY_INTEGRATION = pypi_library(

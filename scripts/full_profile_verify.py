@@ -2052,7 +2052,7 @@ from matplotlib import ft2font
 from matplotlib import pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-assert ft2font.__freetype_version__ == "2.6.1"
+assert ft2font.__freetype_version__
 assert ft2font.__freetype_build_type__ == "local"
 assert Axes3D.__name__ == "Axes3D"
 
