@@ -52,12 +52,17 @@ def _render_static_js_block(payload: dict) -> str:
     )
 
 
-def _render_static_component_js_block(component_payload: dict, module_payload: dict) -> str:
+def _render_static_component_js_block(
+    component_payload: dict,
+    module_payload: dict,
+    bsdf_extension_payload: dict,
+) -> str:
     return (
         "# StaticPython pre-generates base app component JS because frozen\n"
         "# modules do not expose inspectable Python source code for PScript.\n"
         f"_STATICPYTHON_COMPONENT_JS = {component_payload!r}\n"
         f"_STATICPYTHON_MODULE_JS = {module_payload!r}\n"
+        f"_STATICPYTHON_BSDF_EXTENSION_JS = {bsdf_extension_payload!r}\n"
     )
 
 
@@ -235,6 +240,57 @@ print(json.dumps(payload, ensure_ascii=False))
     return _run_flexx_js_generator(context, script, "app module")
 
 
+def _generate_static_bsdf_extension_js(context) -> dict:
+    script = r"""
+import importlib.util
+import json
+import logging
+import sys
+import types
+from pathlib import Path
+
+import flexx
+from pscript import py2js
+
+app_dir = Path(flexx.__file__).parent / "app"
+app_pkg = types.ModuleType("flexx.app")
+app_pkg.__path__ = [str(app_dir)]
+app_pkg.logger = logging.getLogger("flexx.app")
+sys.modules["flexx.app"] = app_pkg
+
+spec = importlib.util.spec_from_file_location("flexx.app._component2", app_dir / "_component2.py")
+_component2 = importlib.util.module_from_spec(spec)
+sys.modules["flexx.app._component2"] = _component2
+spec.loader.exec_module(_component2)
+
+
+def make_jsonable(value):
+    if isinstance(value, set):
+        return sorted(make_jsonable(item) for item in value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if isinstance(value, (list, tuple)):
+        return [make_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {make_jsonable(key): make_jsonable(item) for key, item in value.items()}
+    return value
+
+
+payload = {}
+for cls_name in ("BsdfComponentExtension",):
+    if not hasattr(_component2, cls_name):
+        continue
+    cls = getattr(_component2, cls_name)
+    payload[cls_name] = {}
+    for method_name in ("match", "encode", "decode"):
+        code = py2js(getattr(cls, method_name + "_js"), indent=1, inline_stdlib=False, docstrings=False)
+        meta = {key: make_jsonable(value) for key, value in getattr(code, "meta", {}).items()}
+        payload[cls_name][method_name] = {"source": str(code), "meta": meta}
+print(json.dumps(payload, ensure_ascii=False))
+"""
+    return _run_flexx_js_generator(context, script, "BSDF extension")
+
+
 def _generate_static_pscript_module_js(context, module_name: str, module_file: str) -> dict:
     script = rf"""
 import importlib.util
@@ -338,7 +394,8 @@ def _patch_flexx_static_component_js(context) -> None:
 
     component_payload = _generate_static_component_js(context)
     module_payload = _generate_static_module_js(context)
-    static_block = _render_static_component_js_block(component_payload, module_payload)
+    bsdf_extension_payload = _generate_static_bsdf_extension_js(context) if "class BsdfComponentExtension" in text else {}
+    static_block = _render_static_component_js_block(component_payload, module_payload, bsdf_extension_payload)
     updated = _replace_regex_once_literal(
         text,
         r"(?m)^manager = None  # Set by __init__ to prevent circular dependencies\s*$",
@@ -431,6 +488,72 @@ def _patch_flexx_static_module_js(context) -> None:
     transform_source_text(context, "Lib/flexx/app/_modules.py", patch, allow_missing=True)
 
 
+def _patch_flexx_static_bsdf_extension_js(context) -> None:
+    component_path = source_path(context, "Lib/flexx/app/_component2.py")
+
+    def patch(text: str) -> str:
+        if not component_path.exists():
+            return text
+        component_text = component_path.read_text(encoding="utf-8", errors="ignore")
+        if "_STATICPYTHON_BSDF_EXTENSION_JS" not in component_text:
+            return text
+        if "staticpython_extension_payload = getattr(self._pymodule, '_STATICPYTHON_BSDF_EXTENSION_JS', {}).get(name)" in text:
+            return text
+        target = (
+            "        elif isinstance(val, type) and issubclass(val, bsdf.Extension):\n"
+            "            # A bit hacky mechanism to define BSDF extensions that also work in JS.\n"
+            "            # todo: can we make this better? See also app/_component2.py (issue #429)\n"
+            "            js = 'var %s = {name: \"%s\"' % (name, val.name)\n"
+            "            for mname in ('match', 'encode', 'decode'):\n"
+            "                func = getattr(val, mname + '_js')\n"
+            "                funccode = py2js(func, indent=1, inline_stdlib=False, docstrings=False)\n"
+            "                js += ',\\n    ' + mname + ':' + funccode.split('=', 1)[1].rstrip(' \\n;')\n"
+            "                self._collect_dependencies(funccode, _dep_stack)\n"
+            "            js += '};\\n'\n"
+            "            js += 'serializer.add_extension(%s);\\n' % name\n"
+            "            js = JSString(js)\n"
+            "            js.meta = funccode.meta\n"
+            "            self._pscript_code[name] = js\n"
+            "            self._deps.setdefault('flexx.app._clientcore',\n"
+            "                                 ['flexx.app._clientcore']).append('serializer')"
+        )
+        replacement = (
+            "        elif isinstance(val, type) and issubclass(val, bsdf.Extension):\n"
+            "            # A bit hacky mechanism to define BSDF extensions that also work in JS.\n"
+            "            # todo: can we make this better? See also app/_component2.py (issue #429)\n"
+            "            staticpython_extension_payload = getattr(self._pymodule, '_STATICPYTHON_BSDF_EXTENSION_JS', {}).get(name)\n"
+            "            js = 'var %s = {name: \"%s\"' % (name, val.name)\n"
+            "            for mname in ('match', 'encode', 'decode'):\n"
+            "                if staticpython_extension_payload is not None:\n"
+            "                    staticpython_func_payload = staticpython_extension_payload[mname]\n"
+            "                    funccode = JSString(staticpython_func_payload['source'])\n"
+            "                    funccode.meta = {\n"
+            "                        key: set(value) if isinstance(value, list) else value\n"
+            "                        for key, value in staticpython_func_payload.get('meta', {}).items()\n"
+            "                    }\n"
+            "                else:\n"
+            "                    func = getattr(val, mname + '_js')\n"
+            "                    funccode = py2js(func, indent=1, inline_stdlib=False, docstrings=False)\n"
+            "                js += ',\\n    ' + mname + ':' + funccode.split('=', 1)[1].rstrip(' \\n;')\n"
+            "                self._collect_dependencies(funccode, _dep_stack)\n"
+            "            js += '};\\n'\n"
+            "            js += 'serializer.add_extension(%s);\\n' % name\n"
+            "            js = JSString(js)\n"
+            "            js.meta = funccode.meta\n"
+            "            self._pscript_code[name] = js\n"
+            "            self._deps.setdefault('flexx.app._clientcore',\n"
+            "                                 ['flexx.app._clientcore']).append('serializer')"
+        )
+        return _replace_regex_once_literal(
+            text,
+            re.escape(target),
+            replacement,
+            label="flexx pre-generated BSDF extension JS lookup",
+        )
+
+    transform_source_text(context, "Lib/flexx/app/_modules.py", patch, allow_missing=True)
+
+
 def _patch_flexx_pscript_module_loader(context) -> None:
     clientcore_path = source_path(context, "Lib/flexx/app/_clientcore.py")
 
@@ -481,6 +604,7 @@ def patch_flexx_sources(context) -> None:
     _patch_flexx_static_pscript_module_js(context)
     _patch_flexx_pscript_module_loader(context)
     _patch_flexx_static_component_js(context)
+    _patch_flexx_static_bsdf_extension_js(context)
     _patch_flexx_static_module_js(context)
 
 
