@@ -3,6 +3,21 @@ from __future__ import annotations
 from libs import ensure_package_markers, pypi_library, replace_regex_once, transform_source_text
 
 
+_CGI_COMPAT = (
+    "try:\n"
+    "    import cgi\n"
+    "except ModuleNotFoundError:\n"
+    "    class _StaticPythonCgi:\n"
+    "        class FieldStorage:\n"
+    "            def __init__(self, *args, **kwargs):\n"
+    "                raise RuntimeError(\n"
+    "                    'remi file uploads require cgi.FieldStorage, '\n"
+    "                    'which is not available on this CPython version'\n"
+    "                )\n"
+    "    cgi = _StaticPythonCgi()\n"
+)
+
+
 def _patch_remi_init(text: str) -> str:
     text = ensure_package_markers(text, "remi")
     if "pkg_resources" not in text:
@@ -32,6 +47,13 @@ def _patch_remi_init(text: str) -> str:
 def _patch_remi_server(text: str) -> str:
     # CPython's _freeze_module can fail internally on Remi's raw non-ASCII URL regex.
     text = text.replace("£", "\\xa3").replace("°", "\\xb0").replace("§", "\\xa7")
+    if "import cgi" in text and "_StaticPythonCgi" not in text:
+        text = replace_regex_once(
+            text,
+            r"(?m)^import cgi\s*$",
+            _CGI_COMPAT,
+            label="remi cgi compatibility",
+        )
     if "_STATICPYTHON_REMI_SERVER_SOURCE" in text:
         return text
     return (
