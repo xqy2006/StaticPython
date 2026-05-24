@@ -38,7 +38,7 @@ def main() -> None:
             imgui.render()
             draw_data = imgui.get_draw_data()
             assert draw_data is not None
-            assert draw_data.commands_lists_count >= 0
+            assert len(draw_data.commands_lists) >= 0
         print("imgui_runtime_ok", flush=True)
     finally:
         imgui.destroy_context(ctx)

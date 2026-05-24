@@ -5,6 +5,7 @@ import time
 
 import imgui
 import pyglet
+from pyglet.gl.lib import MissingFunctionException
 from imgui.integrations.pyglet import create_renderer
 
 
@@ -41,7 +42,15 @@ def _window_is_visible(title: str) -> bool:
 def main() -> None:
     title = "StaticPython imgui pyglet runtime"
     ctx = imgui.create_context()
-    window = pyglet.window.Window(width=480, height=320, caption=title, visible=True)
+    try:
+        window = pyglet.window.Window(width=480, height=320, caption=title, visible=True)
+    except MissingFunctionException as exc:
+        # GitHub's Windows runner may expose only the generic OpenGL 1.1
+        # driver. That is an environment limit, not a pyimgui static-link
+        # failure, so keep this backend test active wherever OpenGL exists.
+        print(f"imgui_pyglet_runtime_skipped opengl_unavailable={exc}", flush=True)
+        imgui.destroy_context(ctx)
+        return
     renderer = create_renderer(window)
     state = {"frames": 0, "saw_window": False}
 
