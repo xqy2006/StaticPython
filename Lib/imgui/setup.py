@@ -461,5 +461,9 @@ LIBRARY_INTEGRATION = pypi_library(
         "imgui.core.lib",
         "imgui_cpp.lib",
     ],
+    overlay_entries=[
+        "imgui_runtime_test.py",
+        "imgui_pyglet_runtime_test.py",
+    ],
     prepare_source_hooks=[prepare_imgui_project],
 )

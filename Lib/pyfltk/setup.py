@@ -418,6 +418,9 @@ LIBRARY_INTEGRATION = pypi_library(
         *FLTK_LIBRARY_NAMES,
         *PYFLTK_SYSTEM_LIBRARIES,
     ],
+    overlay_entries=[
+        "pyfltk_runtime_test.py",
+    ],
     prepare_source_hooks=[prepare_pyfltk_project],
     pre_build_hooks=[prepare_pyfltk_artifacts],
 )

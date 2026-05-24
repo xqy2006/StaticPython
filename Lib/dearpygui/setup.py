@@ -255,6 +255,9 @@ LIBRARY_INTEGRATION = github_library(
         *DEARPYGUI_STATIC_LIBRARIES,
         *DEARPYGUI_SYSTEM_LIBRARIES,
     ],
+    overlay_entries=[
+        "dearpygui_runtime_test.py",
+    ],
     prepare_source_hooks=[prepare_dearpygui_project],
     pre_build_hooks=[prepare_dearpygui_artifacts],
 )
