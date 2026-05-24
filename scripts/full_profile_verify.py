@@ -4077,6 +4077,25 @@ finally:
         """,
     ),
     (
+        'glfw-smoke',
+        r"""
+import glfw
+
+assert callable(glfw.init)
+assert callable(glfw.create_window)
+if not glfw.init():
+    raise RuntimeError("glfw.init() failed")
+try:
+    glfw.window_hint(glfw.VISIBLE, glfw.FALSE)
+    window = glfw.create_window(64, 64, "StaticPython GLFW smoke", None, None)
+    if not window:
+        raise RuntimeError("glfw.create_window() failed")
+    glfw.destroy_window(window)
+finally:
+    glfw.terminate()
+        """,
+    ),
+    (
         'pscript-smoke',
         r"""
 from pscript import py2js
@@ -4120,6 +4139,10 @@ import fltk
 assert fltk.__version__
 assert hasattr(fltk, "Fl_Window")
 assert hasattr(fltk, "Fl_Button")
+assert fltk.Window is fltk.Fl_Window
+assert fltk.Input is fltk.Fl_Input
+assert fltk.Button is fltk.Fl_Button
+assert callable(fltk.run)
         """,
     ),
     (
@@ -4301,6 +4324,13 @@ SUBPROCESS_TESTS = [
         "kind": "script",
         "name": "imgui-runtime",
         "script": "assets/overlay/imgui_runtime_test.py",
+        "timeout": 180,
+        "skip_env": "STATICPYTHON_VERIFY_SKIP_GUI",
+    },
+    {
+        "kind": "script",
+        "name": "imgui-glfw-runtime",
+        "script": "assets/overlay/imgui_glfw_runtime_test.py",
         "timeout": 180,
         "skip_env": "STATICPYTHON_VERIFY_SKIP_GUI",
     },

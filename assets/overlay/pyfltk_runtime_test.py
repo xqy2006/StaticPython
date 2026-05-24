@@ -35,7 +35,7 @@ def _wait_for_window(title: str, timeout: float = 5.0):
     deadline = time.perf_counter() + timeout
     last_windows = []
     while time.perf_counter() < deadline:
-        Fl.check()
+        check()
         last_windows = _enum_visible_windows_for_current_process()
         if any(window_title == title for window_title, _klass in last_windows):
             return last_windows
@@ -45,18 +45,18 @@ def _wait_for_window(title: str, timeout: float = 5.0):
 
 def main() -> None:
     title = "StaticPython pyfltk runtime"
-    window = Fl_Window(100, 100, 420, 240, title)
-    browser = Fl_Browser(10, 10, 400, 70)
+    window = Window(100, 100, 420, 240, title)
+    browser = Browser(10, 10, 400, 70)
     browser.add("first row")
     browser.add("second row")
-    button = Fl_Button(10, 95, 100, 30, "Button")
-    check = Fl_Check_Button(130, 95, 120, 30, "Check")
-    check.value(1)
-    slider = Fl_Hor_Value_Slider(10, 140, 260, 24, "Value")
+    button = Button(10, 95, 100, 30, "Button")
+    check_button = CheckButton(130, 95, 120, 30, "Check")
+    check_button.value(1)
+    slider = HorValueSlider(10, 140, 260, 24, "Value")
     slider.minimum(0.0)
     slider.maximum(1.0)
     slider.value(0.5)
-    output = Fl_Output(10, 180, 260, 24, "Output")
+    output = Output(10, 180, 260, 24, "Output")
     output.value("ready")
     window.end()
     window.show()
@@ -65,14 +65,14 @@ def main() -> None:
         windows = _wait_for_window(title)
         assert any(window_title == title for window_title, _klass in windows)
         assert button.label() == "Button"
-        assert check.value() == 1
+        assert check_button.value() == 1
         assert abs(slider.value() - 0.5) < 0.001
         assert output.value() == "ready"
         print("pyfltk_window_seen", windows, flush=True)
     finally:
         window.hide()
         for _ in range(10):
-            Fl.check()
+            check()
             time.sleep(0.02)
     print("pyfltk_runtime_ok", flush=True)
 
