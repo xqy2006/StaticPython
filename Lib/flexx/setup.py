@@ -61,6 +61,14 @@ def _render_static_component_js_block(component_payload: dict, module_payload: d
     )
 
 
+def _render_static_pscript_js_block(payload: dict) -> str:
+    return (
+        "# StaticPython pre-generates this PScript module because frozen modules\n"
+        "# do not expose inspectable Python source code at runtime.\n"
+        f"_STATICPYTHON_PSCRIPT_JS = {payload!r}\n"
+    )
+
+
 def _replace_regex_once_literal(text: str, pattern: str, replacement: str, *, label: str) -> str:
     if replacement in text:
         return text
@@ -227,6 +235,49 @@ print(json.dumps(payload, ensure_ascii=False))
     return _run_flexx_js_generator(context, script, "app module")
 
 
+def _generate_static_pscript_module_js(context, module_name: str, module_file: str) -> dict:
+    script = rf"""
+import importlib.util
+import json
+import logging
+import sys
+import types
+from pathlib import Path
+
+import flexx
+from pscript import py2js
+
+app_dir = Path(flexx.__file__).parent / "app"
+app_pkg = types.ModuleType("flexx.app")
+app_pkg.__path__ = [str(app_dir)]
+app_pkg.logger = logging.getLogger("flexx.app")
+sys.modules["flexx.app"] = app_pkg
+
+spec = importlib.util.spec_from_file_location({module_name!r}, app_dir / {module_file!r})
+module = importlib.util.module_from_spec(spec)
+sys.modules[{module_name!r}] = module
+spec.loader.exec_module(module)
+
+
+def make_jsonable(value):
+    if isinstance(value, set):
+        return sorted(make_jsonable(item) for item in value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if isinstance(value, (list, tuple)):
+        return [make_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {{make_jsonable(key): make_jsonable(item) for key, item in value.items()}}
+    return value
+
+
+code = py2js(module, inline_stdlib=False, docstrings=False)
+meta = {{key: make_jsonable(value) for key, value in getattr(code, "meta", {{}}).items()}}
+print(json.dumps({{"source": str(code), "meta": meta}}, ensure_ascii=False))
+"""
+    return _run_flexx_js_generator(context, script, f"{module_name} PScript module")
+
+
 def _try_generate_static_hasevents_js(context) -> str | None:
     script = r"""
 import json
@@ -315,6 +366,29 @@ def _patch_flexx_static_component_js(context) -> None:
         context.log(f"updated {path.relative_to(context.source_root)}")
 
 
+def _patch_flexx_static_pscript_module_js(context) -> None:
+    path = source_path(context, "Lib/flexx/app/_clientcore.py")
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    if "_STATICPYTHON_PSCRIPT_JS" in text:
+        return
+    if "__pscript__ = True" not in text and "__pyscript__ = True" not in text:
+        return
+
+    payload = _generate_static_pscript_module_js(context, "flexx.app._clientcore", "_clientcore.py")
+    static_block = _render_static_pscript_js_block(payload)
+    updated = _replace_regex_once_literal(
+        text,
+        r"(?m)^__(?:pyscript|pscript)__ = True\s*$",
+        "__pscript__ = True\n\n" + static_block,
+        label="flexx static _clientcore PScript JS payload",
+    )
+    if updated != text:
+        path.write_text(updated, encoding="utf-8", newline="\n")
+        context.log(f"updated {path.relative_to(context.source_root)}")
+
+
 def _patch_flexx_static_module_js(context) -> None:
     component_path = source_path(context, "Lib/flexx/app/_component2.py")
 
@@ -357,9 +431,55 @@ def _patch_flexx_static_module_js(context) -> None:
     transform_source_text(context, "Lib/flexx/app/_modules.py", patch, allow_missing=True)
 
 
+def _patch_flexx_pscript_module_loader(context) -> None:
+    clientcore_path = source_path(context, "Lib/flexx/app/_clientcore.py")
+
+    def patch(text: str) -> str:
+        if not clientcore_path.exists():
+            return text
+        if "_STATICPYTHON_PSCRIPT_JS" not in clientcore_path.read_text(encoding="utf-8", errors="ignore"):
+            return text
+        if "staticpython_payload = getattr(self._pymodule, '_STATICPYTHON_PSCRIPT_JS', None)" in text:
+            return text
+        target = (
+            "        if is_pscript_module(self._pymodule):\n"
+            "            # PScript module; transpile as a whole\n"
+            "            js = py2js(self._pymodule, inline_stdlib=False, docstrings=False)\n"
+            "            self._pscript_code['__all__'] = js\n"
+            "            self._provided_names.update([n for n in js.meta['vars_defined']\n"
+            "                                         if not n.startswith('_')])"
+        )
+        replacement = (
+            "        if is_pscript_module(self._pymodule):\n"
+            "            # PScript module; transpile as a whole\n"
+            "            staticpython_payload = getattr(self._pymodule, '_STATICPYTHON_PSCRIPT_JS', None)\n"
+            "            if staticpython_payload is not None:\n"
+            "                js = JSString(staticpython_payload['source'])\n"
+            "                js.meta = {\n"
+            "                    key: set(value) if isinstance(value, list) else value\n"
+            "                    for key, value in staticpython_payload.get('meta', {}).items()\n"
+            "                }\n"
+            "            else:\n"
+            "                js = py2js(self._pymodule, inline_stdlib=False, docstrings=False)\n"
+            "            self._pscript_code['__all__'] = js\n"
+            "            self._provided_names.update([n for n in js.meta['vars_defined']\n"
+            "                                         if not n.startswith('_')])"
+        )
+        return _replace_regex_once_literal(
+            text,
+            re.escape(target),
+            replacement,
+            label="flexx pre-generated PScript module JS loader",
+        )
+
+    transform_source_text(context, "Lib/flexx/app/_modules.py", patch, allow_missing=True)
+
+
 def patch_flexx_sources(context) -> None:
     transform_source_text(context, "Lib/flexx/event/_loop.py", _patch_flexx_event_loop, allow_missing=True)
     _patch_flexx_static_event_js(context)
+    _patch_flexx_static_pscript_module_js(context)
+    _patch_flexx_pscript_module_loader(context)
     _patch_flexx_static_component_js(context)
     _patch_flexx_static_module_js(context)
 
