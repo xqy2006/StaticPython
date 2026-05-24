@@ -158,15 +158,23 @@ _component2 = importlib.util.module_from_spec(spec)
 sys.modules["flexx.app._component2"] = _component2
 spec.loader.exec_module(_component2)
 
+
+def make_jsonable(value):
+    if isinstance(value, set):
+        return sorted(make_jsonable(item) for item in value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if isinstance(value, (list, tuple)):
+        return [make_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {make_jsonable(key): make_jsonable(item) for key, item in value.items()}
+    return value
+
+
 payload = {}
 for cls in (_component2.JsComponent, _component2.PyComponent):
     code = cls.JS.CODE
-    meta = {}
-    for key, value in getattr(code, "meta", {}).items():
-        if isinstance(value, set):
-            meta[key] = sorted(value)
-        else:
-            meta[key] = value
+    meta = {key: make_jsonable(value) for key, value in getattr(code, "meta", {}).items()}
     payload[cls.__name__] = {"source": str(code), "meta": meta}
 print(json.dumps(payload, ensure_ascii=False))
 """
@@ -196,15 +204,23 @@ _component2 = importlib.util.module_from_spec(spec)
 sys.modules["flexx.app._component2"] = _component2
 spec.loader.exec_module(_component2)
 
+
+def make_jsonable(value):
+    if isinstance(value, set):
+        return sorted(make_jsonable(item) for item in value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if isinstance(value, (list, tuple)):
+        return [make_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {make_jsonable(key): make_jsonable(item) for key, item in value.items()}
+    return value
+
+
 payload = {}
 for name in ("LocalProperty",):
     code = py2js(getattr(_component2, name), inline_stdlib=False, docstrings=False)
-    meta = {}
-    for key, value in getattr(code, "meta", {}).items():
-        if isinstance(value, set):
-            meta[key] = sorted(value)
-        else:
-            meta[key] = value
+    meta = {key: make_jsonable(value) for key, value in getattr(code, "meta", {}).items()}
     payload[name] = {"source": str(code), "meta": meta}
 print(json.dumps(payload, ensure_ascii=False))
 """
