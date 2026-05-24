@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tokenize
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -203,7 +204,15 @@ def ensure_swigwin(context) -> Path:
 
 
 def _wrap_pyfltk_shadow_module(path: Path) -> None:
-    text = path.read_text(encoding="utf-8")
+    try:
+        with tokenize.open(path) as handle:
+            text = handle.read()
+    except UnicodeDecodeError:
+        raw = path.read_bytes()
+        try:
+            text = raw.decode("cp1252")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1")
     if "_STATICPYTHON_PYFLTK_SHADOW_SOURCE" in text:
         return
     wrapped = (
