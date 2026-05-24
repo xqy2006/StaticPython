@@ -28,6 +28,40 @@ def _patch_flexx_event_loop(text: str) -> str:
     )
 
 
+def _patch_flexx_inspect_getargspec(context) -> None:
+    package_root = source_path(context, "Lib/flexx")
+    if not package_root.exists():
+        return
+    compat_block = (
+        "import inspect\n"
+        "\n"
+        "if not hasattr(inspect, 'getargspec'):\n"
+        "    from collections import namedtuple as _staticpython_namedtuple\n"
+        "    inspect.ArgSpec = getattr(\n"
+        "        inspect,\n"
+        "        'ArgSpec',\n"
+        "        _staticpython_namedtuple('ArgSpec', 'args varargs keywords defaults'),\n"
+        "    )\n"
+        "    def _staticpython_getargspec(func):\n"
+        "        spec = inspect.getfullargspec(func)\n"
+        "        return inspect.ArgSpec(spec.args, spec.varargs, spec.varkw, spec.defaults)\n"
+        "    inspect.getargspec = _staticpython_getargspec"
+    )
+    for path in package_root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "inspect.getargspec" not in text or "_staticpython_getargspec" in text:
+            continue
+        updated = _replace_regex_once_literal(
+            text,
+            r"(?m)^import inspect\s*$",
+            compat_block,
+            label=f"flexx inspect.getargspec compatibility in {path.relative_to(context.source_root)}",
+        )
+        if updated != text:
+            path.write_text(updated, encoding="utf-8", newline="\n")
+            context.log(f"updated {path.relative_to(context.source_root)}")
+
+
 def _static_js_meta_literal(meta: dict) -> str:
     lines = ["{"]
     for key in ("vars_unknown", "vars_global", "std_functions", "std_methods"):
@@ -631,6 +665,7 @@ def _patch_flexx_pscript_module_loader(context) -> None:
 
 
 def patch_flexx_sources(context) -> None:
+    _patch_flexx_inspect_getargspec(context)
     transform_source_text(context, "Lib/flexx/event/_loop.py", _patch_flexx_event_loop, allow_missing=True)
     _patch_flexx_static_event_js(context)
     _patch_flexx_static_pscript_module_js(context)
