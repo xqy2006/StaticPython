@@ -21,6 +21,7 @@ IMGUI_CPP_CANDIDATE_SOURCES = [
 
 IMGUI_CYTHON_COMPAT_DEFINES = [
     "CYTHON_USE_PYLONG_INTERNALS=0",
+    "CYTHON_USE_DICT_VERSIONS=0",
     "CYTHON_FAST_THREAD_STATE=0",
     "CYTHON_USE_EXC_INFO_STACK=0",
     "CYTHON_USE_UNICODE_INTERNALS=0",
@@ -129,7 +130,7 @@ def _render_static_project(
 def _patch_generated_cython_cpp(text: str) -> str:
     replacements = {
         "#if CYTHON_USE_DICT_VERSIONS && CYTHON_USE_TYPE_SLOTS": (
-            "#if CYTHON_USE_DICT_VERSIONS && CYTHON_USE_TYPE_SLOTS && PY_VERSION_HEX < 0x030F0000"
+            "#if CYTHON_USE_DICT_VERSIONS && CYTHON_USE_TYPE_SLOTS && PY_VERSION_HEX < 0x030E0000"
         ),
         "static CYTHON_INLINE int __Pyx_PyList_Extend(PyObject* L, PyObject* v) {\n"
         "#if CYTHON_COMPILING_IN_CPYTHON\n"
@@ -256,7 +257,52 @@ def _patch_generated_cython_cpp(text: str) -> str:
         "            _PyGen_SetStopIterationValue(result);\n"
         "            #endif",
     )
+    text = re.sub(
+        r"__Pyx_GetModuleGlobalName\((?P<var>__pyx_t_\d+), __pyx_n_s_namedtuple\); "
+        r"if \(unlikely\(!(?P=var)\)\) (?P<err>__PYX_ERR\([^)]+\))",
+        lambda match: (
+            f"{match.group('var')} = PyDict_GetItemWithError(__pyx_d, __pyx_n_s_namedtuple); "
+            f"if (unlikely(!{match.group('var')})) {{ "
+            "if (!PyErr_Occurred()) PyErr_SetString(PyExc_NameError, \"name 'namedtuple' is not defined\"); "
+            f"{match.group('err')}; "
+            f"}} __Pyx_INCREF({match.group('var')});"
+        ),
+        text,
+    )
     return text
+
+
+def _patch_imgui_python_sources(context) -> None:
+    def patch_pyglet(text: str) -> str:
+        old = "from distutils.version import LooseVersion\n"
+        if old not in text:
+            return text
+        new = """try:
+    from distutils.version import LooseVersion
+except ModuleNotFoundError:
+    class LooseVersion:
+        def __init__(self, value):
+            parts = []
+            for part in str(value).replace("-", ".").split("."):
+                digits = ""
+                for char in part:
+                    if char.isdigit():
+                        digits += char
+                    else:
+                        break
+                if digits:
+                    parts.append(int(digits))
+                else:
+                    break
+            self.parts = tuple(parts)
+
+        def __lt__(self, other):
+            return self.parts < other.parts
+
+"""
+        return text.replace(old, new, 1)
+
+    transform_source_text(context, "Lib/imgui/integrations/pyglet.py", patch_pyglet, allow_missing=True)
 
 
 def _patch_imgui_generated_sources(context) -> None:
@@ -423,6 +469,7 @@ def _configure_imgui_integration(has_internal: bool) -> None:
 
 
 def prepare_imgui_project(context) -> None:
+    _patch_imgui_python_sources(context)
     _patch_imgui_generated_sources(context)
     _patch_imgui_private_symbols(context)
     _render_imgui_projects(context)
