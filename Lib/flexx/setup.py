@@ -172,6 +172,33 @@ sys.modules["flexx.app._component2"] = _component2
 spec.loader.exec_module(_component2)
 
 
+class _StaticPythonAssetStore:
+    def associate_asset(self, *args, **kwargs):
+        return None
+
+
+for name in (
+    "BaseAppComponent",
+    "LocalComponent",
+    "ProxyComponent",
+    "PyComponent",
+    "JsComponent",
+    "StubComponent",
+    "get_component_classes",
+    "LocalProperty",
+    "serializer",
+):
+    if hasattr(_component2, name):
+        setattr(app_pkg, name, getattr(_component2, name))
+app_pkg.assets = _StaticPythonAssetStore()
+setattr(flexx, "app", app_pkg)
+
+try:
+    import flexx.ui  # noqa: F401
+except Exception as exc:
+    raise RuntimeError("failed to import flexx.ui while pre-generating component JS") from exc
+
+
 def make_jsonable(value):
     if isinstance(value, set):
         return sorted(make_jsonable(item) for item in value)
@@ -185,10 +212,12 @@ def make_jsonable(value):
 
 
 payload = {}
-for cls in (_component2.JsComponent, _component2.PyComponent):
+for cls in _component2.AppComponentMeta.CLASSES:
     code = cls.JS.CODE
     meta = {key: make_jsonable(value) for key, value in getattr(code, "meta", {}).items()}
-    payload[cls.__name__] = {"source": str(code), "meta": meta}
+    static_entry = {"source": str(code), "meta": meta}
+    payload[f"{cls.__module__}:{cls.__name__}"] = static_entry
+    payload.setdefault(cls.__name__, static_entry)
 print(json.dumps(payload, ensure_ascii=False))
 """
     return _run_flexx_js_generator(context, script, "app component")
@@ -408,7 +437,10 @@ def _patch_flexx_static_component_js(context) -> None:
     indent = match.group("indent")
     replacement = (
         f"{indent}cls_name = cls.__name__\n"
-        f"{indent}staticpython_payload = _STATICPYTHON_COMPONENT_JS.get(cls_name)\n"
+        f"{indent}staticpython_payload = (\n"
+        f"{indent}    _STATICPYTHON_COMPONENT_JS.get(f'{{cls.__module__}}:{{cls_name}}')\n"
+        f"{indent}    or _STATICPYTHON_COMPONENT_JS.get(cls_name)\n"
+        f"{indent})\n"
         f"{indent}if staticpython_payload is not None:\n"
         f"{indent}    js = JSString(staticpython_payload['source'])\n"
         f"{indent}    js.meta = {{\n"
