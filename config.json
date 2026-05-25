@@ -1341,7 +1341,6 @@
         "freezegun",
         "frozenlist",
         "fsspec",
-        "glfw",
         "h11",
         "h2",
         "hpack",

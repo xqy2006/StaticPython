@@ -480,7 +480,6 @@ LIBRARY_INTEGRATION = pypi_library(
     minimum_release_version="1.0.0a2",
     dependencies=[
         "OpenGL",
-        "glfw",
         "pyglet",
     ],
     source_mapping={
@@ -515,7 +514,6 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     overlay_entries=[
         "imgui_runtime_test.py",
-        "imgui_glfw_runtime_test.py",
         "imgui_pyglet_runtime_test.py",
     ],
     prepare_source_hooks=[prepare_imgui_project],
