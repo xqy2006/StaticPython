@@ -160,11 +160,6 @@ static PyObject *PyGLFWWindow_repr(PyGLFWWindow *self) {
 
 static PyTypeObject PyGLFWWindow_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "glfw.Window",
-    .tp_basicsize = sizeof(PyGLFWWindow),
-    .tp_dealloc = (destructor)PyGLFWWindow_dealloc,
-    .tp_repr = (reprfunc)PyGLFWWindow_repr,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
 };
 
 static PyObject *make_window(GLFWwindow *handle) {
@@ -757,6 +752,11 @@ static struct PyModuleDef moduledef = {
 };
 
 PyMODINIT_FUNC PyInit__glfw(void) {
+    PyGLFWWindow_Type.tp_name = "glfw.Window";
+    PyGLFWWindow_Type.tp_basicsize = sizeof(PyGLFWWindow);
+    PyGLFWWindow_Type.tp_dealloc = (destructor)PyGLFWWindow_dealloc;
+    PyGLFWWindow_Type.tp_repr = (reprfunc)PyGLFWWindow_repr;
+    PyGLFWWindow_Type.tp_flags = Py_TPFLAGS_DEFAULT;
     if (PyType_Ready(&PyGLFWWindow_Type) < 0) {
         return NULL;
     }
