@@ -4077,6 +4077,21 @@ finally:
         """,
     ),
     (
+        'glfw-smoke',
+        r"""
+import glfw
+
+assert glfw.__version__
+assert glfw.get_version()[:2] >= (3, 4)
+assert glfw.TRUE == 1
+assert glfw.FALSE == 0
+assert glfw.KEY_A > 0
+assert glfw.VISIBLE > 0
+assert callable(glfw.init)
+assert callable(glfw.create_window)
+        """,
+    ),
+    (
         'pscript-smoke',
         r"""
 from pscript import py2js
@@ -4312,6 +4327,13 @@ SUBPROCESS_TESTS = [
         "kind": "script",
         "name": "imgui-pyglet-runtime",
         "script": "assets/overlay/imgui_pyglet_runtime_test.py",
+        "timeout": 180,
+        "skip_env": "STATICPYTHON_VERIFY_SKIP_GUI",
+    },
+    {
+        "kind": "script",
+        "name": "imgui-glfw-runtime",
+        "script": "assets/overlay/imgui_glfw_runtime_test.py",
         "timeout": 180,
         "skip_env": "STATICPYTHON_VERIFY_SKIP_GUI",
     },

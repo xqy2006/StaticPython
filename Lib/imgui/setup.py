@@ -479,6 +479,7 @@ LIBRARY_INTEGRATION = pypi_library(
     name="imgui",
     minimum_release_version="1.0.0a2",
     dependencies=[
+        "glfw",
         "OpenGL",
         "pyglet",
     ],
