@@ -71,8 +71,8 @@ def main() -> None:
         state["frames"] += 1
         if _window_is_visible(title):
             state["saw_window"] = True
-        if state["frames"] >= 4:
-            window.close()
+        if state["frames"] >= 4 and state["saw_window"]:
+            pyglet.app.exit()
 
     pyglet.clock.schedule_once(lambda _dt: window.close(), 8.0)
     try:
@@ -84,6 +84,7 @@ def main() -> None:
         try:
             renderer.shutdown()
         finally:
+            window.close()
             imgui.destroy_context(ctx)
             time.sleep(0.05)
 
