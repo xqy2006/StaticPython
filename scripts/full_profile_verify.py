@@ -4065,13 +4065,26 @@ assert callable(GL.glGetError)
         'imgui-smoke',
         r"""
 import imgui
+import importlib
+
+def assert_builtin_native(name):
+    module = importlib.import_module(name)
+    spec = getattr(module, "__spec__", None)
+    origin = getattr(spec, "origin", None)
+    file_name = getattr(module, "__file__", None)
+    assert origin == "built-in", (name, origin, file_name)
 
 ctx = imgui.create_context()
 try:
+    assert_builtin_native("imgui.core")
     assert imgui.__version__
     assert imgui.VERTEX_SIZE > 0
     io = imgui.get_io()
     assert io is not None
+    try:
+        assert_builtin_native("imgui.internal")
+    except ModuleNotFoundError:
+        pass
 finally:
     imgui.destroy_context(ctx)
         """,
@@ -4080,7 +4093,16 @@ finally:
         'glfw-smoke',
         r"""
 import glfw
+import importlib
 
+def assert_builtin_native(name):
+    module = importlib.import_module(name)
+    spec = getattr(module, "__spec__", None)
+    origin = getattr(spec, "origin", None)
+    file_name = getattr(module, "__file__", None)
+    assert origin == "built-in", (name, origin, file_name)
+
+assert_builtin_native("glfw._glfw")
 assert glfw.__version__
 assert glfw.get_version()[:2] >= (3, 4)
 assert glfw.TRUE == 1
@@ -4131,7 +4153,16 @@ assert pyglet.version
         'pyfltk-smoke',
         r"""
 import fltk
+import importlib
 
+def assert_builtin_native(name):
+    module = importlib.import_module(name)
+    spec = getattr(module, "__spec__", None)
+    origin = getattr(spec, "origin", None)
+    file_name = getattr(module, "__file__", None)
+    assert origin == "built-in", (name, origin, file_name)
+
+assert_builtin_native("fltk._fltk")
 assert fltk.__version__
 assert hasattr(fltk, "Fl_Window")
 assert hasattr(fltk, "Fl_Button")
@@ -4146,7 +4177,16 @@ assert callable(fltk.run)
         r"""
 import dearpygui
 import dearpygui.dearpygui as dpg
+import importlib
 
+def assert_builtin_native(name):
+    module = importlib.import_module(name)
+    spec = getattr(module, "__spec__", None)
+    origin = getattr(spec, "origin", None)
+    file_name = getattr(module, "__file__", None)
+    assert origin == "built-in", (name, origin, file_name)
+
+assert_builtin_native("dearpygui._dearpygui")
 assert dearpygui.__version__
 assert hasattr(dpg, "create_context")
 assert hasattr(dpg, "create_viewport")
