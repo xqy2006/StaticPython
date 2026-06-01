@@ -57,7 +57,6 @@ WXWIDGETS_STATIC_LIBRARIES = [
     "wxbase32u.lib",
     "wxbase32u_net.lib",
     "wxbase32u_xml.lib",
-    "wxexpat.lib",
     "wxjpeg.lib",
     "wxmsw32u_adv.lib",
     "wxmsw32u_aui.lib",
@@ -103,7 +102,6 @@ WXPYTHON_SYSTEM_LIBRARIES = [
     "imm32.lib",
     "setupapi.lib",
     "propsys.lib",
-    "gdiplus.lib",
     "windowscodecs.lib",
     "opengl32.lib",
     "glu32.lib",
@@ -330,15 +328,25 @@ def _patch_wxwidgets_nanosvg_symbols(context) -> None:
         context.log("wxWidgets bmpsvg.cpp is absent; no wxWidgets NanoSVG symbol isolation needed")
         return
 
-    marker = "    #define nsvg__colors wxwidgets_nsvg__colors\n"
+    symbol_defines = (
+        "    #define nsvgParseFromFile wxwidgets_nsvgParseFromFile\n"
+        "    #define nsvgParse wxwidgets_nsvgParse\n"
+        "    #define nsvgDuplicatePath wxwidgets_nsvgDuplicatePath\n"
+        "    #define nsvgDelete wxwidgets_nsvgDelete\n"
+        "    #define nsvg__parseXML wxwidgets_nsvg__parseXML\n"
+        "    #define nsvg__colors wxwidgets_nsvg__colors\n"
+        "    #define nsvgCreateRasterizer wxwidgets_nsvgCreateRasterizer\n"
+        "    #define nsvgRasterize wxwidgets_nsvgRasterize\n"
+        "    #define nsvgDeleteRasterizer wxwidgets_nsvgDeleteRasterizer\n"
+    )
     anchor = "    #define NANOSVG_ALL_COLOR_KEYWORDS\n"
 
     def patch(text: str) -> str:
-        if marker in text:
+        if symbol_defines in text:
             return text
         if anchor not in text:
             raise RuntimeError("wxWidgets NanoSVG implementation anchor not found")
-        return text.replace(anchor, anchor + marker, 1)
+        return text.replace(anchor, anchor + symbol_defines, 1)
 
     transform_source_text(context, relative_path, patch)
 
