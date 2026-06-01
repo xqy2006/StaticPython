@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-from libs import pypi_library, source_path, write_source_text
+from libs import pypi_library, source_path, transform_source_text, write_source_text
 from tools import ensure_tool, get_pcbuild_output_dir, run
 
 
@@ -310,6 +310,54 @@ def _patch_wxwidgets_setup(context) -> None:
         )
 
 
+def _patch_wxpython_dllmain(context) -> None:
+    marker = "BOOL WINAPI wxPythonStaticDllMain("
+    target = "BOOL WINAPI DllMain("
+
+    def patch(text: str) -> str:
+        if marker in text:
+            return text
+        if target not in text:
+            raise RuntimeError("wxPython SIP core DllMain hook not found")
+        return text.replace(target, marker, 1)
+
+    transform_source_text(context, "wxpython_builtin/sip/cpp/sip_corewxPyApp.cpp", patch)
+
+
+def _patch_wxwidgets_nanosvg_symbols(context) -> None:
+    marker = "    #define nsvg__colors wxwidgets_nsvg__colors\n"
+    anchor = "    #define NANOSVG_ALL_COLOR_KEYWORDS\n"
+
+    def patch(text: str) -> str:
+        if marker in text:
+            return text
+        if anchor not in text:
+            raise RuntimeError("wxWidgets NanoSVG implementation anchor not found")
+        return text.replace(anchor, anchor + marker, 1)
+
+    transform_source_text(context, "wxpython_builtin/wxWidgets/src/generic/bmpsvg.cpp", patch)
+
+
+def _patch_wxwidgets_tiff_project(context) -> None:
+    entry = '    <ClCompile Include="..\\..\\src\\tiff\\libtiff\\tif_hash_set.c" />\n'
+    anchor = '    <ClCompile Include="..\\..\\src\\tiff\\libtiff\\tif_getimage.c" />\n'
+
+    def patch(text: str) -> str:
+        if entry in text:
+            return text
+        if anchor not in text:
+            raise RuntimeError("wxWidgets TIFF project source list anchor not found")
+        return text.replace(anchor, anchor + entry, 1)
+
+    transform_source_text(context, "wxpython_builtin/wxWidgets/build/msw/wx_wxtiff.vcxproj", patch)
+
+
+def _patch_static_link_sources(context) -> None:
+    _patch_wxpython_dllmain(context)
+    _patch_wxwidgets_nanosvg_symbols(context)
+    _patch_wxwidgets_tiff_project(context)
+
+
 def _write_wxpython_projects(context) -> None:
     write_source_text(
         context,
@@ -338,6 +386,7 @@ def prepare_wxpython_project(context) -> None:
     if context.platform != "x64":
         raise RuntimeError(f"wxPython builtin integration currently supports only x64, not {context.platform}")
     _patch_wxwidgets_setup(context)
+    _patch_static_link_sources(context)
     _write_wxpython_projects(context)
 
 
@@ -382,6 +431,7 @@ def _copy_wxwidgets_libraries(context) -> None:
 
 def prepare_wxpython_artifacts(context) -> None:
     _patch_wxwidgets_setup(context)
+    _patch_static_link_sources(context)
     output_dir = get_pcbuild_output_dir(context.source_root, context.platform)
     if all((output_dir / library).exists() for library in WXWIDGETS_STATIC_LIBRARIES):
         context.log(f"using existing wxWidgets static libraries at {output_dir.relative_to(context.source_root)}")
