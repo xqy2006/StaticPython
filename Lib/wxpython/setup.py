@@ -264,6 +264,46 @@ def _read_sbf_sources(context, module: str) -> list[str]:
     raise RuntimeError(f"wxPython generated source manifest has no sources entry: {sbf_path}")
 
 
+def _enable_wxwidgets_feature(context, relative_path: str, name: str) -> bool:
+    path = source_path(context, relative_path)
+    if not path.exists():
+        return False
+
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if not stripped.startswith("#define"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 3 or parts[1] != name:
+            continue
+        if parts[2] == "1":
+            return True
+        if parts[2] != "0":
+            raise RuntimeError(f"wxWidgets setup option {name} has unexpected value in {relative_path}: {parts[2]}")
+
+        newline = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        indent = line[: len(line) - len(stripped)]
+        lines[index] = f"{indent}#define {name}           1{newline}"
+        path.write_text("".join(lines), encoding="utf-8")
+        context.log(f"enabled wxWidgets setup option {name} in {relative_path}")
+        return True
+
+    raise RuntimeError(f"wxWidgets setup option {name} was not found in {relative_path}")
+
+
+def _patch_wxwidgets_setup(context) -> None:
+    patched = False
+    for relative_path in (
+        "wxpython_builtin/wxWidgets/include/wx/msw/setup.h",
+        "wxpython_builtin/wxWidgets/include/wx/setup_inc.h",
+    ):
+        patched = _enable_wxwidgets_feature(context, relative_path, "wxUSE_IFF") or patched
+    if not patched:
+        raise RuntimeError("wxPython integration could not locate a wxWidgets setup header to enable wxUSE_IFF")
+
+
 def _write_wxpython_projects(context) -> None:
     write_source_text(
         context,
@@ -291,6 +331,7 @@ def _write_wxpython_projects(context) -> None:
 def prepare_wxpython_project(context) -> None:
     if context.platform != "x64":
         raise RuntimeError(f"wxPython builtin integration currently supports only x64, not {context.platform}")
+    _patch_wxwidgets_setup(context)
     _write_wxpython_projects(context)
 
 
@@ -334,6 +375,7 @@ def _copy_wxwidgets_libraries(context) -> None:
 
 
 def prepare_wxpython_artifacts(context) -> None:
+    _patch_wxwidgets_setup(context)
     output_dir = get_pcbuild_output_dir(context.source_root, context.platform)
     if all((output_dir / library).exists() for library in WXWIDGETS_STATIC_LIBRARIES):
         context.log(f"using existing wxWidgets static libraries at {output_dir.relative_to(context.source_root)}")
