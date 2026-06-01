@@ -57,6 +57,7 @@ WXWIDGETS_STATIC_LIBRARIES = [
     "wxbase32u.lib",
     "wxbase32u_net.lib",
     "wxbase32u_xml.lib",
+    "wxexpat.lib",
     "wxjpeg.lib",
     "wxmsw32u_adv.lib",
     "wxmsw32u_aui.lib",
@@ -351,6 +352,32 @@ def _patch_wxwidgets_nanosvg_symbols(context) -> None:
     transform_source_text(context, relative_path, patch)
 
 
+def _patch_wxwidgets_expat_symbols(context) -> None:
+    expat_root = source_path(context, "wxpython_builtin/wxWidgets/src/expat")
+    if not expat_root.exists():
+        context.log("wxWidgets expat source is absent; no wxexpat symbol isolation needed")
+        return
+
+    xmltok_paths = sorted(expat_root.rglob("xmltok.c"))
+    if not xmltok_paths:
+        context.log("wxWidgets expat xmltok.c is absent; no wxexpat symbol isolation needed")
+        return
+
+    target = "_INTERNAL_trim_to_complete_utf8_characters"
+    replacement = "wxwidgets_INTERNAL_trim_to_complete_utf8_characters"
+
+    def patch(text: str) -> str:
+        if replacement in text:
+            return text
+        if target not in text:
+            return text
+        return text.replace(target, replacement)
+
+    for xmltok_path in xmltok_paths:
+        relative_path = xmltok_path.relative_to(context.source_root).as_posix()
+        transform_source_text(context, relative_path, patch)
+
+
 def _patch_wxwidgets_tiff_project(context) -> None:
     tif_hash_set = source_path(context, "wxpython_builtin/wxWidgets/src/tiff/libtiff/tif_hash_set.c")
     if not tif_hash_set.exists():
@@ -373,6 +400,7 @@ def _patch_wxwidgets_tiff_project(context) -> None:
 def _patch_static_link_sources(context) -> None:
     _patch_wxpython_dllmain(context)
     _patch_wxwidgets_nanosvg_symbols(context)
+    _patch_wxwidgets_expat_symbols(context)
     _patch_wxwidgets_tiff_project(context)
 
 
