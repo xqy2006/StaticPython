@@ -341,9 +341,7 @@ def prepare_wxpython_artifacts(context) -> None:
 
     ensure_tool("msbuild")
     wxwidgets_root = _wxwidgets_source_dir(context)
-    solution = wxwidgets_root / "build" / "msw" / "wx_vc17.sln"
-    if not solution.exists():
-        raise RuntimeError(f"wxWidgets MSBuild solution is missing: {solution}")
+    solution = _find_wxwidgets_solution(wxwidgets_root)
     _force_wxwidgets_static_runtime(context)
     run(
         context.log,
@@ -366,6 +364,17 @@ def prepare_wxpython_artifacts(context) -> None:
     _copy_wxwidgets_libraries(context)
 
 
+def _find_wxwidgets_solution(wxwidgets_root: Path) -> Path:
+    build_dir = wxwidgets_root / "build" / "msw"
+    preferred = build_dir / "wx_vc17.sln"
+    if preferred.exists():
+        return preferred
+    candidates = sorted(build_dir.glob("wx_vc*.sln"), reverse=True)
+    if candidates:
+        return candidates[0]
+    raise RuntimeError(f"wxWidgets MSBuild solution is missing under {build_dir}")
+
+
 LIBRARY_INTEGRATION = pypi_library(
     name="wxpython",
     project_name="wxPython",
@@ -375,9 +384,10 @@ LIBRARY_INTEGRATION = pypi_library(
         "sip": "wxpython_builtin/sip",
         "src": "wxpython_builtin/src",
         "ext/wxWidgets/build/msw": "wxpython_builtin/wxWidgets/build/msw",
+        "ext/wxWidgets/art": "wxpython_builtin/wxWidgets/art",
         "ext/wxWidgets/include": "wxpython_builtin/wxWidgets/include",
         "ext/wxWidgets/src": "wxpython_builtin/wxWidgets/src",
-        "ext/wxWidgets/3rdparty": "wxpython_builtin/wxWidgets/3rdparty",
+        "?ext/wxWidgets/3rdparty": "wxpython_builtin/wxWidgets/3rdparty",
     },
     source_ignore_patterns=[
         ".git",
@@ -396,7 +406,8 @@ LIBRARY_INTEGRATION = pypi_library(
         "Lib/wx/core.py",
         "wxpython_builtin/sip/cpp/_core.sbf",
         "wxpython_builtin/sip/siplib/siplib.c",
-        "wxpython_builtin/wxWidgets/build/msw/wx_vc17.sln",
+        "wxpython_builtin/wxWidgets/build/msw",
+        "wxpython_builtin/wxWidgets/art",
         "wxpython_builtin/wxWidgets/include/wx/wx.h",
         *[f"PCbuild/{project}" for project in WXPYTHON_STATIC_PROJECTS],
     ],
