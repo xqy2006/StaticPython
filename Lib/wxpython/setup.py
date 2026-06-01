@@ -325,6 +325,11 @@ def _patch_wxpython_dllmain(context) -> None:
 
 
 def _patch_wxwidgets_nanosvg_symbols(context) -> None:
+    relative_path = "wxpython_builtin/wxWidgets/src/generic/bmpsvg.cpp"
+    if not source_path(context, relative_path).exists():
+        context.log("wxWidgets bmpsvg.cpp is absent; no wxWidgets NanoSVG symbol isolation needed")
+        return
+
     marker = "    #define nsvg__colors wxwidgets_nsvg__colors\n"
     anchor = "    #define NANOSVG_ALL_COLOR_KEYWORDS\n"
 
@@ -335,10 +340,15 @@ def _patch_wxwidgets_nanosvg_symbols(context) -> None:
             raise RuntimeError("wxWidgets NanoSVG implementation anchor not found")
         return text.replace(anchor, anchor + marker, 1)
 
-    transform_source_text(context, "wxpython_builtin/wxWidgets/src/generic/bmpsvg.cpp", patch)
+    transform_source_text(context, relative_path, patch)
 
 
 def _patch_wxwidgets_tiff_project(context) -> None:
+    tif_hash_set = source_path(context, "wxpython_builtin/wxWidgets/src/tiff/libtiff/tif_hash_set.c")
+    if not tif_hash_set.exists():
+        context.log("wxWidgets tif_hash_set.c is absent; no wxtiff project update needed")
+        return
+
     entry = '    <ClCompile Include="..\\..\\src\\tiff\\libtiff\\tif_hash_set.c" />\n'
     anchor = '    <ClCompile Include="..\\..\\src\\tiff\\libtiff\\tif_getimage.c" />\n'
 
