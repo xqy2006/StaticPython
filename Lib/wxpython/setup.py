@@ -294,14 +294,20 @@ def _enable_wxwidgets_feature(context, relative_path: str, name: str) -> bool:
 
 
 def _patch_wxwidgets_setup(context) -> None:
-    patched = False
+    patched_options: set[str] = set()
     for relative_path in (
         "wxpython_builtin/wxWidgets/include/wx/msw/setup.h",
         "wxpython_builtin/wxWidgets/include/wx/setup_inc.h",
     ):
-        patched = _enable_wxwidgets_feature(context, relative_path, "wxUSE_IFF") or patched
-    if not patched:
-        raise RuntimeError("wxPython integration could not locate a wxWidgets setup header to enable wxUSE_IFF")
+        for option in ("wxUSE_IFF", "wxUSE_POSTSCRIPT"):
+            if _enable_wxwidgets_feature(context, relative_path, option):
+                patched_options.add(option)
+    missing = sorted({"wxUSE_IFF", "wxUSE_POSTSCRIPT"} - patched_options)
+    if missing:
+        raise RuntimeError(
+            "wxPython integration could not locate wxWidgets setup option(s): "
+            + ", ".join(missing)
+        )
 
 
 def _write_wxpython_projects(context) -> None:
