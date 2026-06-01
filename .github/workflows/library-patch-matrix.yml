@@ -294,6 +294,7 @@ jobs:
           import re
           import shutil
           import sys
+          import time
           import traceback
           from pathlib import Path
 
@@ -336,12 +337,22 @@ jobs:
 
 
           def compatible_release_versions(integration, target_version) -> list[str]:
+              if integration.source_provider != "pypi":
+                  return [integration.release_version or integration.source_provider]
+
               project_name = integration.project_name or integration.name
               payload = libs._load_pypi_release_payload(project_name, None)
               releases = payload.get("releases", {})
               project_requires_python = payload.get("info", {}).get("requires_python")
+              minimum_release_version = getattr(integration, "minimum_release_version", None)
               versions: list[str] = []
               for raw_version in libs._sorted_release_versions(releases):
+                  if minimum_release_version is not None:
+                      try:
+                          if build.Version(raw_version) < build.Version(minimum_release_version):
+                              continue
+                      except Exception:
+                          pass
                   files = releases.get(raw_version, [])
                   compatible = False
                   for file_info in files:
@@ -400,6 +411,42 @@ jobs:
               result_path.parent.mkdir(parents=True, exist_ok=True)
               result_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
+
+          def cpython_archive_urls(version: str) -> list[str]:
+              return [
+                  f"https://github.com/python/cpython/archive/refs/tags/v{version}.zip",
+                  f"https://codeload.github.com/python/cpython/zip/refs/tags/v{version}",
+              ]
+
+
+          def download_cpython_source_with_retries(version: str, root: Path) -> Path:
+              root.mkdir(parents=True, exist_ok=True)
+              archive_path = root / f"cpython-v{version}.zip"
+              existing = sorted(root.glob(f"cpython-{version}*"))
+              for candidate in existing:
+                  if (candidate / "Include" / "patchlevel.h").exists():
+                      print(f"[library-patch-matrix] reusing existing CPython source tree at {candidate}")
+                      return candidate
+
+              attempts = 5
+              for attempt in range(1, attempts + 1):
+                  try:
+                      used_url = build.download_first_available(cpython_archive_urls(version), archive_path)
+                      source_root = build.extract_zip_archive(archive_path, root, reuse_existing=True)
+                      print(f"[library-patch-matrix] downloaded CPython {version} from {used_url} to {source_root}")
+                      return source_root
+                  except Exception as exc:
+                      if attempt == attempts:
+                          raise
+                      wait_seconds = min(90, attempt * 15)
+                      print(
+                          f"[library-patch-matrix] CPython {version} download failed "
+                          f"on attempt {attempt}/{attempts}: {type(exc).__name__}: {exc}; "
+                          f"retrying in {wait_seconds}s"
+                      )
+                      time.sleep(wait_seconds)
+              raise RuntimeError(f"failed to download CPython {version}")
+
           try:
               manifest = build.load_manifest()
               config = build.load_config()
@@ -407,12 +454,7 @@ jobs:
               third_party_catalog = build.profile_library_catalog(config, profile, "third_party_library_catalog")
 
               cpython_download_root = work_root / "cpython"
-              base_source_root = build.download_cpython_source(
-                  cpython_version,
-                  cpython_download_root,
-                  None,
-                  reuse_existing=True,
-              )
+              base_source_root = download_cpython_source_with_retries(cpython_version, cpython_download_root)
               version_info, version_mm, version_full = build.parse_cpython_version(base_source_root)
               target_version = build.Version(version_full)
               integrations = libs.load_integrations(
@@ -486,7 +528,10 @@ jobs:
                       for index, raw_version in enumerate(release_versions, start=1):
                           try:
                               for item in selected_integrations:
-                                  if item.name.casefold() == integration.name.casefold():
+                                  if (
+                                      item.source_provider == "pypi"
+                                      and item.name.casefold() == integration.name.casefold()
+                                  ):
                                       item.release_version = raw_version
                               cleanup_integrations(source_root, selected_integrations)
                               libs.run_prepare_source_hooks(selected_integrations, hook_context)

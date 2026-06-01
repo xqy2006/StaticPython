@@ -4,6 +4,7 @@ from libs import (
     ensure_package_markers,
     pypi_library,
     replace_text_once,
+    source_path,
     transform_source_text,
     write_source_text,
 )
@@ -74,7 +75,39 @@ def _patch_libui_declarative_app(text: str) -> str:
     return text
 
 
+def _patch_libui_native_module(context) -> None:
+    py_module_root = source_path(context, "libui_builtin/py_module")
+    if not py_module_root.exists():
+        raise RuntimeError("libui native py_module source is missing")
+
+    patched = False
+    for path in py_module_root.glob("*.[ch]"):
+        if path.name == "builtin_alias.c":
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if "PyInit_core" not in text and '"core"' not in text:
+            continue
+        updated = text.replace("PyInit_core", "PyInit__libui_core")
+        updated = updated.replace('"core"', '"_libui_core"')
+        if updated != text:
+            path.write_text(updated, encoding="utf-8", newline="\n")
+            context.log(f"updated {path.relative_to(context.source_root)}")
+            patched = True
+
+    if not patched:
+        raise RuntimeError("libui native module initializer PyInit_core was not found")
+
+    # The original module is now emitted with the final builtin name.  Keep the
+    # overlay translation unit harmless so it cannot collide with imgui.core.
+    write_source_text(
+        context,
+        "libui_builtin/py_module/builtin_alias.c",
+        "/* StaticPython: libui's core module is renamed in-place. */\n",
+    )
+
+
 def patch_libui_sources(context) -> None:
+    _patch_libui_native_module(context)
     transform_source_text(context, "Lib/libui/__init__.py", _patch_libui_init)
     write_source_text(context, "Lib/libui/core.py", LIBUI_CORE_SHIM)
     transform_source_text(

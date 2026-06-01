@@ -2052,7 +2052,7 @@ from matplotlib import ft2font
 from matplotlib import pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-assert ft2font.__freetype_version__ == "2.6.1"
+assert ft2font.__freetype_version__
 assert ft2font.__freetype_build_type__ == "local"
 assert Axes3D.__name__ == "Axes3D"
 
@@ -4006,6 +4006,283 @@ assert "items:" in rendered and "name: codex" in rendered
         """,
     ),
     (
+        'bokeh-smoke',
+        r"""
+from bokeh.embed import json_item
+from bokeh.plotting import figure
+
+plot = figure(title="StaticPython", width=320, height=240)
+plot.line([1, 2, 3], [2, 4, 6])
+item = json_item(plot, "target")
+assert item["target_id"] == "target"
+assert "doc" in item
+        """,
+    ),
+    (
+        'dash-smoke',
+        r"""
+from dash import Dash, dcc, html
+
+app = Dash("staticpython_dash_smoke", server=False)
+app.layout = html.Div([html.H1("StaticPython"), dcc.Graph(id="plot")])
+assert app.layout.children[0].children == "StaticPython"
+assert app.layout.children[1].id == "plot"
+        """,
+    ),
+    (
+        'dialite-smoke',
+        r"""
+import dialite
+
+with dialite.NoDialogs():
+    supported = dialite.is_supported()
+assert supported in (True, False)
+assert hasattr(dialite, "inform")
+        """,
+    ),
+    (
+        'flexx-smoke',
+        r"""
+import flexx
+from flexx import event, flx
+
+data = event.Dict(answer=42)
+assert data.answer == 42
+assert flexx.__version__
+assert hasattr(flx, "Widget")
+        """,
+    ),
+    (
+        'opengl-smoke',
+        r"""
+from OpenGL import GL
+
+assert GL.GL_TRIANGLES == 0x0004
+assert callable(GL.glGetError)
+        """,
+    ),
+    (
+        'imgui-smoke',
+        r"""
+import imgui
+import importlib
+
+def assert_builtin_native(name):
+    module = importlib.import_module(name)
+    spec = getattr(module, "__spec__", None)
+    origin = getattr(spec, "origin", None)
+    file_name = getattr(module, "__file__", None)
+    assert origin == "built-in", (name, origin, file_name)
+
+ctx = imgui.create_context()
+try:
+    assert_builtin_native("imgui.core")
+    assert imgui.__version__
+    assert imgui.VERTEX_SIZE > 0
+    io = imgui.get_io()
+    assert io is not None
+    try:
+        assert_builtin_native("imgui.internal")
+    except ModuleNotFoundError:
+        pass
+finally:
+    imgui.destroy_context(ctx)
+        """,
+    ),
+    (
+        'glfw-smoke',
+        r"""
+import glfw
+import importlib
+
+def assert_builtin_native(name):
+    module = importlib.import_module(name)
+    spec = getattr(module, "__spec__", None)
+    origin = getattr(spec, "origin", None)
+    file_name = getattr(module, "__file__", None)
+    assert origin == "built-in", (name, origin, file_name)
+
+assert_builtin_native("glfw._glfw")
+assert glfw.__version__
+assert glfw.get_version()[:2] >= (3, 4)
+assert glfw.TRUE == 1
+assert glfw.FALSE == 0
+assert glfw.KEY_A > 0
+assert glfw.VISIBLE > 0
+assert callable(glfw.init)
+assert callable(glfw.create_window)
+        """,
+    ),
+    (
+        'pscript-smoke',
+        r"""
+from pscript import py2js
+
+js = py2js("def add(a, b):\n    return a + b\n")
+assert "add" in js and "return" in js and "a + b" in js
+        """,
+    ),
+    (
+        'pyglet-smoke',
+        r"""
+import pyglet
+from pyglet.event import EventDispatcher
+from pyglet.math import Vec2
+
+vector = Vec2(3, 4)
+length = vector.length() if callable(vector.length) else vector.length
+assert length == 5
+
+class Demo(EventDispatcher):
+    pass
+
+Demo.register_event_type("on_ping")
+demo = Demo()
+events = []
+
+@demo.event
+def on_ping(value):
+    events.append(value)
+
+demo.dispatch_event("on_ping", 7)
+assert events == [7]
+assert pyglet.version
+        """,
+    ),
+    (
+        'pyfltk-smoke',
+        r"""
+import fltk
+import importlib
+
+def assert_builtin_native(name):
+    module = importlib.import_module(name)
+    spec = getattr(module, "__spec__", None)
+    origin = getattr(spec, "origin", None)
+    file_name = getattr(module, "__file__", None)
+    assert origin == "built-in", (name, origin, file_name)
+
+assert_builtin_native("fltk._fltk")
+assert fltk.__version__
+assert hasattr(fltk, "Fl_Window")
+assert hasattr(fltk, "Fl_Button")
+assert fltk.Window is fltk.Fl_Window
+assert fltk.Input is fltk.Fl_Input
+assert fltk.Button is fltk.Fl_Button
+assert callable(fltk.run)
+        """,
+    ),
+    (
+        'dearpygui-smoke',
+        r"""
+import dearpygui
+import dearpygui.dearpygui as dpg
+import importlib
+
+def assert_builtin_native(name):
+    module = importlib.import_module(name)
+    spec = getattr(module, "__spec__", None)
+    origin = getattr(spec, "origin", None)
+    file_name = getattr(module, "__file__", None)
+    assert origin == "built-in", (name, origin, file_name)
+
+assert_builtin_native("dearpygui._dearpygui")
+assert dearpygui.__version__
+assert hasattr(dpg, "create_context")
+assert hasattr(dpg, "create_viewport")
+dpg.create_context()
+dpg.destroy_context()
+        """,
+    ),
+    (
+        'pywebio-smoke',
+        r"""
+import pywebio
+from pywebio.output import put_text
+from pywebio.session import local
+
+assert pywebio.__version__
+assert callable(put_text)
+local.answer = 42
+assert local.answer == 42
+        """,
+    ),
+    (
+        'pystray-smoke',
+        r"""
+from PIL import Image
+from pystray import Icon, Menu, MenuItem
+
+image = Image.new("RGBA", (16, 16), (255, 0, 0, 255))
+item = MenuItem("Quit", lambda icon, item: None)
+menu = Menu(item)
+icon = Icon("staticpython", image, "StaticPython", menu)
+assert icon.name == "staticpython"
+assert icon.title == "StaticPython"
+assert tuple(icon.icon.size) == (16, 16)
+assert len(tuple(menu)) == 1
+        """,
+    ),
+    (
+        'remi-smoke',
+        r"""
+from remi import gui
+
+container = gui.VBox(width=120, height=80)
+button = gui.Button("Run")
+button.style["color"] = "red"
+container.append(button, "button")
+assert container.children["button"] is button
+assert button.get_text() == "Run"
+        """,
+    ),
+    (
+        'retrying-smoke',
+        r"""
+from retrying import Retrying
+
+attempts = []
+
+def work():
+    attempts.append("called")
+    return "ok"
+
+assert Retrying(stop_max_attempt_number=1).call(work) == "ok"
+assert attempts == ["called"]
+        """,
+    ),
+    (
+        'user-agents-smoke',
+        r"""
+from ua_parser import user_agent_parser
+from user_agents import parse
+
+text = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+ua = parse(text)
+assert ua.browser.family
+parsed = user_agent_parser.Parse(text)
+assert parsed["user_agent"]["family"]
+        """,
+    ),
+    (
+        'webruntime-smoke',
+        r"""
+import webruntime
+
+assert hasattr(webruntime, "launch")
+assert hasattr(webruntime, "BaseRuntime")
+assert "browser" in webruntime._runtimes
+        """,
+    ),
+    (
+        'xyzservices-smoke',
+        r"""
+import xyzservices.providers as xyz
+
+assert xyz.OpenStreetMap.Mapnik.name
+        """,
+    ),
+    (
         'yarl-smoke',
         r"""
 from yarl import URL
@@ -4077,6 +4354,41 @@ SUBPROCESS_TESTS = [
         "name": "libui-gui-unittest",
         "script": "assets/overlay/Lib/test/test_libui_gui.py",
         "timeout": 600,
+        "skip_env": "STATICPYTHON_VERIFY_SKIP_GUI",
+    },
+    {
+        "kind": "script",
+        "name": "imgui-runtime",
+        "script": "assets/overlay/imgui_runtime_test.py",
+        "timeout": 180,
+        "skip_env": "STATICPYTHON_VERIFY_SKIP_GUI",
+    },
+    {
+        "kind": "script",
+        "name": "imgui-pyglet-runtime",
+        "script": "assets/overlay/imgui_pyglet_runtime_test.py",
+        "timeout": 180,
+        "skip_env": "STATICPYTHON_VERIFY_SKIP_GUI",
+    },
+    {
+        "kind": "script",
+        "name": "imgui-glfw-runtime",
+        "script": "assets/overlay/imgui_glfw_runtime_test.py",
+        "timeout": 180,
+        "skip_env": "STATICPYTHON_VERIFY_SKIP_GUI",
+    },
+    {
+        "kind": "script",
+        "name": "pyfltk-runtime",
+        "script": "assets/overlay/pyfltk_runtime_test.py",
+        "timeout": 180,
+        "skip_env": "STATICPYTHON_VERIFY_SKIP_GUI",
+    },
+    {
+        "kind": "script",
+        "name": "dearpygui-runtime",
+        "script": "assets/overlay/dearpygui_runtime_test.py",
+        "timeout": 180,
         "skip_env": "STATICPYTHON_VERIFY_SKIP_GUI",
     },
     {

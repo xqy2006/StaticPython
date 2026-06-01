@@ -1,0 +1,37 @@
+from __future__ import annotations
+
+from libs import pypi_library, replace_regex_once, transform_source_text
+
+
+def _patch_dash_plotly_version(text: str) -> str:
+    if "getattr(plotly, \"__version__\", None)" in text:
+        return text
+    if "metadata.version(\"plotly\")" not in text:
+        return text
+    return replace_regex_once(
+        text,
+        r'(?ms)^plotly_version = None\nif find_spec\("plotly"\):\n    plotly_version = metadata\.version\("plotly"\)\n',
+        "plotly_version = None\n"
+        'if find_spec("plotly"):\n'
+        "    try:\n"
+        '        plotly_version = metadata.version("plotly")\n'
+        "    except metadata.PackageNotFoundError:\n"
+        "        import plotly\n"
+        '        plotly_version = getattr(plotly, "__version__", None)\n',
+        label="dash plotly version metadata fallback",
+    )
+
+
+def patch_dash_sources(context) -> None:
+    transform_source_text(context, "Lib/dash/dash.py", _patch_dash_plotly_version)
+
+
+LIBRARY_INTEGRATION = pypi_library(
+    name="dash",
+    source_mapping={
+        "dash": "Lib/dash",
+    },
+    python_packages=["dash"],
+    source_ignore_patterns=["tests"],
+    post_patch_hooks=[patch_dash_sources],
+)
