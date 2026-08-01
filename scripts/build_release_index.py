@@ -27,6 +27,13 @@ from build import (
 
 
 TARGET_ABIS = ("cp311", "cp312", "cp313", "cp314", "cp315")
+TOOLCHAIN_ABI_FIELDS = (
+    "visual_studio_version",
+    "vc_tools_version",
+    "windows_sdk_version",
+    "platform_toolset",
+    "runtime_library",
+)
 
 
 def pack_family(name: str) -> str:
@@ -103,6 +110,21 @@ def _validate_verified_provenance(metadata: dict, path: Path) -> None:
     missing = [name for name in required_toolchain if not toolchain.get(name)]
     if missing:
         raise RuntimeError(f"verified asset {path.name} is missing toolchain fields: {', '.join(missing)}")
+
+
+def toolchain_abi_fingerprint(metadata: dict) -> dict[str, object]:
+    """Return only toolchain properties that affect binary compatibility.
+
+    VSCMD_VER identifies the Visual Studio developer-command bootstrap script,
+    not the selected compiler or Windows SDK. GitHub's windows-2022 pool can
+    carry different VsDevCmd servicing revisions while selecting identical VC
+    tools, SDK, toolset, and CRT settings, so it remains provenance metadata but
+    is deliberately excluded from the ABI comparison.
+    """
+    toolchain = metadata.get("toolchain", {})
+    if not isinstance(toolchain, dict):
+        return {}
+    return {field: toolchain.get(field) for field in TOOLCHAIN_ABI_FIELDS}
 
 
 def validate_expected_pack_matrix(packs: dict, expected_pack_names: list[str]) -> None:
@@ -243,7 +265,7 @@ def build_index(
                 or metadata.get("cpython_tag") != runtime_metadata.get("cpython_tag")
             ):
                 raise RuntimeError(f"pack asset {path.name} does not match its {abi} runtime source")
-            if metadata.get("toolchain") != runtime_metadata.get("toolchain"):
+            if toolchain_abi_fingerprint(metadata) != toolchain_abi_fingerprint(runtime_metadata):
                 raise RuntimeError(f"pack asset {path.name} does not match its {abi} runtime toolchain")
         family = pack_family(name)
         tag = f"{pack_tag_prefix}-{family}"

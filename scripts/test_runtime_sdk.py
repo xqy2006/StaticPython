@@ -911,6 +911,42 @@ const struct _module_alias aliases[] = {
         }
         build_release_index.validate_pack_dependency_assets(packs)
 
+    def test_release_index_toolchain_fingerprint_ignores_vscmd_servicing_revision(self) -> None:
+        runtime = {
+            "toolchain": {
+                "visual_studio_version": "17.0",
+                "vscmd_version": "17.14.36",
+                "vc_tools_version": "14.44.35207",
+                "windows_sdk_version": "10.0.26100.0\\",
+                "platform_toolset": "v143",
+                "runtime_library": "MultiThreaded",
+            }
+        }
+        pack = json.loads(json.dumps(runtime))
+        pack["toolchain"]["vscmd_version"] = "17.14.37"
+        self.assertEqual(
+            build_release_index.toolchain_abi_fingerprint(runtime),
+            build_release_index.toolchain_abi_fingerprint(pack),
+        )
+
+    def test_release_index_toolchain_fingerprint_rejects_compiler_drift(self) -> None:
+        runtime = {
+            "toolchain": {
+                "visual_studio_version": "17.0",
+                "vscmd_version": "17.14.36",
+                "vc_tools_version": "14.44.35207",
+                "windows_sdk_version": "10.0.26100.0\\",
+                "platform_toolset": "v143",
+                "runtime_library": "MultiThreaded",
+            }
+        }
+        pack = json.loads(json.dumps(runtime))
+        pack["toolchain"]["vc_tools_version"] = "14.45.00000"
+        self.assertNotEqual(
+            build_release_index.toolchain_abi_fingerprint(runtime),
+            build_release_index.toolchain_abi_fingerprint(pack),
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
