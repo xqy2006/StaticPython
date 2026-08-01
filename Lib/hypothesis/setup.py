@@ -86,18 +86,34 @@ def _prepare_hypothesis_source(context) -> None:
 
 def _install_hypothesis_native_compatibility(context) -> None:
     """Freeze an API-compatible implementation when upstream requires its Rust module."""
-    floats_source = read_source_text(context, "Lib/hypothesis/internal/floats.py")
-    version_source = read_source_text(context, "Lib/hypothesis/version.py")
-    native_anchor = "from hypothesis._native.internal.floats import ("
-    version_anchor = "from hypothesis._native import __version__ as __version__"
-    if native_anchor not in floats_source and version_anchor not in version_source:
-        return
-    if native_anchor not in floats_source or version_anchor not in version_source:
-        raise RuntimeError("Hypothesis native-module anchors changed; compatibility layer was not applied")
-
     release_version = LIBRARY_INTEGRATION.release_version
     if not release_version:
         raise RuntimeError("Hypothesis native compatibility requires a resolved release version")
+    release = Version(release_version)
+
+    # 6.156.3 introduced the Rust module for version/cathetus, while 6.157.2
+    # moved the remaining float helpers. Earlier source releases are entirely
+    # Python and must not be forced through either newer source layout.
+    native_start = Version("6.156.3")
+    floats_start = Version("6.157.2")
+    if release < native_start:
+        return
+
+    version_source = read_source_text(context, "Lib/hypothesis/version.py")
+    core_source = read_source_text(
+        context,
+        "Lib/hypothesis/strategies/_internal/core.py",
+    )
+    version_anchor = "from hypothesis._native import __version__ as __version__"
+    cathetus_anchor = "from hypothesis._native.internal.cathetus import cathetus"
+    if version_anchor not in version_source or cathetus_anchor not in core_source:
+        raise RuntimeError("Hypothesis native-module anchors changed; compatibility layer was not applied")
+
+    floats_source = read_source_text(context, "Lib/hypothesis/internal/floats.py")
+    floats_anchor = "from hypothesis._native.internal.floats import ("
+    has_native_floats = floats_anchor in floats_source
+    if has_native_floats != (release >= floats_start):
+        raise RuntimeError("Hypothesis native-float version boundary changed; compatibility layer was not applied")
 
     write_source_text(
         context,
@@ -112,14 +128,15 @@ def _install_hypothesis_native_compatibility(context) -> None:
     )
     write_source_text(
         context,
-        "Lib/hypothesis/_native/internal/floats.py",
-        _NATIVE_FLOATS_COMPAT,
-    )
-    write_source_text(
-        context,
         "Lib/hypothesis/_native/internal/cathetus.py",
         _NATIVE_CATHETUS_COMPAT,
     )
+    if has_native_floats:
+        write_source_text(
+            context,
+            "Lib/hypothesis/_native/internal/floats.py",
+            _NATIVE_FLOATS_COMPAT,
+        )
 
 
 LIBRARY_INTEGRATION = LibraryIntegration(

@@ -442,6 +442,22 @@
         "source_provider": "pypi"
       },
       {
+        "name": "janus",
+        "release_version": "2.0.0",
+        "overlay_entries": [
+          "Lib/janus"
+        ],
+        "source_provider": "pypi",
+        "license_expression": "Apache-2.0",
+        "smoke_tests": [
+          {
+            "name": "sync-async-queue-bridge",
+            "kind": "inline",
+            "code": "import asyncio\nimport janus\n\nasync def check():\n    queue = janus.Queue()\n    await queue.async_q.put('ok')\n    assert queue.sync_q.get_nowait() == 'ok'\n    queue.close()\n    await queue.wait_closed()\n\nasyncio.run(check())"
+          }
+        ]
+      },
+      {
         "name": "jedi",
         "overlay_entries": [
           "Lib/jedi"
@@ -1389,6 +1405,7 @@
         "ipython_pygments_lexers",
         "isort",
         "itsdangerous",
+        "janus",
         "jedi",
         "jinja2",
         "jmespath",

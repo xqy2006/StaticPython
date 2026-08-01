@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from packaging.version import Version
+
 from libs import pypi_library, replace_text_once, transform_source_text
 
 
@@ -28,6 +30,14 @@ except ModuleNotFoundError as exc:
 
 
 def patch_cppy_sources(context) -> None:
+    release_version = LIBRARY_INTEGRATION.release_version
+    if not release_version:
+        raise RuntimeError("cppy patch routing requires a resolved release version")
+    # cppy 1.0.x and 1.1.0 expose only version/get_include runtime helpers and
+    # do not import setuptools. CppyBuildExt, and its eager setuptools import,
+    # were introduced in 1.2.0.
+    if Version(release_version) < Version("1.2.0"):
+        return
     transform_source_text(context, "Lib/cppy/__init__.py", _patch_cppy_setuptools_import)
 
 

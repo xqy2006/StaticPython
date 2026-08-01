@@ -204,6 +204,12 @@ const struct _module_alias aliases[] = {
             "from hypothesis._native import __version__ as __version__\n",
             encoding="utf-8",
         )
+        core = self.root / "Lib" / "hypothesis" / "strategies" / "_internal" / "core.py"
+        core.parent.mkdir(parents=True)
+        core.write_text(
+            "from hypothesis._native.internal.cathetus import cathetus\n",
+            encoding="utf-8",
+        )
         context = SimpleNamespace(source_root=self.root, log=lambda _message: None)
         module._install_hypothesis_native_compatibility(context)
 
@@ -235,6 +241,44 @@ const struct _module_alias aliases[] = {
         module._install_hypothesis_native_compatibility(context)
         self.assertEqual(floats_path.read_text(encoding="utf-8"), before)
 
+    def test_hypothesis_native_compatibility_routes_transition_and_legacy_versions(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_hypothesis_transition_test",
+            REPO_ROOT / "Lib" / "hypothesis" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        original_version = module.LIBRARY_INTEGRATION.release_version
+        context = SimpleNamespace(source_root=self.root, log=lambda _message: None)
+
+        module.LIBRARY_INTEGRATION.release_version = "6.155.7"
+        try:
+            module._install_hypothesis_native_compatibility(context)
+
+            module.LIBRARY_INTEGRATION.release_version = "6.157.1"
+            internal = self.root / "Lib" / "hypothesis" / "internal"
+            internal.mkdir(parents=True)
+            (internal / "floats.py").write_text("FLOATS_ARE_PYTHON = True\n", encoding="utf-8")
+            (self.root / "Lib" / "hypothesis" / "version.py").write_text(
+                "from hypothesis._native import __version__ as __version__\n",
+                encoding="utf-8",
+            )
+            core = self.root / "Lib" / "hypothesis" / "strategies" / "_internal" / "core.py"
+            core.parent.mkdir(parents=True)
+            core.write_text(
+                "from hypothesis._native.internal.cathetus import cathetus\n",
+                encoding="utf-8",
+            )
+            module._install_hypothesis_native_compatibility(context)
+        finally:
+            module.LIBRARY_INTEGRATION.release_version = original_version
+
+        native = self.root / "Lib" / "hypothesis" / "_native"
+        self.assertTrue((native / "__init__.py").is_file())
+        self.assertTrue((native / "internal" / "cathetus.py").is_file())
+        self.assertFalse((native / "internal" / "floats.py").exists())
+
     def test_hypothesis_native_compatibility_rejects_partial_upstream_drift(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "staticpython_hypothesis_drift_test",
@@ -251,6 +295,12 @@ const struct _module_alias aliases[] = {
         )
         (self.root / "Lib" / "hypothesis" / "version.py").write_text(
             "__version__ = 'changed'\n",
+            encoding="utf-8",
+        )
+        core = self.root / "Lib" / "hypothesis" / "strategies" / "_internal" / "core.py"
+        core.parent.mkdir(parents=True)
+        core.write_text(
+            "from hypothesis._native.internal.cathetus import cathetus\n",
             encoding="utf-8",
         )
         context = SimpleNamespace(source_root=self.root, log=lambda _message: None)
@@ -286,6 +336,15 @@ const struct _module_alias aliases[] = {
         self.assertEqual(module._patch_cppy_setuptools_import(patched), patched)
         with self.assertRaisesRegex(RuntimeError, "expected snippet"):
             module._patch_cppy_setuptools_import("import os\n")
+
+        legacy_version = module.LIBRARY_INTEGRATION.release_version
+        module.LIBRARY_INTEGRATION.release_version = "1.1.0"
+        try:
+            module.patch_cppy_sources(
+                SimpleNamespace(source_root=self.root, log=lambda _message: None)
+            )
+        finally:
+            module.LIBRARY_INTEGRATION.release_version = legacy_version
 
     def test_pybind11_frozen_version_matches_header_and_is_strict(self) -> None:
         spec = importlib.util.spec_from_file_location(
@@ -332,6 +391,15 @@ const struct _module_alias aliases[] = {
         )
         with self.assertRaisesRegex(RuntimeError, "does not match"):
             module.patch_pybind11_sources(context)
+
+        legacy_version = module.LIBRARY_INTEGRATION.release_version
+        module.LIBRARY_INTEGRATION.release_version = "2.13.6"
+        try:
+            module.patch_pybind11_sources(
+                SimpleNamespace(source_root=self.root, log=lambda _message: None)
+            )
+        finally:
+            module.LIBRARY_INTEGRATION.release_version = legacy_version
 
     def test_native_wheels_are_never_source_inputs(self) -> None:
         files = [
@@ -655,6 +723,21 @@ const struct _module_alias aliases[] = {
         self.assertEqual(
             catalog["bleach"]["dependency_constraints"],
             {"tinycss2": ">=1.1.0"},
+        )
+        self.assertEqual(catalog["janus"]["release_version"], "2.0.0")
+        self.assertEqual(catalog["janus"]["license_expression"], "Apache-2.0")
+
+        dash_spec = importlib.util.spec_from_file_location(
+            "staticpython_dash_dependency_test",
+            REPO_ROOT / "Lib" / "dash" / "setup.py",
+        )
+        assert dash_spec is not None and dash_spec.loader is not None
+        dash_module = importlib.util.module_from_spec(dash_spec)
+        dash_spec.loader.exec_module(dash_module)
+        self.assertEqual(dash_module.LIBRARY_INTEGRATION.dependencies, ["janus"])
+        self.assertEqual(
+            dash_module.LIBRARY_INTEGRATION.dependency_constraints,
+            {"janus": ">=1.0.0"},
         )
 
     def test_default_integration_smoke_executes_real_import(self) -> None:

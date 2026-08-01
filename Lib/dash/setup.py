@@ -36,6 +36,8 @@ LIBRARY_INTEGRATION = pypi_library(
     source_mapping={
         "dash": "Lib/dash",
     },
+    dependencies=["janus"],
+    dependency_constraints={"janus": ">=1.0.0"},
     python_packages=["dash"],
     source_ignore_patterns=["tests"],
     post_patch_hooks=[patch_dash_sources],

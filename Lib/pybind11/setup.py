@@ -32,6 +32,12 @@ def patch_pybind11_sources(context) -> None:
     release_version = LIBRARY_INTEGRATION.release_version
     if not release_version:
         raise RuntimeError("pybind11 frozen version patch requires a resolved release version")
+    # pybind11 1.x and 2.x sdists already ship a self-contained _version.py.
+    # The 3.x sdist switched to deriving it from the source-tree header while
+    # the wheel still receives a generated hard-coded version.
+    release = Version(release_version)
+    if release < Version("3.0.0"):
+        return
 
     common = read_source_text(
         context,
@@ -44,7 +50,6 @@ def patch_pybind11_sources(context) -> None:
             raise RuntimeError(f"pybind11 {part.lower()} version macro was not found")
         macros[part] = int(match.group(1))
     source_version = (macros["MAJOR"], macros["MINOR"], macros["PATCH"])
-    release = Version(release_version)
     if tuple(release.release[:3]) != source_version:
         raise RuntimeError(
             f"pybind11 source version {source_version!r} does not match resolved {release_version}"
