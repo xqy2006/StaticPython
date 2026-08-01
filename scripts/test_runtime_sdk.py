@@ -539,6 +539,31 @@ const struct _module_alias aliases[] = {
         with self.assertRaisesRegex(RuntimeError, "missing current library packs"):
             build_release_index.validate_expected_pack_matrix(packs, ["demo", "other"])
 
+    def test_release_index_requires_dependency_assets_for_the_same_abi(self) -> None:
+        packs = {
+            "root": {
+                "1.0": {
+                    "cp313": {
+                        "metadata": {
+                            "dependencies": ["dependency"],
+                            "dependency_constraints": {"dependency": "<2"},
+                        }
+                    }
+                }
+            }
+        }
+        with self.assertRaisesRegex(RuntimeError, "requires unpublished pack"):
+            build_release_index.validate_pack_dependency_assets(packs)
+        packs["dependency"] = {
+            "2.1": {"cp313": {"metadata": {"dependencies": [], "dependency_constraints": {}}}}
+        }
+        with self.assertRaisesRegex(RuntimeError, "no published dependency<2"):
+            build_release_index.validate_pack_dependency_assets(packs)
+        packs["dependency"]["1.5"] = {
+            "cp313": {"metadata": {"dependencies": [], "dependency_constraints": {}}}
+        }
+        build_release_index.validate_pack_dependency_assets(packs)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

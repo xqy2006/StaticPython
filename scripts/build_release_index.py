@@ -9,6 +9,9 @@ from pathlib import Path
 from urllib.parse import quote
 from zipfile import BadZipFile, ZipFile
 
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -134,6 +137,56 @@ def validate_expected_pack_matrix(packs: dict, expected_pack_names: list[str]) -
             )
 
 
+def validate_pack_dependency_assets(packs: dict) -> None:
+    actual_by_key = {name.casefold(): name for name in packs}
+    for owner, versions in packs.items():
+        for owner_version, by_abi in versions.items():
+            for abi, record in by_abi.items():
+                metadata = record.get("metadata", {})
+                dependencies = metadata.get("dependencies", [])
+                constraints = metadata.get("dependency_constraints", {})
+                if not isinstance(dependencies, list) or not all(
+                    isinstance(name, str) and name for name in dependencies
+                ):
+                    raise RuntimeError(f"pack {owner} {owner_version} {abi} has invalid dependencies")
+                if not isinstance(constraints, dict):
+                    raise RuntimeError(f"pack {owner} {owner_version} {abi} has invalid dependency constraints")
+                for dependency in dependencies:
+                    dependency_name = actual_by_key.get(dependency.casefold())
+                    if dependency_name is None:
+                        raise RuntimeError(
+                            f"pack {owner} {owner_version} {abi} requires unpublished pack {dependency}"
+                        )
+                    raw_specifier = constraints.get(dependency, "")
+                    if not isinstance(raw_specifier, str):
+                        raise RuntimeError(
+                            f"pack {owner} {owner_version} {abi} has an invalid constraint for {dependency}"
+                        )
+                    try:
+                        specifier = SpecifierSet(raw_specifier)
+                    except InvalidSpecifier as exc:
+                        raise RuntimeError(
+                            f"pack {owner} {owner_version} {abi} has invalid constraint "
+                            f"{dependency}{raw_specifier}"
+                        ) from exc
+                    compatible = False
+                    for dependency_version, dependency_by_abi in packs[dependency_name].items():
+                        if abi not in dependency_by_abi:
+                            continue
+                        try:
+                            parsed_version = Version(dependency_version)
+                        except InvalidVersion:
+                            continue
+                        if parsed_version in specifier:
+                            compatible = True
+                            break
+                    if not compatible:
+                        raise RuntimeError(
+                            f"pack {owner} {owner_version} {abi} has no published {dependency}{raw_specifier} "
+                            f"asset for {abi}"
+                        )
+
+
 def build_index(
     asset_root: Path,
     repository: str,
@@ -213,6 +266,8 @@ def build_index(
 
     if require_all_targets and expected_pack_names is not None:
         validate_expected_pack_matrix(packs, expected_pack_names)
+    if require_all_targets:
+        validate_pack_dependency_assets(packs)
 
     return {
         "schema_version": 1,
