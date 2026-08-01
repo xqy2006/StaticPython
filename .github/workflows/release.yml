@@ -23,7 +23,7 @@ env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: "utf-8"
   STATICPYTHON_BUILD_WORKERS: "2"
-  STATICPYTHON_FULL_BUILD_WORKERS: "1"
+  STATICPYTHON_PACK_BUILD_WORKERS: "2"
 
 jobs:
   unit-tests:
@@ -120,8 +120,10 @@ jobs:
     runs-on: windows-2022
     strategy:
       fail-fast: false
+      max-parallel: 10
       matrix:
         cpython_version: ${{ fromJSON(needs.resolve-cpython-matrix.outputs.versions) }}
+        pack_family: [a-f, g-l, m-r, s-z]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -138,22 +140,36 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: amd64
-      - name: Build, verify, and split current library catalog
+      - name: Build and verify modular pack shard
         shell: pwsh
         run: |
-          $dist = "$env:GITHUB_WORKSPACE\dist\packs\${{ matrix.cpython_version }}"
+          $family = "${{ matrix.pack_family }}"
+          $dist = "$env:GITHUB_WORKSPACE\dist\packs\${{ matrix.cpython_version }}\$family"
+          $shardConfig = "$env:RUNNER_TEMP\pack-shard-$family.json"
+          $packNames = "$env:RUNNER_TEMP\pack-shard-$family.txt"
           New-Item -ItemType Directory -Force $dist | Out-Null
-          python .\build.py `
-            --cpython-version "${{ matrix.cpython_version }}" `
-            --download-root "$env:RUNNER_TEMP\packs-${{ matrix.cpython_version }}" `
-            --profile full `
-            --build-workers "$env:STATICPYTHON_FULL_BUILD_WORKERS" `
-            --output-pack-dir $dist
+          python .\scripts\build_pack_shard_config.py `
+            --family $family `
+            --output-config $shardConfig `
+            --output-pack-names $packNames
+          $buildArgs = @(
+            ".\build.py",
+            "--cpython-version", "${{ matrix.cpython_version }}",
+            "--download-root", "$env:RUNNER_TEMP\packs-${{ matrix.cpython_version }}-$family",
+            "--config", $shardConfig,
+            "--profile", "pack-shard",
+            "--build-workers", "$env:STATICPYTHON_PACK_BUILD_WORKERS",
+            "--output-pack-dir", $dist
+          )
+          Get-Content $packNames | ForEach-Object {
+            $buildArgs += @("--output-pack-name", $_)
+          }
+          python @buildArgs
       - name: Upload verified pack candidates
         uses: actions/upload-artifact@v4
         with:
-          name: library-packs-${{ matrix.cpython_version }}
-          path: dist/packs/${{ matrix.cpython_version }}/*.zip
+          name: library-packs-${{ matrix.cpython_version }}-${{ matrix.pack_family }}
+          path: dist/packs/${{ matrix.cpython_version }}/${{ matrix.pack_family }}/*.zip
           if-no-files-found: error
           retention-days: 14
 

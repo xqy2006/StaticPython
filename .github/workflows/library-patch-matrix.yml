@@ -48,7 +48,7 @@ jobs:
           $tags = @(git ls-remote --tags --refs https://github.com/python/cpython.git "v3.*" |
             ForEach-Object {
               if ($_ -match "refs/tags/v((3)\.(11|12|13|14|15)\.([0-9]+)(?:(a|b|rc)([0-9]+))?)$") {
-                $phase = $matches[6]
+                $phase = $matches[5]
                 $phaseRank = 4
                 if ($phase -eq "a") {
                   $phaseRank = 1
@@ -66,7 +66,7 @@ jobs:
                   Minor = [int]$matches[3]
                   Micro = [int]$matches[4]
                   PhaseRank = $phaseRank
-                  PhaseSerial = if ($matches[7]) { [int]$matches[7] } else { 0 }
+                  PhaseSerial = if ($matches[6]) { [int]$matches[6] } else { 0 }
                 }
               }
             })
@@ -336,9 +336,9 @@ jobs:
                   cleanup_integration_paths(source_root, integration)
 
 
-          def compatible_release_versions(integration, target_version) -> list[str]:
+          def compatible_release_versions(integration, target_version) -> tuple[list[str], list[dict]]:
               if integration.source_provider != "pypi":
-                  return [integration.release_version or integration.source_provider]
+                  return [integration.release_version or integration.source_provider], []
 
               project_name = integration.project_name or integration.name
               payload = libs._load_pypi_release_payload(project_name, None)
@@ -346,6 +346,7 @@ jobs:
               project_requires_python = payload.get("info", {}).get("requires_python")
               minimum_release_version = getattr(integration, "minimum_release_version", None)
               versions: list[str] = []
+              unbuildable: list[dict] = []
               for raw_version in libs._sorted_release_versions(releases):
                   if minimum_release_version is not None:
                       try:
@@ -353,23 +354,37 @@ jobs:
                               continue
                       except Exception:
                           pass
-                  files = releases.get(raw_version, [])
-                  compatible = False
-                  for file_info in files:
-                      if file_info.get("yanked"):
-                          continue
-                      if file_info.get("packagetype") not in {"sdist", "bdist_wheel"}:
-                          continue
-                      if not file_info.get("url"):
-                          continue
-                      requires_python = file_info.get("requires_python") or project_requires_python
-                      if not libs._supports_target_python(requires_python, target_version):
-                          continue
-                      compatible = True
-                      break
+                  files = [
+                      file_info
+                      for file_info in releases.get(raw_version, [])
+                      if not file_info.get("yanked") and file_info.get("url")
+                  ]
+                  applicable = [
+                      file_info
+                      for file_info in files
+                      if libs._supports_target_python(
+                          file_info.get("requires_python") or project_requires_python,
+                          target_version,
+                      )
+                  ]
+                  if not applicable:
+                      continue
+                  compatible = libs._compatible_pypi_files(
+                      applicable,
+                      project_requires_python=project_requires_python,
+                      target_version=target_version,
+                  )
                   if compatible:
                       versions.append(raw_version)
-              return versions
+                  else:
+                      unbuildable.append(
+                          {
+                              "version": raw_version,
+                              "reason": "no non-yanked sdist or pure universal wheel; native wheels are not static inputs",
+                              "artifacts": [file_info.get("filename") for file_info in applicable],
+                          }
+                      )
+              return versions, unbuildable
 
 
           def assert_materialized_paths_exist(source_root: Path, integration) -> None:
@@ -471,6 +486,7 @@ jobs:
                       "project_name": None,
                       "source_provider": None,
                       "compatible_versions": 0,
+                      "unbuildable_versions": [],
                       "passed_versions": [],
                       "failed_versions": [],
                       "library_failures": [],
@@ -488,8 +504,9 @@ jobs:
                       library_summary["project_name"] = integration.project_name
                       library_summary["source_provider"] = integration.source_provider
 
-                      release_versions = compatible_release_versions(integration, target_version)
+                      release_versions, unbuildable_versions = compatible_release_versions(integration, target_version)
                       library_summary["compatible_versions"] = len(release_versions)
+                      library_summary["unbuildable_versions"] = unbuildable_versions
                       write_summary()
 
                       if not release_versions:
@@ -594,11 +611,13 @@ jobs:
           total_versions = sum(library["compatible_versions"] for library in summary["libraries"])
           passed_versions = sum(len(library["passed_versions"]) for library in summary["libraries"])
           failed_versions = sum(len(library["failed_versions"]) for library in summary["libraries"])
+          unbuildable_versions = sum(len(library["unbuildable_versions"]) for library in summary["libraries"])
           library_failures = sum(len(library["library_failures"]) for library in summary["libraries"])
           job_failures = len(summary["job_failures"])
           print(
               f"[library-patch-matrix] shard {shard_index} / CPython {cpython_version}: "
               f"{passed_versions} passed, {failed_versions} version failures, "
+              f"{unbuildable_versions} evidence-backed unbuildable versions, "
               f"{library_failures} library failures, {job_failures} job failures, "
               f"{total_versions} total compatible version(s)"
           )
@@ -639,6 +658,7 @@ jobs:
           total_versions = sum(library["compatible_versions"] for library in summary["libraries"])
           passed_versions = sum(len(library["passed_versions"]) for library in summary["libraries"])
           failed_versions = sum(len(library["failed_versions"]) for library in summary["libraries"])
+          unbuildable_versions = sum(len(library.get("unbuildable_versions", [])) for library in summary["libraries"])
           library_failures = sum(len(library["library_failures"]) for library in summary["libraries"])
           job_failures = len(summary["job_failures"])
 
@@ -649,6 +669,7 @@ jobs:
               f"- Compatible downloadable versions checked: {total_versions}",
               f"- Passed versions: {passed_versions}",
               f"- Failed versions: {failed_versions}",
+              f"- Evidence-backed unbuildable versions: {unbuildable_versions}",
               f"- Library-level failures: {library_failures}",
               f"- Job-level failures: {job_failures}",
           ]

@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 from zipfile import ZipFile
@@ -17,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import build
 import libs
+import verify as staticpython_verify
 
 _INDEX_SPEC = importlib.util.spec_from_file_location(
     "staticpython_build_release_index",
@@ -25,6 +27,14 @@ _INDEX_SPEC = importlib.util.spec_from_file_location(
 assert _INDEX_SPEC is not None and _INDEX_SPEC.loader is not None
 build_release_index = importlib.util.module_from_spec(_INDEX_SPEC)
 _INDEX_SPEC.loader.exec_module(build_release_index)
+
+_SHARD_SPEC = importlib.util.spec_from_file_location(
+    "staticpython_build_pack_shard_config",
+    REPO_ROOT / "scripts" / "build_pack_shard_config.py",
+)
+assert _SHARD_SPEC is not None and _SHARD_SPEC.loader is not None
+build_pack_shard_config = importlib.util.module_from_spec(_SHARD_SPEC)
+_SHARD_SPEC.loader.exec_module(build_pack_shard_config)
 
 
 class RuntimeSDKTests(unittest.TestCase):
@@ -50,6 +60,50 @@ class RuntimeSDKTests(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text("legacy", encoding="utf-8")
         self.assertEqual(build.resolve_runtime_sdk_pyconfig_header(self.root, "x64"), generated)
+
+    def test_runtime_frozen_module_names_come_from_runtime_tables_only(self) -> None:
+        frozen = self.root / "Python" / "frozen.c"
+        frozen.parent.mkdir(parents=True)
+        frozen.write_text(
+            '''
+static const struct _frozen bootstrap_modules[] = {
+    {"importlib._bootstrap", bootstrap, 1, false},
+    {0, 0, 0} /* bootstrap sentinel */
+};
+static const struct _frozen stdlib_modules[] = {
+    {"asyncio", asyncio_data, 1, true},
+    {"asyncio.tasks", asyncio_tasks_data, 1, false},
+    {0, 0, 0} /* stdlib sentinel */
+};
+static const struct _frozen test_modules[] = {
+    {"test.should_not_ship", test_data, 1, false},
+    {0, 0, 0} /* test sentinel */
+};
+const struct _module_alias aliases[] = {
+    {"os.path", "ntpath"},
+    {0, 0} /* aliases sentinel */
+};
+''',
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            build.runtime_frozen_module_names(self.root),
+            ["asyncio", "asyncio.tasks", "importlib._bootstrap", "os.path"],
+        )
+
+    def test_cpython_tag_resolution_prefers_peeled_commit(self) -> None:
+        direct = "1" * 40
+        peeled = "2" * 40
+        result = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"{direct}\trefs/tags/v3.13.14\n"
+                f"{peeled}\trefs/tags/v3.13.14^{{}}\n"
+            ),
+            stderr="",
+        )
+        with mock.patch("build.subprocess.run", return_value=result):
+            self.assertEqual(build.resolve_cpython_tag_commit("3.13.14"), peeled)
 
     def test_prompt_toolkit_3053_lazy_version_patch_is_strict(self) -> None:
         spec = importlib.util.spec_from_file_location(
@@ -102,6 +156,17 @@ class RuntimeSDKTests(unittest.TestCase):
         context = SimpleNamespace(source_root=self.root, log=lambda _message: None)
         module.patch_portalocker_sources(context)
         self.assertEqual(target.read_text(encoding="utf-8"), source)
+
+    def test_ujson_project_defines_the_resolved_release_version(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_ujson_setup_test",
+            REPO_ROOT / "Lib" / "ujson" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        project = module._render_ujson_project(["python/ujson.c"], ["python"], "5.13.0")
+        self.assertIn("UJSON_VERSION=&quot;5.13.0&quot;", project)
 
     def test_native_wheels_are_never_source_inputs(self) -> None:
         files = [
@@ -201,6 +266,20 @@ class RuntimeSDKTests(unittest.TestCase):
         self.assertNotIn("Modules\\main.c", text)
         self.assertNotIn("Python\\staticpython_resource_store.c", text)
 
+    def test_pack_registration_validates_before_mutating_cpython_tables(self) -> None:
+        text = (
+            REPO_ROOT / "assets" / "overlay" / "Python" / "staticpython_pack_runtime.c"
+        ).read_text(encoding="utf-8")
+        hook_call = text.index("packs[index]->before_initialize()")
+        table_allocation = text.index("staticpython_frozen_modules = (struct _frozen *)calloc")
+        extend_inittab = text.index("PyImport_ExtendInittab(staticpython_builtin_modules)")
+        self.assertLess(hook_call, table_allocation)
+        self.assertLess(table_allocation, extend_inittab)
+        self.assertIn("duplicate builtin module name", text)
+        self.assertIn("builtin module conflicts with the runtime SDK", text)
+        self.assertIn("_PyImport_FrozenStdlib", text)
+        self.assertIn("required dependency pack is missing", text)
+
     def test_pack_resource_descriptor_is_sorted_and_uses_v1(self) -> None:
         build._write_staticpython_pack_resource_store_c(
             self.root,
@@ -263,6 +342,13 @@ class RuntimeSDKTests(unittest.TestCase):
             "3.13.0",
             "x64",
             integration,
+            verification_status="passed",
+            verification_report={
+                "integration_smoke_tests": [
+                    {"integration": "demo", "name": "import-demo", "kind": "import", "status": "passed"},
+                    {"integration": "other", "name": "import-other", "kind": "import", "status": "passed"},
+                ]
+            },
         )
         with ZipFile(archive_path) as archive:
             metadata = json.loads(archive.read("pack.json"))
@@ -271,8 +357,61 @@ class RuntimeSDKTests(unittest.TestCase):
             self.assertNotIn("other", metadata["frozen_modules"])
             self.assertIn("Lib/demo/data.json", [item["path"] for item in metadata["resources"]])
             self.assertEqual(metadata["license"]["status"], "complete")
+            self.assertEqual(metadata["verification"]["status"], "passed")
+            self.assertEqual(
+                metadata["verification"]["smoke_tests"],
+                [{"name": "import-demo", "kind": "import", "status": "passed"}],
+            )
             self.assertIn('"demo"', descriptor)
+            self.assertIn("staticpython_pack_demo_resource_", descriptor)
             self.assertNotIn('_Py_M__other', descriptor)
+
+    def test_pack_shards_partition_current_full_catalog(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        expected = config["profiles"]["full"]["third_party_libraries"]
+        observed: list[str] = []
+        for family in ("a-f", "g-l", "m-r", "s-z"):
+            shard_config, selected = build_pack_shard_config.build_shard_config(config, family)
+            self.assertTrue(selected)
+            self.assertEqual(shard_config["profiles"]["pack-shard"]["third_party_libraries"], selected)
+            self.assertEqual(shard_config["profiles"]["pack-shard"]["verification"], {"enabled": False})
+            self.assertTrue(all(build_release_index.pack_family(name) == family for name in selected))
+            observed.extend(selected)
+        self.assertCountEqual(observed, expected)
+        self.assertEqual(len({name.casefold() for name in observed}), len(observed))
+
+    def test_output_pack_filter_keeps_dependencies_linked_but_not_exported(self) -> None:
+        dependency = SimpleNamespace(name="dependency")
+        root = SimpleNamespace(name="root")
+        selected = build.select_output_pack_integrations([dependency, root], ["root"])
+        self.assertEqual(selected, [root])
+        with self.assertRaisesRegex(RuntimeError, "did not match"):
+            build.select_output_pack_integrations([dependency, root], ["missing"])
+
+    def test_default_integration_smoke_executes_real_import(self) -> None:
+        integration = libs.LibraryIntegration(name="demo", top_level_import_names=["demo.api"])
+        result = {
+            "ok": True,
+            "timeout": False,
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "",
+            "display": "python -c import-demo",
+            "duration_seconds": 0.01,
+        }
+        with mock.patch.object(staticpython_verify, "run_capture", return_value=result) as run_capture:
+            failures, records = staticpython_verify.verify_integration_smoke_tests(
+                ["python.exe"],
+                None,
+                REPO_ROOT,
+                [integration],
+                set(),
+            )
+        self.assertEqual(failures, [])
+        self.assertEqual(records[0]["status"], "passed")
+        command = run_capture.call_args.args[0]
+        self.assertEqual(command[:2], ["python.exe", "-c"])
+        self.assertIn("importlib.import_module('demo.api')", command[2])
 
     def test_release_index_uses_immutable_urls_and_pack_families(self) -> None:
         assets = self.root / "assets"
@@ -321,6 +460,15 @@ class RuntimeSDKTests(unittest.TestCase):
         pack = index["packs"]["attrs"]["25.1.0"]["cp313"]
         self.assertEqual(pack["release_family"], "a-f")
         self.assertIn("/staticpython-packs-deadbeef-a-f/attrs.zip", pack["url"])
+
+    def test_release_index_requires_every_pack_for_every_target_abi(self) -> None:
+        packs = {"demo": {"1.0": {"cp311": {}}}}
+        with self.assertRaisesRegex(RuntimeError, "missing target ABIs"):
+            build_release_index.validate_expected_pack_matrix(packs, ["demo"])
+        packs["demo"]["1.0"].update({abi: {} for abi in build_release_index.TARGET_ABIS})
+        build_release_index.validate_expected_pack_matrix(packs, ["demo"])
+        with self.assertRaisesRegex(RuntimeError, "missing current library packs"):
+            build_release_index.validate_expected_pack_matrix(packs, ["demo", "other"])
 
 
 if __name__ == "__main__":

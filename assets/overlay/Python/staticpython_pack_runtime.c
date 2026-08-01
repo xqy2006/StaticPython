@@ -11,6 +11,10 @@
 #define STATICPYTHON_CPYTHON_ABI \
     "cp" STATICPYTHON_STRINGIFY(PY_MAJOR_VERSION) STATICPYTHON_STRINGIFY(PY_MINOR_VERSION)
 
+PyAPI_DATA(const struct _frozen *) _PyImport_FrozenBootstrap;
+PyAPI_DATA(const struct _frozen *) _PyImport_FrozenStdlib;
+PyAPI_DATA(const struct _frozen *) _PyImport_FrozenTest;
+
 static const StaticPythonPackV1 *const *staticpython_packs = NULL;
 static size_t staticpython_pack_count = 0;
 static struct _frozen *staticpython_frozen_modules = NULL;
@@ -306,6 +310,56 @@ staticpython_validate_pack(const StaticPythonPackV1 *pack)
     if (pack->resource_count != 0 && pack->resources == NULL) {
         return staticpython_fail_pack(pack, "resource table is NULL");
     }
+    if (pack->dependency_count != 0 && pack->dependencies == NULL) {
+        return staticpython_fail_pack(pack, "dependency table is NULL");
+    }
+    if (pack->link_library_count != 0 && pack->link_libraries == NULL) {
+        return staticpython_fail_pack(pack, "link library table is NULL");
+    }
+    if (pack->system_library_count != 0 && pack->system_libraries == NULL) {
+        return staticpython_fail_pack(pack, "system library table is NULL");
+    }
+    for (size_t index = 0; index < pack->frozen_module_count; index++) {
+        const StaticPythonFrozenModuleV1 *module = &pack->frozen_modules[index];
+        if (module->name == NULL || module->name[0] == '\0') {
+            return staticpython_fail_pack(pack, "frozen module name is required");
+        }
+        if (module->code == NULL || module->size <= 0) {
+            return staticpython_fail_pack(pack, "frozen module bytecode is invalid");
+        }
+        if (module->is_package != 0 && module->is_package != 1) {
+            return staticpython_fail_pack(pack, "frozen module package flag is invalid");
+        }
+    }
+    for (size_t index = 0; index < pack->builtin_module_count; index++) {
+        if (pack->builtin_modules[index].name == NULL
+            || pack->builtin_modules[index].name[0] == '\0') {
+            return staticpython_fail_pack(pack, "builtin module name is required");
+        }
+        if (pack->builtin_modules[index].initfunc == NULL) {
+            return staticpython_fail_pack(pack, "builtin module initializer is NULL");
+        }
+    }
+    for (size_t index = 0; index < pack->resource_count; index++) {
+        const StaticPythonResourceV1 *resource = &pack->resources[index];
+        if (resource->path == NULL || resource->path[0] == '\0') {
+            return staticpython_fail_pack(pack, "resource path is required");
+        }
+        if (resource->compression != STATICPYTHON_RESOURCE_RAW
+            && resource->compression != STATICPYTHON_RESOURCE_ZLIB) {
+            return staticpython_fail_pack(pack, "resource compression is unsupported");
+        }
+        if (resource->data == NULL
+            && (resource->module_name == NULL || resource->module_name[0] == '\0'
+                || resource->blob_id == NULL || resource->blob_id[0] == '\0')) {
+            return staticpython_fail_pack(pack, "resource has no linked or frozen payload");
+        }
+    }
+    for (size_t index = 0; index < pack->dependency_count; index++) {
+        if (pack->dependencies[index] == NULL || pack->dependencies[index][0] == '\0') {
+            return staticpython_fail_pack(pack, "dependency name is required");
+        }
+    }
     return 0;
 }
 
@@ -317,6 +371,11 @@ staticpython_validate_duplicates(
 {
     for (size_t left_pack = 0; left_pack < pack_count; left_pack++) {
         const StaticPythonPackV1 *left = packs[left_pack];
+        for (size_t right_pack = left_pack + 1; right_pack < pack_count; right_pack++) {
+            if (strcmp(left->name, packs[right_pack]->name) == 0) {
+                return staticpython_fail_pack(packs[right_pack], "duplicate pack name");
+            }
+        }
         for (size_t left_index = 0; left_index < left->frozen_module_count; left_index++) {
             const char *name = left->frozen_modules[left_index].name;
             if (name == NULL) {
@@ -345,6 +404,91 @@ staticpython_validate_duplicates(
                         return staticpython_fail_pack(right, "duplicate virtual resource path");
                     }
                 }
+            }
+        }
+        for (size_t left_index = 0; left_index < left->builtin_module_count; left_index++) {
+            const char *name = left->builtin_modules[left_index].name;
+            if (strcmp(name, "_staticpython_resource_store") == 0) {
+                return staticpython_fail_pack(left, "builtin module conflicts with the runtime resource provider");
+            }
+            for (size_t right_pack = left_pack; right_pack < pack_count; right_pack++) {
+                const StaticPythonPackV1 *right = packs[right_pack];
+                size_t start = right_pack == left_pack ? left_index + 1 : 0;
+                for (size_t right_index = start; right_index < right->builtin_module_count; right_index++) {
+                    if (strcmp(name, right->builtin_modules[right_index].name) == 0) {
+                        return staticpython_fail_pack(right, "duplicate builtin module name");
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int
+staticpython_frozen_table_contains(const struct _frozen *table, const char *name)
+{
+    if (table == NULL) {
+        return 0;
+    }
+    for (size_t index = 0; table[index].name != NULL; index++) {
+        if (strcmp(name, table[index].name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int
+staticpython_validate_runtime_conflicts(
+    const StaticPythonPackV1 *const *packs,
+    size_t pack_count
+)
+{
+    for (size_t pack_index = 0; pack_index < pack_count; pack_index++) {
+        const StaticPythonPackV1 *pack = packs[pack_index];
+        for (size_t index = 0; index < pack->frozen_module_count; index++) {
+            const char *name = pack->frozen_modules[index].name;
+            if (staticpython_frozen_table_contains(PyImport_FrozenModules, name)
+                || staticpython_frozen_table_contains(_PyImport_FrozenBootstrap, name)
+                || staticpython_frozen_table_contains(_PyImport_FrozenStdlib, name)
+                || staticpython_frozen_table_contains(_PyImport_FrozenTest, name)) {
+                return staticpython_fail_pack(pack, "frozen module conflicts with the runtime SDK");
+            }
+        }
+        for (size_t index = 0; index < pack->builtin_module_count; index++) {
+            const char *name = pack->builtin_modules[index].name;
+            if (PyImport_Inittab != NULL) {
+                for (size_t base_index = 0; PyImport_Inittab[base_index].name != NULL; base_index++) {
+                    if (strcmp(name, PyImport_Inittab[base_index].name) == 0) {
+                        return staticpython_fail_pack(pack, "builtin module conflicts with the runtime SDK");
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int
+staticpython_validate_dependencies(
+    const StaticPythonPackV1 *const *packs,
+    size_t pack_count
+)
+{
+    for (size_t pack_index = 0; pack_index < pack_count; pack_index++) {
+        const StaticPythonPackV1 *pack = packs[pack_index];
+        for (size_t dependency_index = 0; dependency_index < pack->dependency_count; dependency_index++) {
+            const char *dependency = pack->dependencies[dependency_index];
+            int found = 0;
+            for (size_t candidate_index = 0; candidate_index < pack_count; candidate_index++) {
+                if (strcmp(dependency, packs[candidate_index]->name) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                return staticpython_fail_pack(pack, "required dependency pack is missing");
             }
         }
     }
@@ -380,6 +524,18 @@ StaticPython_RegisterPacks(
     }
     if (staticpython_validate_duplicates(packs, pack_count) < 0) {
         return -1;
+    }
+    if (staticpython_validate_runtime_conflicts(packs, pack_count) < 0) {
+        return -1;
+    }
+    if (staticpython_validate_dependencies(packs, pack_count) < 0) {
+        return -1;
+    }
+    for (size_t index = 0; index < pack_count; index++) {
+        if (packs[index]->before_initialize != NULL
+            && packs[index]->before_initialize() != 0) {
+            return staticpython_fail_pack(packs[index], "before_initialize hook failed");
+        }
     }
 
     if (PyImport_FrozenModules != NULL) {
@@ -444,12 +600,6 @@ StaticPython_RegisterPacks(
     staticpython_packs = packs;
     staticpython_pack_count = pack_count;
 
-    for (size_t index = 0; index < pack_count; index++) {
-        if (packs[index]->before_initialize != NULL
-            && packs[index]->before_initialize() != 0) {
-            return staticpython_fail_pack(packs[index], "before_initialize hook failed");
-        }
-    }
     staticpython_registered = 1;
     return 0;
 }

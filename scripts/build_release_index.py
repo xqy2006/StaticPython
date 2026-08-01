@@ -14,24 +14,20 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from build import RUNTIME_SDK_METADATA_RELATIVE_PATH, STATICPYTHON_PACK_METADATA_NAME, git_commit_or_none, sha256_file
-
-
-TARGET_ABIS = ("cp311", "cp312", "cp313", "cp314", "cp315")
-PACK_FAMILIES = (
-    ("a-f", set("abcdef")),
-    ("g-l", set("ghijkl")),
-    ("m-r", set("mnopqr")),
-    ("s-z", set("stuvwxyz")),
+from build import (
+    RUNTIME_SDK_METADATA_RELATIVE_PATH,
+    STATICPYTHON_PACK_METADATA_NAME,
+    git_commit_or_none,
+    sha256_file,
+    staticpython_pack_release_family,
 )
 
 
+TARGET_ABIS = ("cp311", "cp312", "cp313", "cp314", "cp315")
+
+
 def pack_family(name: str) -> str:
-    first = name[:1].casefold()
-    for family, initials in PACK_FAMILIES:
-        if first in initials:
-            return family
-    return "other"
+    return staticpython_pack_release_family(name)
 
 
 def asset_url(repository: str, tag: str, filename: str) -> str:
@@ -77,6 +73,67 @@ def _asset_record(path: Path, metadata: dict, repository: str, tag: str) -> dict
     }
 
 
+def _is_full_commit(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{40}", value) is not None
+
+
+def _validate_verified_provenance(metadata: dict, path: Path) -> None:
+    version = metadata.get("cpython_version")
+    if not _is_full_commit(metadata.get("cpython_commit")):
+        raise RuntimeError(f"verified asset {path.name} has no exact CPython commit")
+    if not isinstance(version, str) or metadata.get("cpython_tag") != f"v{version}":
+        raise RuntimeError(f"verified asset {path.name} has inconsistent CPython tag metadata")
+    source = metadata.get("cpython_source", {})
+    if not isinstance(source, dict) or source.get("commit") != metadata.get("cpython_commit"):
+        raise RuntimeError(f"verified asset {path.name} has inconsistent CPython source provenance")
+    if not isinstance(source.get("archive_sha256"), str) or len(source["archive_sha256"]) != 64:
+        raise RuntimeError(f"verified asset {path.name} has no CPython source archive hash")
+    toolchain = metadata.get("toolchain", {})
+    required_toolchain = (
+        "visual_studio_version",
+        "vscmd_version",
+        "vc_tools_version",
+        "windows_sdk_version",
+        "platform_toolset",
+        "runtime_library",
+    )
+    missing = [name for name in required_toolchain if not toolchain.get(name)]
+    if missing:
+        raise RuntimeError(f"verified asset {path.name} is missing toolchain fields: {', '.join(missing)}")
+
+
+def validate_expected_pack_matrix(packs: dict, expected_pack_names: list[str]) -> None:
+    expected_by_key: dict[str, str] = {}
+    for name in expected_pack_names:
+        if not isinstance(name, str) or not name:
+            raise RuntimeError("expected pack names must be non-empty strings")
+        key = name.casefold()
+        if key in expected_by_key:
+            raise RuntimeError(f"duplicate expected pack name: {name}")
+        expected_by_key[key] = name
+    actual_by_key = {name.casefold(): name for name in packs}
+    missing = [expected_by_key[key] for key in sorted(set(expected_by_key) - set(actual_by_key))]
+    unexpected = [actual_by_key[key] for key in sorted(set(actual_by_key) - set(expected_by_key))]
+    if missing:
+        raise RuntimeError("release index is missing current library packs: " + ", ".join(missing))
+    if unexpected:
+        raise RuntimeError("release index contains packs outside the current catalog: " + ", ".join(unexpected))
+
+    for key, expected_name in sorted(expected_by_key.items()):
+        versions = packs[actual_by_key[key]]
+        covered_abis = {
+            abi
+            for by_abi in versions.values()
+            for abi in by_abi
+        }
+        missing_abis = sorted(set(TARGET_ABIS) - covered_abis)
+        if missing_abis:
+            raise RuntimeError(
+                f"release index pack {expected_name} is missing target ABIs: "
+                + ", ".join(missing_abis)
+            )
+
+
 def build_index(
     asset_root: Path,
     repository: str,
@@ -86,6 +143,7 @@ def build_index(
     *,
     require_all_targets: bool = True,
     require_verified: bool = True,
+    expected_pack_names: list[str] | None = None,
 ) -> dict:
     runtime_assets, pack_assets = discover_assets(asset_root)
     runtimes: dict[str, dict] = {}
@@ -95,10 +153,12 @@ def build_index(
             raise RuntimeError(f"runtime asset {path.name} has unsupported ABI {abi!r}")
         if abi in runtimes:
             raise RuntimeError(f"multiple runtime SDK assets were found for {abi}")
-        if metadata.get("staticpython_commit") not in {None, staticpython_commit}:
+        if metadata.get("staticpython_commit") != staticpython_commit:
             raise RuntimeError(f"runtime asset {path.name} was built from a different StaticPython commit")
         if require_verified and metadata.get("verification", {}).get("status") != "passed":
             raise RuntimeError(f"runtime asset {path.name} is not verified")
+        if require_verified:
+            _validate_verified_provenance(metadata, path)
         runtimes[abi] = _asset_record(path, metadata, repository, runtime_tag)
 
     missing_targets = sorted(set(TARGET_ABIS) - set(runtimes))
@@ -116,12 +176,22 @@ def build_index(
             raise RuntimeError(f"pack asset {path.name} is missing name, version, or cpython_abi")
         if abi not in TARGET_ABIS:
             raise RuntimeError(f"pack asset {path.name} has unsupported ABI {abi!r}")
-        if metadata.get("staticpython_commit") not in {None, staticpython_commit}:
+        if metadata.get("staticpython_commit") != staticpython_commit:
             raise RuntimeError(f"pack asset {path.name} was built from a different StaticPython commit")
         if require_verified and metadata.get("verification", {}).get("status") != "passed":
             raise RuntimeError(f"pack asset {path.name} is not verified")
         if require_verified and metadata.get("license", {}).get("status") != "complete":
             raise RuntimeError(f"pack asset {path.name} has incomplete license metadata")
+        if require_verified:
+            _validate_verified_provenance(metadata, path)
+            runtime_metadata = runtimes.get(abi, {}).get("metadata", {})
+            if (
+                metadata.get("cpython_commit") != runtime_metadata.get("cpython_commit")
+                or metadata.get("cpython_tag") != runtime_metadata.get("cpython_tag")
+            ):
+                raise RuntimeError(f"pack asset {path.name} does not match its {abi} runtime source")
+            if metadata.get("toolchain") != runtime_metadata.get("toolchain"):
+                raise RuntimeError(f"pack asset {path.name} does not match its {abi} runtime toolchain")
         family = pack_family(name)
         tag = f"{pack_tag_prefix}-{family}"
         family_counts[family] = family_counts.get(family, 0) + 1
@@ -141,6 +211,9 @@ def build_index(
             "maximum_assets": 900,
         }
 
+    if require_all_targets and expected_pack_names is not None:
+        validate_expected_pack_matrix(packs, expected_pack_names)
+
     return {
         "schema_version": 1,
         "kind": "staticpython-runtime-index",
@@ -149,6 +222,16 @@ def build_index(
         "staticpython_commit": staticpython_commit,
         "target_platform": "windows-x64",
         "target_cpython_abis": list(TARGET_ABIS),
+        "cpython_targets": {
+            abi: {
+                "version": record["metadata"].get("cpython_version"),
+                "tag": record["metadata"].get("cpython_tag"),
+                "commit": record["metadata"].get("cpython_commit"),
+                "toolchain": record["metadata"].get("toolchain"),
+                "verification_status": record["metadata"].get("verification", {}).get("status"),
+            }
+            for abi, record in sorted(runtimes.items())
+        },
         "runtime_release_tag": runtime_tag,
         "release_families": release_families,
         "runtimes": dict(sorted(runtimes.items())),
@@ -170,6 +253,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--staticpython-commit")
     parser.add_argument("--runtime-tag")
     parser.add_argument("--pack-tag-prefix")
+    parser.add_argument("--config", type=Path, default=REPO_ROOT / "config.json")
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--allow-unverified", action="store_true")
     return parser.parse_args()
@@ -183,6 +267,10 @@ def main() -> int:
     short_commit = commit[:12].lower()
     runtime_tag = args.runtime_tag or f"staticpython-runtime-{short_commit}"
     pack_tag_prefix = args.pack_tag_prefix or f"staticpython-packs-{short_commit}"
+    config = json.loads(args.config.read_text(encoding="utf-8"))
+    expected_pack_names = config.get("profiles", {}).get("full", {}).get("third_party_libraries")
+    if not isinstance(expected_pack_names, list):
+        raise RuntimeError("config full.third_party_libraries must be an explicit list")
     index = build_index(
         args.asset_root.resolve(),
         args.repository,
@@ -191,6 +279,7 @@ def main() -> int:
         pack_tag_prefix,
         require_all_targets=not args.allow_partial,
         require_verified=not args.allow_unverified,
+        expected_pack_names=expected_pack_names,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
