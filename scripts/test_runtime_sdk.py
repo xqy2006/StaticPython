@@ -401,6 +401,70 @@ const struct _module_alias aliases[] = {
         finally:
             module.LIBRARY_INTEGRATION.release_version = legacy_version
 
+    def test_aiohttp_pack_metadata_tracks_generated_extension_layout(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_aiohttp_layout_test",
+            REPO_ROOT / "Lib" / "aiohttp" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        aiohttp = self.root / "Lib" / "aiohttp"
+        websocket = aiohttp / "_websocket"
+        websocket.mkdir(parents=True)
+        for relative in (
+            "_http_parser.c",
+            "_find_header.c",
+            "_http_writer.c",
+            "_websocket/mask.c",
+            "_websocket/reader_c.c",
+        ):
+            path = aiohttp / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("/* test */\n", encoding="utf-8")
+        llhttp = self.root / "aiohttp_builtin" / "vendor" / "llhttp"
+        for relative in ("build/c/llhttp.c", "src/native/api.c", "src/native/http.c"):
+            path = llhttp / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("/* test */\n", encoding="utf-8")
+
+        context = SimpleNamespace(source_root=self.root, log=lambda _message: None)
+        module.prepare_aiohttp_projects(context)
+        selected_names = [
+            "aiohttp._http_parser",
+            "aiohttp._http_writer",
+            "aiohttp._websocket.mask",
+            "aiohttp._websocket.reader_c",
+        ]
+        integration = module.LIBRARY_INTEGRATION
+        self.assertEqual(
+            integration.static_library_projects_release_x64,
+            [f"{name}.vcxproj" for name in selected_names],
+        )
+        self.assertEqual(
+            [item["name"] for item in integration.builtin_module_registrations],
+            selected_names,
+        )
+        self.assertEqual(
+            integration.python_link_dependencies_release_x64,
+            [f"{name}.lib" for name in selected_names],
+        )
+
+        output = self.root / "PCbuild" / "amd64"
+        output.mkdir(parents=True)
+        for name in selected_names:
+            (output / f"{name}.lib").write_bytes(b"library")
+        native_records, _wholearchive, _system = build._integration_native_libraries(
+            self.root,
+            "x64",
+            integration,
+        )
+        self.assertEqual(
+            [record["logical_name"] for record in native_records],
+            [f"{name}.lib" for name in selected_names],
+        )
+
     def test_native_wheels_are_never_source_inputs(self) -> None:
         files = [
             {

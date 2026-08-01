@@ -272,8 +272,35 @@ def _available_projects(context) -> dict[str, dict]:
 
 
 def prepare_aiohttp_projects(context) -> None:
-    for name, info in _available_projects(context).items():
+    available = _available_projects(context)
+    for name, info in available.items():
         write_source_text(context, f"PCbuild/{name}.vcxproj", _render_project(name, info))
+
+    # aiohttp has changed its Cython extension layout across releases. Keep
+    # the integration metadata in sync with the projects actually generated
+    # for this source tree so modular packs never advertise obsolete modules
+    # or require libraries which the build correctly skipped.
+    selected_names = [name for name in POTENTIAL_PROJECTS if name in available]
+    LIBRARY_INTEGRATION.static_library_projects_release_x64 = [
+        f"{name}.vcxproj" for name in selected_names
+    ]
+    LIBRARY_INTEGRATION.native_static_projects = [
+        {
+            "project": f"{name}.vcxproj",
+            "guid": POTENTIAL_PROJECTS[name]["guid"],
+        }
+        for name in selected_names
+    ]
+    LIBRARY_INTEGRATION.builtin_module_registrations = [
+        {
+            "name": name,
+            "pyinit": POTENTIAL_PROJECTS[name]["pyinit"],
+        }
+        for name in selected_names
+    ]
+    LIBRARY_INTEGRATION.python_link_dependencies_release_x64 = [
+        f"{name}.lib" for name in selected_names
+    ]
 
 
 LIBRARY_INTEGRATION = LibraryIntegration(
