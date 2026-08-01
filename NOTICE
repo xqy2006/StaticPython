@@ -1,0 +1,10 @@
+StaticPython
+Copyright 2026 xqy2006
+
+The original StaticPython build, SDK, pack ABI, and integration tooling are
+licensed under the Apache License, Version 2.0.
+
+StaticPython builds and redistributes CPython and optional third-party
+components. Those components are not relicensed by this project. Their
+copyright notices and license terms must be preserved in every applicable
+source, SDK, library-pack, and executable distribution.

@@ -168,6 +168,31 @@ def _resource_store_file_info(key: str) -> tuple[str, str, int] | None:
         return None
 
 
+def _resource_store_data(key: str) -> bytes | None:
+    store = _resource_store_module()
+    if store is None or not hasattr(store, "read"):
+        return None
+    try:
+        result = store.read(_normalize_resource_key(key))
+    except Exception:
+        return None
+    if result is None:
+        return None
+    try:
+        payload, compression = result
+        payload = bytes(payload)
+        compression = int(compression)
+    except Exception:
+        return None
+    if compression == 0:
+        return payload
+    if compression == 1:
+        import zlib
+
+        return zlib.decompress(payload)
+    return None
+
+
 def _resource_store_children(key: str) -> tuple[str, ...] | None:
     store = _resource_store_module()
     if store is None:
@@ -306,6 +331,12 @@ def _decode_resource_key(key: str, resource_module=None) -> bytes | None:
     cached = _RESOURCE_DATA_CACHE.get(key)
     if cached is not None:
         return cached
+
+    if resource_module is None:
+        linked_data = _resource_store_data(key)
+        if linked_data is not None:
+            _RESOURCE_DATA_CACHE[key] = linked_data
+            return linked_data
 
     modules = (resource_module,) if resource_module is not None else _candidate_resource_modules(key)
     target = None

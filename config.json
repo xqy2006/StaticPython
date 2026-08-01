@@ -1273,6 +1273,15 @@
     ]
   },
   "profiles": {
+    "runtime-sdk": {
+      "description": "Static CPython runtime SDK for PySuture. Builds no generic python.exe and contains no optional third-party libraries.",
+      "build_type": "runtime-sdk",
+      "core_libraries": "all",
+      "third_party_libraries": [],
+      "verification": {
+        "enabled": false
+      }
+    },
     "stdlib": {
       "description": "Build only CPython and statically linked standard-library extension modules.",
       "core_libraries": "all",
