@@ -3,6 +3,18 @@ from libs import replace_text_once, simple_library, transform_source_text
 
 def patch_portalocker_sources(context):
     def patch_windows_locker(text):
+        portalocker_4_optional_win32 = (
+            "        _win32_locker: Win32Locker | None\n",
+            "                self._win32_locker = Win32Locker()\n"
+            "            except ImportError:\n",
+            "                if win32_locker is None:\n"
+            "                    raise ImportError(\n",
+        )
+        if all(anchor in text for anchor in portalocker_4_optional_win32):
+            # portalocker 4.0.0 made pywin32 an optional extra upstream.  Its
+            # exclusive-lock path now remains usable when Win32Locker cannot
+            # be created, which is the behavior this integration used to add.
+            return text
         if "class MsvcrtLocker(BaseLocker):" not in text:
             if "Win32Locker" in text and "msvcrt" in text:
                 raise RuntimeError("portalocker MsvcrtLocker lazy Win32 setup anchor not found")

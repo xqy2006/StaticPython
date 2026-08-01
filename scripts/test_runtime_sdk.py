@@ -72,6 +72,37 @@ class RuntimeSDKTests(unittest.TestCase):
         self.assertIn('version = "3.0.53"', patched)
         self.assertEqual(module._patch_prompt_toolkit_init(patched), patched)
 
+    def test_portalocker_400_optional_win32_needs_no_legacy_patch(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_portalocker_setup_test",
+            REPO_ROOT / "Lib" / "portalocker" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source = (
+            "    class MsvcrtLocker(BaseLocker):\n"
+            "        _win32_locker: Win32Locker | None\n"
+            "        def __init__(self) -> None:\n"
+            "            try:\n"
+            "                self._win32_locker = Win32Locker()\n"
+            "            except ImportError:\n"
+            "                self._win32_locker = None\n"
+            "        def lock(self, file_obj, flags):\n"
+            "            if flags:\n"
+            "                win32_locker = self._win32_locker\n"
+            "                if win32_locker is None:\n"
+            "                    raise ImportError(\n"
+            "                        'pywin32 is optional'\n"
+            "                    )\n"
+        )
+        target = self.root / "Lib" / "portalocker" / "portalocker.py"
+        target.parent.mkdir(parents=True)
+        target.write_text(source, encoding="utf-8")
+        context = SimpleNamespace(source_root=self.root, log=lambda _message: None)
+        module.patch_portalocker_sources(context)
+        self.assertEqual(target.read_text(encoding="utf-8"), source)
+
     def test_native_wheels_are_never_source_inputs(self) -> None:
         files = [
             {
