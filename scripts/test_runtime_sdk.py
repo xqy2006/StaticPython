@@ -42,6 +42,36 @@ class RuntimeSDKTests(unittest.TestCase):
         self.assertEqual(profile["core_libraries"], "all")
         self.assertEqual(profile["third_party_libraries"], [])
 
+    def test_runtime_sdk_prefers_generated_pyconfig_header(self) -> None:
+        generated = build.get_pcbuild_output_dir(self.root, "x64") / "pyconfig.h"
+        generated.parent.mkdir(parents=True)
+        generated.write_text("generated", encoding="utf-8")
+        source = self.root / "PC" / "pyconfig.h"
+        source.parent.mkdir(parents=True)
+        source.write_text("legacy", encoding="utf-8")
+        self.assertEqual(build.resolve_runtime_sdk_pyconfig_header(self.root, "x64"), generated)
+
+    def test_prompt_toolkit_3053_lazy_version_patch_is_strict(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_prompt_toolkit_setup_test",
+            REPO_ROOT / "Lib" / "prompt_toolkit" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.LIBRARY_INTEGRATION.release_version = "3.0.53"
+        source = (
+            "from importlib import metadata\n"
+            "import re\n\n"
+            "def _load_version():\n"
+            '    version = metadata.version("prompt_toolkit")\n'
+            "    assert re.fullmatch(pep440_pattern, version)\n"
+        )
+        patched = module._patch_prompt_toolkit_init(source)
+        self.assertIn("except metadata.PackageNotFoundError:", patched)
+        self.assertIn('version = "3.0.53"', patched)
+        self.assertEqual(module._patch_prompt_toolkit_init(patched), patched)
+
     def test_native_wheels_are_never_source_inputs(self) -> None:
         files = [
             {

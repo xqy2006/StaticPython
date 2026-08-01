@@ -1151,6 +1151,21 @@ def audit_runtime_sdk(
     return report
 
 
+def resolve_runtime_sdk_pyconfig_header(source_root: Path, platform: str) -> Path:
+    candidates = [
+        get_pcbuild_output_dir(source_root, platform) / "pyconfig.h",
+        source_root / "PC" / "pyconfig.h",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    rendered = "\n".join(f"- {candidate}" for candidate in candidates)
+    raise RuntimeError(
+        "runtime SDK build did not produce a usable pyconfig.h; checked:\n"
+        + rendered
+    )
+
+
 def export_runtime_sdk(
     source_root: Path,
     output_dir: Path,
@@ -1174,7 +1189,7 @@ def export_runtime_sdk(
         include_dir = staging_root / RUNTIME_SDK_INCLUDE_DIR_RELATIVE_PATH
         library_dir.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source_root / "Include", include_dir, dirs_exist_ok=True)
-        shutil.copy2(source_root / "PC" / "pyconfig.h", include_dir / "pyconfig.h")
+        shutil.copy2(resolve_runtime_sdk_pyconfig_header(source_root, platform), include_dir / "pyconfig.h")
         for record in records:
             shutil.copy2(record["source_path"], library_dir / record["logical_name"])
 
