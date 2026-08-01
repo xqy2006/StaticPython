@@ -1873,16 +1873,19 @@ def _resolve_dependency_name(requirement_name: str, alias_to_name: dict[str, str
     return None
 
 
-def _pypi_requires_dist(
+def _pypi_dependency_requirements(
     integration: LibraryIntegration,
     target_version: Version,
-) -> list[str]:
+) -> list[tuple[str, str]]:
     project_name = integration.project_name or integration.name
     effective_release_version = _effective_pypi_release_version(
         project_name,
         target_version,
         integration.release_version,
     )
+    if effective_release_version is None:
+        return []
+    integration.release_version = effective_release_version
     payload = _load_pypi_release_payload(project_name, effective_release_version)
     info = payload.get("info", {})
     raw_requirements = info.get("requires_dist") or []
@@ -1890,7 +1893,7 @@ def _pypi_requires_dist(
         return []
 
     environment = _marker_environment(target_version)
-    resolved: list[str] = []
+    resolved: list[tuple[str, str]] = []
     for raw in raw_requirements:
         try:
             requirement = Requirement(raw)
@@ -1898,19 +1901,35 @@ def _pypi_requires_dist(
             continue
         if requirement.marker is not None and not requirement.marker.evaluate(environment):
             continue
-        resolved.append(requirement.name)
-    return _unique(resolved)
+        resolved.append((requirement.name, str(requirement.specifier)))
+    return list(dict.fromkeys(resolved))
 
 
-def _integration_dependency_names(
+def _integration_dependency_requirements(
     integration: LibraryIntegration,
     target_version: Version | None,
-) -> list[str]:
-    dependencies = list(integration.dependencies)
+) -> list[tuple[str, str]]:
+    declared_constraints: dict[str, list[str]] = {}
+    constraint_names: dict[str, str] = {}
+    for name, specifier in integration.dependency_constraints.items():
+        key = _normalized_project_name(name)
+        constraint_names.setdefault(key, name)
+        if specifier:
+            values = declared_constraints.setdefault(key, [])
+            if specifier not in values:
+                values.append(specifier)
+    requirements = [
+        (name, ",".join(declared_constraints.get(_normalized_project_name(name), [])))
+        for name in integration.dependencies
+    ]
+    known_dependency_keys = {_normalized_project_name(name) for name in integration.dependencies}
+    for key, name in constraint_names.items():
+        if key not in known_dependency_keys:
+            requirements.append((name, ",".join(declared_constraints.get(key, []))))
     if integration.auto_resolve_dependencies:
         if target_version is not None and integration.source_provider == "pypi":
-            dependencies.extend(_pypi_requires_dist(integration, target_version))
-    return _unique(dependencies)
+            requirements.extend(_pypi_dependency_requirements(integration, target_version))
+    return list(dict.fromkeys(requirements))
 
 
 def _order_integrations_by_dependency(
@@ -1967,14 +1986,24 @@ def _resolve_selected_integrations(
             continue
         integration = by_name[name]
         dependencies: list[str] = []
-        for dependency_name in _integration_dependency_names(integration, target_version):
+        dependency_constraints: dict[str, list[str]] = {}
+        for dependency_name, raw_specifier in _integration_dependency_requirements(integration, target_version):
             dependency_key = _resolve_dependency_name(dependency_name, alias_to_name)
             if dependency_key is None or dependency_key not in by_name:
                 continue
             dependencies.append(dependency_key)
+            if raw_specifier:
+                values = dependency_constraints.setdefault(by_name[dependency_key].name, [])
+                if raw_specifier not in values:
+                    values.append(raw_specifier)
             if dependency_key not in resolved_selected:
                 stack.append(dependency_key)
-        dependency_graph[name] = dependencies
+        dependency_graph[name] = list(dict.fromkeys(dependencies))
+        integration.dependencies = [by_name[key].name for key in dependency_graph[name]]
+        integration.dependency_constraints = {
+            dependency_name: ",".join(specifiers)
+            for dependency_name, specifiers in dependency_constraints.items()
+        }
         resolved_selected.add(name)
 
     for name in sorted(resolved_selected):

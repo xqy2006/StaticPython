@@ -388,6 +388,33 @@ const struct _module_alias aliases[] = {
         with self.assertRaisesRegex(RuntimeError, "did not match"):
             build.select_output_pack_integrations([dependency, root], ["missing"])
 
+    def test_resolved_dependencies_are_canonicalized_for_pack_metadata(self) -> None:
+        dependency = libs.LibraryIntegration(
+            name="dependency",
+            project_name="dependency-project",
+            release_version="2.1",
+        )
+        root = libs.LibraryIntegration(
+            name="root",
+            source_provider="pypi",
+            project_name="root-project",
+            release_version="1.0",
+            auto_resolve_dependencies=True,
+        )
+        with mock.patch.object(
+            libs,
+            "_pypi_dependency_requirements",
+            return_value=[("dependency-project", ">=2")],
+        ):
+            selected = libs._resolve_selected_integrations(
+                [root, dependency],
+                ["root"],
+                target_version=libs.Version("3.13"),
+            )
+        self.assertEqual([integration.name for integration in selected], ["dependency", "root"])
+        self.assertEqual(root.dependencies, ["dependency"])
+        self.assertEqual(root.dependency_constraints, {"dependency": ">=2"})
+
     def test_default_integration_smoke_executes_real_import(self) -> None:
         integration = libs.LibraryIntegration(name="demo", top_level_import_names=["demo.api"])
         result = {
