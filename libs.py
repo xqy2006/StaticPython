@@ -1959,6 +1959,25 @@ def _order_integrations_by_dependency(
     return ordered
 
 
+def _select_compatible_pypi_release_version(
+    integration: LibraryIntegration,
+    target_version: Version,
+    constraint: SpecifierSet,
+) -> str:
+    project_name = integration.project_name or integration.name
+    for raw_version, _file_info in _iter_pypi_distribution_candidates(project_name, target_version, None):
+        try:
+            candidate = Version(raw_version)
+        except InvalidVersion:
+            continue
+        if candidate in constraint:
+            return raw_version
+    raise RuntimeError(
+        f"no buildable stable source release of {integration.name!r} satisfies {constraint} "
+        f"for target Python {target_version}"
+    )
+
+
 def _resolve_selected_integrations(
     integrations: list[LibraryIntegration],
     selected_libraries: str | list[str] | tuple[str, ...] | set[str],
@@ -1977,34 +1996,106 @@ def _resolve_selected_integrations(
         if missing:
             raise RuntimeError("unknown libraries in config: " + ", ".join(missing))
 
-    dependency_graph: dict[str, list[str]] = {}
-    resolved_selected: set[str] = set()
-    stack = list(dict.fromkeys(selected_names))
-    while stack:
-        name = stack.pop()
-        if name in resolved_selected:
-            continue
-        integration = by_name[name]
-        dependencies: list[str] = []
-        dependency_constraints: dict[str, list[str]] = {}
-        for dependency_name, raw_specifier in _integration_dependency_requirements(integration, target_version):
-            dependency_key = _resolve_dependency_name(dependency_name, alias_to_name)
-            if dependency_key is None or dependency_key not in by_name:
+    declared_dependencies = {
+        name: list(integration.dependencies)
+        for name, integration in by_name.items()
+    }
+    declared_constraints = {
+        name: dict(integration.dependency_constraints)
+        for name, integration in by_name.items()
+    }
+    release_version_pinned = {
+        name: integration.release_version is not None
+        for name, integration in by_name.items()
+    }
+
+    for _round in range(len(integrations) + 2):
+        for name, integration in by_name.items():
+            integration.dependencies = list(declared_dependencies[name])
+            integration.dependency_constraints = dict(declared_constraints[name])
+
+        dependency_graph: dict[str, list[str]] = {}
+        resolved_selected: set[str] = set()
+        stack = list(dict.fromkeys(selected_names))
+        while stack:
+            name = stack.pop()
+            if name in resolved_selected:
                 continue
-            dependencies.append(dependency_key)
-            if raw_specifier:
-                values = dependency_constraints.setdefault(by_name[dependency_key].name, [])
-                if raw_specifier not in values:
-                    values.append(raw_specifier)
-            if dependency_key not in resolved_selected:
-                stack.append(dependency_key)
-        dependency_graph[name] = list(dict.fromkeys(dependencies))
-        integration.dependencies = [by_name[key].name for key in dependency_graph[name]]
-        integration.dependency_constraints = {
-            dependency_name: ",".join(specifiers)
-            for dependency_name, specifiers in dependency_constraints.items()
-        }
-        resolved_selected.add(name)
+            integration = by_name[name]
+            dependencies: list[str] = []
+            dependency_constraints: dict[str, list[str]] = {}
+            for dependency_name, raw_specifier in _integration_dependency_requirements(integration, target_version):
+                dependency_key = _resolve_dependency_name(dependency_name, alias_to_name)
+                if dependency_key is None or dependency_key not in by_name:
+                    continue
+                dependencies.append(dependency_key)
+                if raw_specifier:
+                    values = dependency_constraints.setdefault(by_name[dependency_key].name, [])
+                    if raw_specifier not in values:
+                        values.append(raw_specifier)
+                if dependency_key not in resolved_selected:
+                    stack.append(dependency_key)
+            dependency_graph[name] = list(dict.fromkeys(dependencies))
+            integration.dependencies = [by_name[key].name for key in dependency_graph[name]]
+            integration.dependency_constraints = {
+                dependency_name: ",".join(specifiers)
+                for dependency_name, specifiers in dependency_constraints.items()
+            }
+            resolved_selected.add(name)
+
+        constraints_by_dependency: dict[str, list[tuple[str, str]]] = {}
+        for name in sorted(resolved_selected):
+            integration = by_name[name]
+            for dependency_name, raw_specifier in integration.dependency_constraints.items():
+                dependency_key = _resolve_dependency_name(dependency_name, alias_to_name)
+                if dependency_key is None or dependency_key not in resolved_selected or not raw_specifier:
+                    continue
+                constraints_by_dependency.setdefault(dependency_key, []).append(
+                    (integration.name, raw_specifier)
+                )
+
+        changed = False
+        for dependency_key, requirements in sorted(constraints_by_dependency.items()):
+            dependency = by_name[dependency_key]
+            specifiers = [raw_specifier for _owner, raw_specifier in requirements]
+            if dependency.minimum_release_version:
+                specifiers.append(f">={dependency.minimum_release_version}")
+            constraint_text = ",".join(specifiers)
+            try:
+                constraint = SpecifierSet(constraint_text)
+                current_version = (
+                    Version(dependency.release_version)
+                    if dependency.release_version is not None
+                    else None
+                )
+            except (InvalidSpecifier, InvalidVersion) as exc:
+                raise RuntimeError(
+                    f"invalid combined dependency constraint for {dependency.name!r}: {constraint_text!r}"
+                ) from exc
+            if current_version is not None and current_version in constraint:
+                continue
+            owners = ", ".join(owner for owner, _specifier in requirements)
+            if release_version_pinned[dependency_key]:
+                raise RuntimeError(
+                    f"{owners} require {dependency.name}{constraint}, "
+                    f"but pinned version {dependency.release_version} is selected"
+                )
+            if target_version is None or dependency.source_provider != "pypi":
+                raise RuntimeError(
+                    f"cannot resolve {dependency.name}{constraint} for dependencies of {owners}"
+                )
+            selected_version = _select_compatible_pypi_release_version(
+                dependency,
+                target_version,
+                constraint,
+            )
+            if dependency.release_version != selected_version:
+                dependency.release_version = selected_version
+                changed = True
+        if not changed:
+            break
+    else:
+        raise RuntimeError("dependency version resolution did not converge")
 
     for name in sorted(resolved_selected):
         integration = by_name[name]
@@ -2090,11 +2181,9 @@ def _apply_version_overrides(
         by_name[dependency_key].release_version = release_version
 
 
-def load_integrations(
+def load_integration_definitions(
     library_root: Path,
-    selected_libraries: str | list[str] | None = "all",
     *,
-    target_version: Version | None = None,
     version_overrides: dict[str, str] | None = None,
     library_catalog: object | None = None,
 ) -> list[LibraryIntegration]:
@@ -2119,6 +2208,22 @@ def load_integrations(
         by_name[integration.name.casefold()] = integration
     integrations = list(by_name.values())
     _apply_version_overrides(integrations, version_overrides)
+    return integrations
+
+
+def load_integrations(
+    library_root: Path,
+    selected_libraries: str | list[str] | None = "all",
+    *,
+    target_version: Version | None = None,
+    version_overrides: dict[str, str] | None = None,
+    library_catalog: object | None = None,
+) -> list[LibraryIntegration]:
+    integrations = load_integration_definitions(
+        library_root,
+        version_overrides=version_overrides,
+        library_catalog=library_catalog,
+    )
     return _resolve_selected_integrations(
         integrations,
         "all" if selected_libraries is None else selected_libraries,

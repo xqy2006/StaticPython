@@ -29,6 +29,7 @@ from libs import (
     collect_python_link_wholearchive,
     collect_staged_static_libraries,
     collect_static_library_projects,
+    load_integration_definitions,
     load_integrations,
     run_pre_build_hooks,
     run_pre_patch_hooks,
@@ -4668,10 +4669,8 @@ def main() -> int:
     elif profile.get("third_party_libraries") == "all":
         all_third_party_integrations = third_party_integrations
     else:
-        all_third_party_integrations = load_integrations(
+        all_third_party_integrations = load_integration_definitions(
             LIB_PATCH_ROOT,
-            "all",
-            target_version=target_version,
             version_overrides=third_party_version_overrides,
             library_catalog=third_party_library_catalog,
         )

@@ -380,6 +380,26 @@ const struct _module_alias aliases[] = {
         self.assertCountEqual(observed, expected)
         self.assertEqual(len({name.casefold() for name in observed}), len(observed))
 
+    def test_loading_cleanup_definitions_does_not_resolve_remote_dependencies(self) -> None:
+        library_root = self.root / "Lib"
+        library_root.mkdir()
+        catalog = {
+            "libraries": [
+                {
+                    "name": "demo",
+                    "overlay_entries": ["Lib/demo"],
+                    "source_provider": "pypi",
+                }
+            ]
+        }
+        with mock.patch.object(libs, "_resolve_selected_integrations") as resolver:
+            definitions = libs.load_integration_definitions(
+                library_root,
+                library_catalog=catalog,
+            )
+        resolver.assert_not_called()
+        self.assertEqual([integration.name for integration in definitions], ["demo"])
+
     def test_output_pack_filter_keeps_dependencies_linked_but_not_exported(self) -> None:
         dependency = SimpleNamespace(name="dependency")
         root = SimpleNamespace(name="root")
@@ -414,6 +434,28 @@ const struct _module_alias aliases[] = {
         self.assertEqual([integration.name for integration in selected], ["dependency", "root"])
         self.assertEqual(root.dependencies, ["dependency"])
         self.assertEqual(root.dependency_constraints, {"dependency": ">=2"})
+
+    def test_dependency_resolution_selects_latest_compatible_source_release(self) -> None:
+        dependency = libs.LibraryIntegration(
+            name="dependency",
+            source_provider="pypi",
+            project_name="dependency-project",
+        )
+        root = libs.LibraryIntegration(
+            name="root",
+            release_version="1.0",
+            dependencies=["dependency"],
+            dependency_constraints={"dependency": "<2"},
+        )
+        candidates = [("2.1", {"url": "new"}), ("1.5", {"url": "compatible"})]
+        with mock.patch.object(libs, "_iter_pypi_distribution_candidates", return_value=candidates):
+            selected = libs._resolve_selected_integrations(
+                [root, dependency],
+                ["root"],
+                target_version=libs.Version("3.13"),
+            )
+        self.assertEqual([integration.name for integration in selected], ["dependency", "root"])
+        self.assertEqual(dependency.release_version, "1.5")
 
     def test_default_integration_smoke_executes_real_import(self) -> None:
         integration = libs.LibraryIntegration(name="demo", top_level_import_names=["demo.api"])
