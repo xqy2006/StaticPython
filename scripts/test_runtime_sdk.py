@@ -61,6 +61,21 @@ class RuntimeSDKTests(unittest.TestCase):
         source.write_text("legacy", encoding="utf-8")
         self.assertEqual(build.resolve_runtime_sdk_pyconfig_header(self.root, "x64"), generated)
 
+    def test_parse_cpython_version_preserves_prerelease_suffix(self) -> None:
+        include = self.root / "Include"
+        include.mkdir()
+        (include / "patchlevel.h").write_text(
+            '#define PY_MAJOR_VERSION 3\n'
+            '#define PY_MINOR_VERSION 15\n'
+            '#define PY_MICRO_VERSION 0\n'
+            '#define PY_VERSION "3.15.0b4"\n',
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            build.parse_cpython_version(self.root),
+            ((3, 15, 0), "3.15", "3.15.0b4"),
+        )
+
     def test_runtime_frozen_module_names_come_from_runtime_tables_only(self) -> None:
         frozen = self.root / "Python" / "frozen.c"
         frozen.parent.mkdir(parents=True)
@@ -167,6 +182,156 @@ const struct _module_alias aliases[] = {
         spec.loader.exec_module(module)
         project = module._render_ujson_project(["python/ujson.c"], ["python"], "5.13.0")
         self.assertIn("UJSON_VERSION=&quot;5.13.0&quot;", project)
+
+    def test_hypothesis_native_compatibility_is_frozen_and_functional(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_hypothesis_setup_test",
+            REPO_ROOT / "Lib" / "hypothesis" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.LIBRARY_INTEGRATION.release_version, "6.164.0")
+        self.assertEqual(module.LIBRARY_INTEGRATION.license_expression, "MPL-2.0")
+
+        internal = self.root / "Lib" / "hypothesis" / "internal"
+        internal.mkdir(parents=True)
+        (internal / "floats.py").write_text(
+            "from hypothesis._native.internal.floats import (\n    float_of,\n)\n",
+            encoding="utf-8",
+        )
+        (self.root / "Lib" / "hypothesis" / "version.py").write_text(
+            "from hypothesis._native import __version__ as __version__\n",
+            encoding="utf-8",
+        )
+        context = SimpleNamespace(source_root=self.root, log=lambda _message: None)
+        module._install_hypothesis_native_compatibility(context)
+
+        floats_path = self.root / "Lib" / "hypothesis" / "_native" / "internal" / "floats.py"
+        floats_spec = importlib.util.spec_from_file_location(
+            "staticpython_hypothesis_floats_test",
+            floats_path,
+        )
+        assert floats_spec is not None and floats_spec.loader is not None
+        floats = importlib.util.module_from_spec(floats_spec)
+        floats_spec.loader.exec_module(floats)
+        negative_zero = floats.int_to_float(floats.float_to_int(-0.0), 64)
+        self.assertLess(floats.math.copysign(1.0, negative_zero), 0.0)
+        self.assertGreater(floats.next_up(0.0), 0.0)
+        self.assertEqual(floats.width_smallest_normals(32), 2.0**-126)
+
+        cathetus_path = floats_path.with_name("cathetus.py")
+        cathetus_spec = importlib.util.spec_from_file_location(
+            "staticpython_hypothesis_cathetus_test",
+            cathetus_path,
+        )
+        assert cathetus_spec is not None and cathetus_spec.loader is not None
+        cathetus = importlib.util.module_from_spec(cathetus_spec)
+        cathetus_spec.loader.exec_module(cathetus)
+        self.assertEqual(cathetus.cathetus(5.0, 4.0), 3.0)
+        self.assertTrue(cathetus.math.isnan(cathetus.cathetus(1.0, 2.0)))
+
+        before = floats_path.read_text(encoding="utf-8")
+        module._install_hypothesis_native_compatibility(context)
+        self.assertEqual(floats_path.read_text(encoding="utf-8"), before)
+
+    def test_hypothesis_native_compatibility_rejects_partial_upstream_drift(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_hypothesis_drift_test",
+            REPO_ROOT / "Lib" / "hypothesis" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        internal = self.root / "Lib" / "hypothesis" / "internal"
+        internal.mkdir(parents=True)
+        (internal / "floats.py").write_text(
+            "from hypothesis._native.internal.floats import (\n    float_of,\n)\n",
+            encoding="utf-8",
+        )
+        (self.root / "Lib" / "hypothesis" / "version.py").write_text(
+            "__version__ = 'changed'\n",
+            encoding="utf-8",
+        )
+        context = SimpleNamespace(source_root=self.root, log=lambda _message: None)
+        with self.assertRaisesRegex(RuntimeError, "anchors changed"):
+            module._install_hypothesis_native_compatibility(context)
+
+    def test_cppy_frozen_runtime_patch_is_strict_and_idempotent(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_cppy_setup_test",
+            REPO_ROOT / "Lib" / "cppy" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source = "import os\nfrom setuptools.command.build_ext import build_ext\n"
+        patched = module._patch_cppy_setuptools_import(source)
+        compile(patched, "<cppy-patch>", "exec")
+        self.assertIn("Unavailable build command placeholder", patched)
+
+        original_import = __import__
+
+        def import_without_setuptools(name, *args, **kwargs):
+            if name == "setuptools" or name.startswith("setuptools."):
+                raise ModuleNotFoundError("No module named 'setuptools'", name="setuptools")
+            return original_import(name, *args, **kwargs)
+
+        namespace = {}
+        with mock.patch("builtins.__import__", side_effect=import_without_setuptools):
+            exec(compile(patched, "<cppy-no-setuptools>", "exec"), namespace)
+        with self.assertRaisesRegex(RuntimeError, "requires setuptools"):
+            namespace["build_ext"]()
+
+        self.assertEqual(module._patch_cppy_setuptools_import(patched), patched)
+        with self.assertRaisesRegex(RuntimeError, "expected snippet"):
+            module._patch_cppy_setuptools_import("import os\n")
+
+    def test_pybind11_frozen_version_matches_header_and_is_strict(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_pybind11_setup_test",
+            REPO_ROOT / "Lib" / "pybind11" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        header = self.root / "pybind11_builtin" / "include" / "pybind11" / "detail" / "common.h"
+        header.parent.mkdir(parents=True)
+        header.write_text(
+            "#define PYBIND11_VERSION_MAJOR 3\n"
+            "#define PYBIND11_VERSION_MINOR 0\n"
+            "#define PYBIND11_VERSION_PATCH 4\n",
+            encoding="utf-8",
+        )
+        version_file = self.root / "Lib" / "pybind11" / "_version.py"
+        version_file.parent.mkdir(parents=True)
+        version_file.write_text(
+            "# This file will be replaced in the wheel with a hard-coded version.\n"
+            "from pathlib import Path\n"
+            "DIR = Path(__file__).parent.resolve()\n"
+            'input_file = DIR.parent / "include/pybind11/detail/common.h"\n'
+            'match = regex.search(input_file.read_text(encoding="utf-8"))\n',
+            encoding="utf-8",
+        )
+        context = SimpleNamespace(source_root=self.root, log=lambda _message: None)
+        module.patch_pybind11_sources(context)
+        rendered = version_file.read_text(encoding="utf-8")
+        namespace = {}
+        exec(compile(rendered, "<pybind11-version>", "exec"), namespace)
+        self.assertEqual(namespace["__version__"], "3.0.4")
+        self.assertEqual(namespace["version_info"], (3, 0, 4))
+        module.patch_pybind11_sources(context)
+        self.assertEqual(version_file.read_text(encoding="utf-8"), rendered)
+
+        header.write_text(
+            "#define PYBIND11_VERSION_MAJOR 3\n"
+            "#define PYBIND11_VERSION_MINOR 0\n"
+            "#define PYBIND11_VERSION_PATCH 5\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            module.patch_pybind11_sources(context)
 
     def test_native_wheels_are_never_source_inputs(self) -> None:
         files = [
@@ -366,6 +531,18 @@ const struct _module_alias aliases[] = {
             self.assertIn("staticpython_pack_demo_resource_", descriptor)
             self.assertNotIn('_Py_M__other', descriptor)
 
+    def test_native_only_pack_does_not_require_a_frozen_module(self) -> None:
+        (self.root / "Python" / "frozen_modules").mkdir(parents=True)
+        integration = libs.LibraryIntegration(
+            name="native_demo",
+            python_packages=["native_demo"],
+            top_level_import_names=["native_demo"],
+            builtin_module_registrations=[
+                {"name": "native_demo", "pyinit": "PyInit_native_demo"}
+            ],
+        )
+        self.assertEqual(build._integration_frozen_modules(self.root, integration), [])
+
     def test_pack_shards_partition_current_full_catalog(self) -> None:
         config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
         expected = config["profiles"]["full"]["third_party_libraries"]
@@ -473,6 +650,12 @@ const struct _module_alias aliases[] = {
         }
         self.assertEqual(catalog["soupsieve"]["dependencies"], ["bs4"])
         self.assertEqual(catalog["webruntime"]["dependencies"], ["dialite"])
+        self.assertEqual(catalog["bleach"]["release_version"], "6.4.0")
+        self.assertEqual(catalog["bleach"]["dependencies"], ["tinycss2"])
+        self.assertEqual(
+            catalog["bleach"]["dependency_constraints"],
+            {"tinycss2": ">=1.1.0"},
+        )
 
     def test_default_integration_smoke_executes_real_import(self) -> None:
         integration = libs.LibraryIntegration(name="demo", top_level_import_names=["demo.api"])

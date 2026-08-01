@@ -1469,8 +1469,16 @@ def staticpython_pack_asset_name(
 
 
 def _integration_frozen_modules(source_root: Path, integration) -> list[dict]:
-    prefixes = integration.top_level_import_names or integration.python_packages
-    prefixes = [name for name in prefixes if isinstance(name, str) and name]
+    builtin_names = {
+        registration.get("name")
+        for registration in integration.builtin_module_registrations
+        if isinstance(registration, dict) and isinstance(registration.get("name"), str)
+    }
+    prefixes = [
+        name
+        for name in integration.python_packages
+        if isinstance(name, str) and name and name not in builtin_names
+    ]
     frozen_dir = source_root / "Python" / "frozen_modules"
     records: list[dict] = []
     for header in sorted(frozen_dir.glob("*.h"), key=lambda path: path.name.casefold()):
@@ -2280,7 +2288,15 @@ def parse_cpython_version(source_root: Path) -> tuple[tuple[int, int, int], str,
     minor = define("PY_MINOR_VERSION")
     micro = define("PY_MICRO_VERSION")
     version_info = (int(major), int(minor), int(micro))
-    return version_info, f"{major}.{minor}", f"{major}.{minor}.{micro}"
+    version_match = re.search(r'^#define PY_VERSION\s+"([^"]+)"', text, flags=re.MULTILINE)
+    if not version_match:
+        raise RuntimeError(f"could not find PY_VERSION in {patchlevel}")
+    version_full, parsed_version_info = parse_version_string(version_match.group(1))
+    if parsed_version_info != version_info:
+        raise RuntimeError(
+            f"PY_VERSION {version_full!r} does not match numeric version macros {version_info}"
+        )
+    return version_info, f"{major}.{minor}", version_full
 
 
 def iter_overlay_entries(manifest: dict, integrations: list, version_info: tuple[int, int, int]) -> list[str]:

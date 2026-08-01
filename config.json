@@ -92,8 +92,22 @@
       },
       {
         "name": "bleach",
+        "release_version": "6.4.0",
+        "dependencies": [
+          "tinycss2"
+        ],
+        "dependency_constraints": {
+          "tinycss2": ">=1.1.0"
+        },
         "overlay_entries": [
           "Lib/bleach"
+        ],
+        "smoke_tests": [
+          {
+            "name": "css-sanitizer",
+            "kind": "inline",
+            "code": "from bleach.css_sanitizer import CSSSanitizer; assert CSSSanitizer().sanitize_css('color: red') == 'color: red;'"
+          }
         ],
         "source_provider": "pypi"
       },

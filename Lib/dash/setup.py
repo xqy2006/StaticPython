@@ -28,10 +28,28 @@ def patch_dash_sources(context) -> None:
 
 LIBRARY_INTEGRATION = pypi_library(
     name="dash",
+    # Dash 4.3+ makes Pydantic 2 (and therefore pydantic-core's Rust native
+    # extension) a mandatory runtime dependency. Keep the verified baseline at
+    # the newest release without that dependency until the Rust static-pack ABI
+    # is available; version-matrix jobs can still override this pin explicitly.
+    release_version="4.2.0",
     source_mapping={
         "dash": "Lib/dash",
     },
     python_packages=["dash"],
     source_ignore_patterns=["tests"],
     post_patch_hooks=[patch_dash_sources],
+    smoke_tests=[
+        {
+            "name": "construct-no-server-app",
+            "kind": "inline",
+            "code": (
+                "from dash import Dash, dcc, html; "
+                "app = Dash('staticpython_dash_smoke', server=False); "
+                "app.layout = html.Div([html.H1('StaticPython'), dcc.Graph(id='plot')]); "
+                "assert app.layout.children[0].children == 'StaticPython'; "
+                "assert app.layout.children[1].id == 'plot'"
+            ),
+        }
+    ],
 )
