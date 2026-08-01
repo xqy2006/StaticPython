@@ -457,6 +457,23 @@ const struct _module_alias aliases[] = {
         self.assertEqual([integration.name for integration in selected], ["dependency", "root"])
         self.assertEqual(dependency.release_version, "1.5")
 
+    def test_dependency_cycles_are_kept_as_stable_components(self) -> None:
+        first = libs.LibraryIntegration(name="first", dependencies=["second"])
+        second = libs.LibraryIntegration(name="second", dependencies=["first"])
+        selected_from_first = libs.select_integrations([first, second], ["first"])
+        selected_from_second = libs.select_integrations([first, second], ["second"])
+        self.assertEqual([integration.name for integration in selected_from_first], ["first", "second"])
+        self.assertEqual([integration.name for integration in selected_from_second], ["first", "second"])
+
+    def test_catalog_declares_dependencies_missing_from_upstream_metadata(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        catalog = {
+            item["name"]: item
+            for item in config["third_party_library_catalog"]["libraries"]
+        }
+        self.assertEqual(catalog["soupsieve"]["dependencies"], ["bs4"])
+        self.assertEqual(catalog["webruntime"]["dependencies"], ["dialite"])
+
     def test_default_integration_smoke_executes_real_import(self) -> None:
         integration = libs.LibraryIntegration(name="demo", top_level_import_names=["demo.api"])
         result = {

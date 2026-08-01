@@ -1937,26 +1937,94 @@ def _order_integrations_by_dependency(
     by_name: dict[str, LibraryIntegration],
     dependency_graph: dict[str, list[str]],
 ) -> list[LibraryIntegration]:
-    ordered: list[LibraryIntegration] = []
-    visiting: set[str] = set()
-    visited: set[str] = set()
+    catalog_order = {name: index for index, name in enumerate(by_name)}
+    reachable: set[str] = set()
 
-    def visit(name: str) -> None:
-        if name in visited:
+    def collect(name: str) -> None:
+        if name in reachable:
             return
-        if name in visiting:
-            cycle = " -> ".join([*visiting, name])
-            raise RuntimeError(f"dependency cycle detected: {cycle}")
-        visiting.add(name)
+        reachable.add(name)
         for dependency in dependency_graph.get(name, []):
-            visit(dependency)
-        visiting.remove(name)
-        visited.add(name)
-        ordered.append(by_name[name])
+            collect(dependency)
 
     for selected_name in selected_names:
-        visit(selected_name)
-    return ordered
+        collect(selected_name)
+
+    # Python package metadata may contain legitimate dependency cycles.  For
+    # example, Beautiful Soup depends on Soup Sieve while Soup Sieve imports
+    # Beautiful Soup at module initialization.  Pack descriptors are all
+    # registered before Python starts, so order strongly connected components
+    # dependency-first and keep members of a cycle in stable catalog order.
+    next_index = 0
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    components: list[list[str]] = []
+
+    def strong_connect(name: str) -> None:
+        nonlocal next_index
+        indices[name] = next_index
+        lowlinks[name] = next_index
+        next_index += 1
+        stack.append(name)
+        on_stack.add(name)
+
+        for dependency in dependency_graph.get(name, []):
+            if dependency not in reachable:
+                continue
+            if dependency not in indices:
+                strong_connect(dependency)
+                lowlinks[name] = min(lowlinks[name], lowlinks[dependency])
+            elif dependency in on_stack:
+                lowlinks[name] = min(lowlinks[name], indices[dependency])
+
+        if lowlinks[name] != indices[name]:
+            return
+        component: list[str] = []
+        while True:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == name:
+                break
+        component.sort(key=catalog_order.__getitem__)
+        components.append(component)
+
+    for name in sorted(reachable, key=catalog_order.__getitem__):
+        if name not in indices:
+            strong_connect(name)
+
+    component_by_name = {
+        name: component_index
+        for component_index, component in enumerate(components)
+        for name in component
+    }
+    ordered_components: list[int] = []
+    visited_components: set[int] = set()
+
+    def visit_component(component_index: int) -> None:
+        if component_index in visited_components:
+            return
+        visited_components.add(component_index)
+        dependency_components: list[int] = []
+        for name in components[component_index]:
+            for dependency in dependency_graph.get(name, []):
+                dependency_component = component_by_name[dependency]
+                if dependency_component != component_index:
+                    dependency_components.append(dependency_component)
+        for dependency_component in dict.fromkeys(dependency_components):
+            visit_component(dependency_component)
+        ordered_components.append(component_index)
+
+    for selected_name in selected_names:
+        visit_component(component_by_name[selected_name])
+
+    return [
+        by_name[name]
+        for component_index in ordered_components
+        for name in components[component_index]
+    ]
 
 
 def _select_compatible_pypi_release_version(

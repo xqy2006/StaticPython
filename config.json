@@ -1015,6 +1015,9 @@
       },
       {
         "name": "soupsieve",
+        "dependencies": [
+          "bs4"
+        ],
         "overlay_entries": [
           "Lib/soupsieve"
         ],
@@ -1183,6 +1186,9 @@
       },
       {
         "name": "webruntime",
+        "dependencies": [
+          "dialite"
+        ],
         "overlay_entries": [
           "Lib/webruntime"
         ],
