@@ -98,6 +98,10 @@ class TclTkZipfsTests(unittest.TestCase):
             release_version="9.0.4",
         )
         self.assertIn("TclZipfs_MountBuffer", source)
+        self.assertIn("StaticPython_TkinterZipfsRestrictAutoPath", source)
+        self.assertIn('Tcl_SetVar(interp, "auto_path", staticpython_tcl_library', source)
+        self.assertIn('Tcl_SetVar(interp, "tcl_pkgPath", ""', source)
+        self.assertIn('Tcl_SetVar(interp, "::tcl::tm::paths", ""', source)
         self.assertIn("//zipfs:/staticpython/tcltk-9.0.4/tcl9.0", source)
         self.assertIn("//zipfs:/staticpython/tcltk-9.0.4/tk9.0", source)
         self.assertIn("TCL_DECLARE_MUTEX", source)
@@ -182,6 +186,10 @@ Tcl_AppInit(Tcl_Interp *interp)
             patched.index("StaticPython_TkinterZipfsMount(interp)"),
             patched.index("Tcl_Init (interp)"),
         )
+        self.assertLess(
+            patched.index("Tcl_Init (interp)"),
+            patched.index("StaticPython_TkinterZipfsRestrictAutoPath(interp)"),
+        )
         self.assertEqual(tkinter_setup._patch_tkappinit_text(patched), patched)
 
     def test_optional_freeze_marker_enables_only_declared_skipped_tree(self) -> None:
@@ -233,8 +241,8 @@ Tcl_AppInit(Tcl_Interp *interp)
         self.assertRegex(tkinter_setup.TK_COMMIT, r"^[0-9a-f]{40}$")
         self.assertRegex(tkinter_setup.TCL_ARCHIVE_SHA256, r"^[0-9a-f]{64}$")
         self.assertRegex(tkinter_setup.TK_ARCHIVE_SHA256, r"^[0-9a-f]{64}$")
-        self.assertEqual(integration.license_expression, "TCL")
-        self.assertEqual(len(integration.license_files), 2)
+        self.assertEqual(integration.license_expression, "Python-2.0 AND TCL")
+        self.assertEqual(len(integration.license_files), 3)
         self.assertGreaterEqual(len(integration.smoke_tests), 2)
         self.assertNotIn("tkinter", build.load_config(REPO_ROOT / "config.json")["profiles"]["full"]["third_party_libraries"])
 

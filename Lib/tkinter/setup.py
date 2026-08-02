@@ -56,6 +56,7 @@ ZIPFS_SOURCE = "tkinter_builtin/staticpython_tkinter_zipfs.c"
 PROVENANCE_FILE = "tkinter_builtin/staticpython_tcltk_provenance.json"
 TCL_LICENSE = "licenses/tkinter/tcl-license.terms"
 TK_LICENSE = "licenses/tkinter/tk-license.terms"
+CPYTHON_LICENSE = "LICENSE"
 
 TCLTK_SYSTEM_LIBRARIES = [
     "kernel32.lib",
@@ -359,14 +360,25 @@ def _patch_tkinter_text(text: str) -> str:
 
 def _patch_tkappinit_text(text: str) -> str:
     declaration = "extern int StaticPython_TkinterZipfsMount(Tcl_Interp *interp);"
+    restrict_declaration = (
+        "extern int StaticPython_TkinterZipfsRestrictAutoPath(Tcl_Interp *interp);"
+    )
     if declaration in text:
-        if text.count("StaticPython_TkinterZipfsMount(interp)") != 1:
+        if (
+            restrict_declaration not in text
+            or text.count("StaticPython_TkinterZipfsMount(interp)") != 1
+            or text.count("StaticPython_TkinterZipfsRestrictAutoPath(interp)") != 1
+        ):
             raise RuntimeError("tkappinit.c contains an invalid StaticPython ZipFS mount patch")
         return text
     include_anchor = '#include "tkinter.h"'
     if text.count(include_anchor) != 1:
         raise RuntimeError("tkappinit.c tkinter.h include anchor did not match exactly once")
-    text = text.replace(include_anchor, include_anchor + "\n\n" + declaration, 1)
+    text = text.replace(
+        include_anchor,
+        include_anchor + "\n\n" + declaration + "\n" + restrict_declaration,
+        1,
+    )
     pattern = re.compile(r"(?m)^(\s*)if \(Tcl_Init\s*\(interp\) == TCL_ERROR\)")
     matches = list(pattern.finditer(text))
     if len(matches) != 1:
@@ -378,7 +390,22 @@ def _patch_tkappinit_text(text: str) -> str:
         f"{indent}if (StaticPython_TkinterZipfsMount(interp) == TCL_ERROR)\n"
         f"{indent}    return TCL_ERROR;\n\n"
     )
-    return text[: matches[0].start()] + mount + text[matches[0].start() :]
+    text = text[: matches[0].start()] + mount + text[matches[0].start() :]
+    init_pattern = re.compile(
+        r"(?m)^(\s*)if \(Tcl_Init\s*\(interp\) == TCL_ERROR\)\r?\n"
+        r"\1    return TCL_ERROR;"
+    )
+    init_matches = list(init_pattern.finditer(text))
+    if len(init_matches) != 1:
+        raise RuntimeError(
+            f"tkappinit.c completed Tcl_Init block expected once, found {len(init_matches)}"
+        )
+    init_match = init_matches[0]
+    restrict = (
+        f"\n\n{init_match.group(1)}if (StaticPython_TkinterZipfsRestrictAutoPath(interp) == TCL_ERROR)\n"
+        f"{init_match.group(1)}    return TCL_ERROR;"
+    )
+    return text[: init_match.end()] + restrict + text[init_match.end() :]
 
 
 def patch_tkinter_sources(context) -> None:
@@ -630,8 +657,8 @@ LIBRARY_INTEGRATION = LibraryIntegration(
             "path": ZIP_RESOURCE,
         }
     ],
-    license_expression="TCL",
-    license_files=[TCL_LICENSE, TK_LICENSE],
+    license_expression="Python-2.0 AND TCL",
+    license_files=[CPYTHON_LICENSE, TCL_LICENSE, TK_LICENSE],
     smoke_tests=[
         inline_verification_step(
             "tcl-zipfs-no-extraction",
@@ -642,6 +669,9 @@ mount = interp.getvar("staticpython_tkinter_zipfs")
 assert mount == "//zipfs:/staticpython/tcltk-9.0.4"
 assert interp.getvar("tcl_library") == mount + "/tcl9.0"
 assert interp.getvar("tk_library") == mount + "/tk9.0"
+auto_path = interp.tk.splitlist(interp.getvar("auto_path"))
+assert auto_path and all(path.startswith(mount + "/") for path in auto_path), auto_path
+assert interp.eval("::tcl::tm::path list") == ""
 assert interp.eval("file exists [file join $tcl_library encoding cp1252.enc]") == "1"
 assert "cp1252" in interp.tk.splitlist(interp.eval("encoding names"))
 """,
@@ -655,6 +685,9 @@ try:
     root.withdraw()
     mount = root.tk.getvar("staticpython_tkinter_zipfs")
     assert root.tk.getvar("tk_library") == mount + "/tk9.0"
+    auto_path = root.tk.splitlist(root.tk.getvar("auto_path"))
+    assert auto_path and all(path.startswith(mount + "/") for path in auto_path), auto_path
+    assert root.tk.eval("::tcl::tm::path list") == ""
     themes = set(ttk.Style(root).theme_names())
     assert {"clam", "vista", "xpnative"} & themes
     root.update_idletasks()

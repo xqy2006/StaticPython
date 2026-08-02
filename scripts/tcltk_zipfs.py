@@ -215,6 +215,21 @@ StaticPython_TkinterZipfsMount(Tcl_Interp *interp)
     }}
     return TCL_OK;
 }}
+
+int
+StaticPython_TkinterZipfsRestrictAutoPath(Tcl_Interp *interp)
+{{
+    if (Tcl_SetVar(interp, "auto_path", staticpython_tcl_library, TCL_GLOBAL_ONLY) == NULL) {{
+        return TCL_ERROR;
+    }}
+    if (Tcl_SetVar(interp, "tcl_pkgPath", "", TCL_GLOBAL_ONLY) == NULL) {{
+        return TCL_ERROR;
+    }}
+    if (Tcl_SetVar(interp, "::tcl::tm::paths", "", TCL_GLOBAL_ONLY) == NULL) {{
+        return TCL_ERROR;
+    }}
+    return TCL_OK;
+}}
 '''
 
 

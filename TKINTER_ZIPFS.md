@@ -11,7 +11,8 @@ The generated executable mounts that image from its own linked data before
 - Tk 9.0.4: `tcltk/tk@584f8fcf62c320d7c341e77171188cb4d79c3725`
 - Both codeload archives are checked against their committed SHA-256 digest.
 - Tcl and Tk `license.terms` files are copied into every exported pack. The
-  integration declares the SPDX `TCL` license expression.
+  CPython `LICENSE` is included for the frozen tkinter sources, and the
+  integration declares `Python-2.0 AND TCL` as its SPDX license expression.
 
 The ZipFS includes Tcl initialization, encodings and time-zone data plus Tk and
 ttk scripts, native themes, messages, images, and fonts shipped in the upstream
@@ -24,7 +25,12 @@ StaticPython removes CPython `_tkinter`'s `TCL_LIBRARY` environment and
 filesystem discovery code with strict patch anchors. `Tcl_AppInit` mounts the
 embedded archive with `TclZipfs_MountBuffer`, then sets `tcl_library` and
 `tk_library` to exact `//zipfs:/staticpython/...` paths before `Tcl_Init` and
-`Tk_Init`. The build fails if those upstream anchors drift.
+`Tk_Init`. Immediately after `Tcl_Init`, it replaces `auto_path` with the
+mounted Tcl path and clears `tcl_pkgPath`, so `TCLLIBPATH`, the executable's
+adjacent `lib`, and compiled installation paths cannot supply scripts. It also
+clears Tcl module (`.tm`) search roots derived from the executable and
+`TCL*_TM_PATH` environment variables. The build fails if those upstream
+anchors drift.
 
 `Lib/tkinter` remains excluded from the base runtime SDK. Selecting this pack
 writes `PCbuild/staticpython_optional_frozen_trees.txt`, which enables freezing
