@@ -39,6 +39,8 @@ jobs:
         run: python .\scripts\test_runtime_resources.py
       - name: Runtime SDK and pack tests
         run: python .\scripts\test_runtime_sdk.py
+      - name: Release publication tests
+        run: python .\scripts\test_publish_release_assets.py
 
   resolve-cpython-matrix:
     runs-on: windows-2022
@@ -257,41 +259,12 @@ jobs:
       - name: Publish immutable prerelease families
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
-        run: |
-          $indexPath = Join-Path $env:GITHUB_WORKSPACE "dist\runtime-index.v1.json"
-          $index = Get-Content $indexPath -Raw | ConvertFrom-Json -AsHashtable
-          $zipByName = @{}
-          Get-ChildItem "$env:GITHUB_WORKSPACE\dist" -Recurse -Filter *.zip | ForEach-Object {
-            if ($zipByName.ContainsKey($_.Name)) { throw "Duplicate downloaded asset name: $($_.Name)" }
-            $zipByName[$_.Name] = $_.FullName
-          }
-          $runtimeTag = $index.runtime_release_tag
-          gh release view $runtimeTag *> $null
-          if ($LASTEXITCODE -eq 0) { throw "Immutable release already exists: $runtimeTag" }
-
-          foreach ($family in $index.release_families.Keys) {
-            $tag = $index.release_families[$family].tag
-            gh release view $tag *> $null
-            if ($LASTEXITCODE -eq 0) { throw "Immutable release already exists: $tag" }
-            $filenames = @()
-            foreach ($packName in $index.packs.Keys) {
-              foreach ($version in $index.packs[$packName].Keys) {
-                foreach ($abi in $index.packs[$packName][$version].Keys) {
-                  $record = $index.packs[$packName][$version][$abi]
-                  if ($record.release_family -eq $family) { $filenames += $record.filename }
-                }
-              }
-            }
-            $assets = @($filenames | Sort-Object -Unique | ForEach-Object { $zipByName[$_] })
-            gh release create $tag @assets --title "StaticPython packs $family ($($env:GITHUB_SHA.Substring(0, 12)))" --prerelease --notes "Immutable verified library-pack family for commit $env:GITHUB_SHA."
-          }
-
-          $runtimeAssets = @($index.runtimes.Keys | ForEach-Object {
-            $zipByName[$index.runtimes[$_].filename]
-          })
-          $runtimeAssets += $indexPath
-          gh release create $runtimeTag @runtimeAssets --title "StaticPython runtime $($env:GITHUB_SHA.Substring(0, 12))" --prerelease --notes "Immutable verified runtime SDK and library index for commit $env:GITHUB_SHA."
+        run: >-
+          python .\scripts\publish_release_assets.py
+          --asset-root .\dist
+          --index .\dist\runtime-index.v1.json
+          --repository "${{ github.repository }}"
+          --source-commit "${{ github.sha }}"
 
       - name: Notify PySuture verification workflow
         env:
