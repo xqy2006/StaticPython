@@ -136,6 +136,8 @@ class TclTkZipfsTests(unittest.TestCase):
         self.assertIn('Tcl_SetVar(interp, "auto_path", staticpython_tcltk_auto_path', source)
         self.assertIn('Tcl_SetVar(interp, "tcl_pkgPath", ""', source)
         self.assertIn("Tcl_EvalFile(interp, staticpython_tcl_tm_file)", source)
+        self.assertIn("Tcl_SetEncodingSearchPath(encoding_path)", source)
+        self.assertIn("/tcl9.0/encoding", source)
         self.assertIn('Tcl_SetVar(interp, "::tcl::tm::paths", ""', source)
         self.assertLess(
             source.index("Tcl_EvalFile(interp, staticpython_tcl_tm_file)"),

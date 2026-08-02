@@ -801,6 +801,8 @@ assert tk_library == mount + "/tk9.0", (tk_library, mount)
 auto_path = interp.tk.splitlist(interp.getvar("auto_path"))
 assert auto_path and all(path.startswith(mount + "/") for path in auto_path), auto_path
 assert interp.eval("::tcl::tm::path list") == ""
+encoding_dirs = interp.tk.splitlist(interp.eval("encoding dirs"))
+assert encoding_dirs == (mount + "/tcl9.0/encoding",), encoding_dirs
 assert interp.eval("file exists [file join $tcl_library encoding cp1252.enc]") == "1"
 assert "cp1252" in interp.tk.splitlist(interp.eval("encoding names"))
 assert interp.eval("clock format 0 -timezone :UTC -format %Y") == "1970"
@@ -824,6 +826,8 @@ try:
     auto_path = root.tk.splitlist(root.tk.getvar("auto_path"))
     assert auto_path and all(path.startswith(mount + "/") for path in auto_path), auto_path
     assert root.tk.eval("::tcl::tm::path list") == ""
+    encoding_dirs = root.tk.splitlist(root.tk.eval("encoding dirs"))
+    assert encoding_dirs == (mount + "/tcl9.0/encoding",), encoding_dirs
     themes = set(ttk.Style(root).theme_names())
     assert {"clam", "vista", "xpnative"} & themes
     root.update_idletasks()

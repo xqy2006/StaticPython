@@ -176,6 +176,7 @@ def render_tcltk_zipfs_c(
     mount_point = f"//zipfs:/staticpython/tcltk-{release_version}"
     tcl_library = f"{mount_point}/tcl{tcl_version}"
     tcl_tm_file = f"{tcl_library}/tm.tcl"
+    tcl_encoding_dir = f"{tcl_library}/encoding"
     tk_library = f"{mount_point}/tk{tk_version}"
     tcltk_auto_path = f"{tcl_library} {tk_library} {tk_library}/ttk"
     digest = hashlib.sha256(payload).hexdigest()
@@ -194,10 +195,23 @@ static const unsigned char staticpython_tkinter_zipfs_data[] = {{
 static const char staticpython_tkinter_mount_point[] = "{mount_point}";
 static const char staticpython_tcl_library[] = "{tcl_library}";
 static const char staticpython_tcl_tm_file[] = "{tcl_tm_file}";
+static const char staticpython_tcl_encoding_dir[] = "{tcl_encoding_dir}";
 static const char staticpython_tk_library[] = "{tk_library}";
 static const char staticpython_tcltk_auto_path[] = "{tcltk_auto_path}";
 TCL_DECLARE_MUTEX(staticpython_tkinter_zipfs_mutex)
 static int staticpython_tkinter_zipfs_mounted = 0;
+
+static int
+StaticPython_TkinterZipfsRestrictEncodingPath(void)
+{{
+    Tcl_Obj *encoding_dir = Tcl_NewStringObj(staticpython_tcl_encoding_dir, -1);
+    Tcl_Obj *encoding_path = Tcl_NewListObj(1, &encoding_dir);
+    int status;
+    Tcl_IncrRefCount(encoding_path);
+    status = Tcl_SetEncodingSearchPath(encoding_path);
+    Tcl_DecrRefCount(encoding_path);
+    return status;
+}}
 
 int
 StaticPython_TkinterZipfsMount(Tcl_Interp *interp)
@@ -258,6 +272,9 @@ StaticPython_TkinterZipfsRestrictAutoPath(Tcl_Interp *interp)
     if (Tcl_SetVar(interp, "tcl_pkgPath", "", TCL_GLOBAL_ONLY) == NULL) {{
         return TCL_ERROR;
     }}
+    if (StaticPython_TkinterZipfsRestrictEncodingPath() != TCL_OK) {{
+        return TCL_ERROR;
+    }}
     if (Tcl_EvalFile(interp, staticpython_tcl_tm_file) != TCL_OK) {{
         return TCL_ERROR;
     }}
@@ -280,6 +297,9 @@ StaticPython_TkinterZipfsRestrictTkPaths(Tcl_Interp *interp)
         return TCL_ERROR;
     }}
     if (Tcl_SetVar(interp, "tcl_pkgPath", "", TCL_GLOBAL_ONLY) == NULL) {{
+        return TCL_ERROR;
+    }}
+    if (StaticPython_TkinterZipfsRestrictEncodingPath() != TCL_OK) {{
         return TCL_ERROR;
     }}
     if (Tcl_SetVar(interp, "::tcl::tm::paths", "", TCL_GLOBAL_ONLY) == NULL) {{

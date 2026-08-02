@@ -46,7 +46,9 @@ these environment variables with an external directory and require the
 effective Tcl/Tk search paths to remain entirely inside the mounted ZipFS.
 After `Tk_Init`, a second native hook restores `tcl_library`, `tk_library`, and
 `auto_path` to the exact embedded Tcl, Tk, and ttk directories so Tk's own
-initialization cannot leave broader search locations behind.
+initialization cannot leave broader search locations behind. Tcl's process-wide
+encoding search path is likewise replaced through `Tcl_SetEncodingSearchPath`
+with the single embedded `encoding` directory.
 
 `Lib/tkinter` remains excluded from the base runtime SDK. Selecting this pack
 writes `PCbuild/staticpython_optional_frozen_trees.txt`, which enables freezing
