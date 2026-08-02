@@ -26,6 +26,20 @@ def contract() -> dict:
         "libraries": {
             "demo": {
                 "project_name": "Demo-Project",
+                "versions": {
+                    "1.0": {
+                        "targets": {
+                            "3.13.14": {
+                                "status": "candidate",
+                                "source": {
+                                    "filename": "demo-1.0.tar.gz",
+                                    "url": "https://files.pythonhosted.org/demo-1.0.tar.gz",
+                                    "sha256": "a" * 64,
+                                },
+                            }
+                        }
+                    }
+                },
             }
         },
     }
@@ -62,6 +76,7 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
         self.assertEqual(record["project_name"], "Demo-Project")
         self.assertEqual(record["source_sha256"], "a" * 64)
         self.assertNotIn("/", record["slug"])
+        self.assertEqual(record["validation_reason"], "new-candidate")
 
     def test_baseline_produces_an_empty_matrix(self) -> None:
         payload = delta()
@@ -79,6 +94,20 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
                 payload[field] = [{"library": "demo"}]
                 with self.assertRaisesRegex(RuntimeError, "source drift|regression"):
                     matrix_builder.prepare_matrix(contract(), payload)
+
+    def test_pull_request_smoke_selects_latest_compatible_candidate(self) -> None:
+        payload = delta()
+        payload["new_candidates"] = []
+        result = matrix_builder.prepare_matrix(
+            contract(),
+            payload,
+            smoke_library="DEMO",
+            smoke_python_series="3.13",
+        )
+        self.assertEqual(len(result["include"]), 1)
+        self.assertEqual(result["include"][0]["version"], "1.0")
+        self.assertEqual(result["include"][0]["python_version"], "3.13.14")
+        self.assertEqual(result["include"][0]["validation_reason"], "pull-request-smoke")
 
     def test_matrix_limit_fails_instead_of_silently_skipping(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "matrix limit"):

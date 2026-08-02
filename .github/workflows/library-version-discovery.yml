@@ -168,11 +168,20 @@ jobs:
           $deltaPath = Join-Path $contractDir "library-version-delta.json"
           $matrixPath = Join-Path $contractDir "library-version-matrix.json"
           $summaryPath = Join-Path $contractDir "library-version-summary.md"
-          python .\scripts\prepare_library_contract_matrix.py `
-            --contract $contractPath `
-            --delta $deltaPath `
-            --matrix-output $matrixPath `
-            --summary-output $summaryPath
+          $matrixArgs = @(
+            ".\scripts\prepare_library_contract_matrix.py",
+            "--contract", $contractPath,
+            "--delta", $deltaPath,
+            "--matrix-output", $matrixPath,
+            "--summary-output", $summaryPath
+          )
+          if ("${{ github.event_name }}" -eq "pull_request") {
+            $matrixArgs += @(
+              "--smoke-library", "six",
+              "--smoke-python-series", "3.13"
+            )
+          }
+          python @matrixArgs
           $matrix = (Get-Content -LiteralPath $matrixPath -Raw).Trim()
           $includeCount = @((ConvertFrom-Json $matrix).include).Count
           $hasCandidates = ($includeCount -gt 0).ToString().ToLowerInvariant()
