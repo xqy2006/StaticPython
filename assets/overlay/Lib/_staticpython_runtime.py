@@ -5,6 +5,7 @@ import builtins
 import hashlib
 import io
 import importlib
+import importlib.machinery
 import importlib.util
 import locale
 import os
@@ -54,6 +55,70 @@ _INTERNAL_MODULE_PREFIXES = (
     "posixpath",
     "stat",
 )
+
+
+def _frozen_virtual_paths(module_name: str, is_package: bool) -> tuple[str, str | None]:
+    """Return stable, non-filesystem locations for a linked frozen module."""
+    relative = module_name.replace(".", "/")
+    if is_package:
+        package_dir = f"staticpython-resource:///Lib/{relative}"
+        return f"{package_dir}/__init__.py", package_dir
+    return f"staticpython-resource:///Lib/{relative}.py", None
+
+
+class _StaticPythonFrozenFileFinder:
+    """Add virtual ``__file__`` metadata to non-stdlib frozen modules.
+
+    CPython deliberately leaves ``__file__`` unset for modules supplied only
+    through ``PyImport_FrozenModules``.  StaticPython packs use that table for
+    third-party Python code, while their data lives behind the in-memory
+    resource provider.  Reusing FrozenImporter's spec and loader keeps the
+    bytecode path unchanged; only its otherwise-empty filename is populated.
+    """
+
+    @classmethod
+    def find_spec(cls, fullname, path=None, target=None):
+        frozen_importer = importlib.machinery.FrozenImporter
+        spec = frozen_importer.find_spec(fullname, path, target)
+        if spec is None:
+            return None
+
+        state = getattr(spec, "loader_state", None)
+        missing = object()
+        origname = getattr(state, "origname", missing)
+        if state is None or origname is missing or origname is not None:
+            # Named stdlib frozen modules already receive CPython's canonical
+            # source location.  Never replace it with a StaticPython URI.
+            return None
+        if getattr(state, "filename", None):
+            return None
+
+        is_package = spec.submodule_search_locations is not None
+        filename, package_dir = _frozen_virtual_paths(fullname, is_package)
+        state.filename = filename
+        if package_dir is not None and package_dir not in spec.submodule_search_locations:
+            spec.submodule_search_locations.insert(0, package_dir)
+        return spec
+
+
+def _install_frozen_file_finder() -> None:
+    finder = _StaticPythonFrozenFileFinder
+    if any(candidate is finder for candidate in sys.meta_path):
+        return
+    try:
+        index = next(
+            index
+            for index, candidate in enumerate(sys.meta_path)
+            if candidate is importlib.machinery.FrozenImporter
+        )
+    except StopIteration:
+        return
+    sys.meta_path.insert(index, finder)
+
+
+def _uninstall_frozen_file_finder() -> None:
+    finder = _StaticPythonFrozenFileFinder
+    sys.meta_path[:] = [candidate for candidate in sys.meta_path if candidate is not finder]
 
 
 def _resources_module():
@@ -1081,6 +1146,7 @@ def install() -> None:
     shutil.copy2 = _staticpython_shutil_copy2
     shutil.copytree = _staticpython_shutil_copytree
     shutil.rmtree = _staticpython_shutil_rmtree
+    _install_frozen_file_finder()
     _patch_importlib_resources()
     _patch_pkgutil()
     _INSTALLED = True
@@ -1104,6 +1170,7 @@ def uninstall() -> None:
     shutil.copy2 = _ORIGINAL_SHUTIL_COPY2
     shutil.copytree = _ORIGINAL_SHUTIL_COPYTREE
     shutil.rmtree = _ORIGINAL_SHUTIL_RMTREE
+    _uninstall_frozen_file_finder()
     if _ORIGINAL_PKGUTIL_GET_DATA is not None:
         try:
             import pkgutil

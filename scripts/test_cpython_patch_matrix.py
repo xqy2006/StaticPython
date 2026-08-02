@@ -149,7 +149,10 @@ def validate_patched_tree(source_root: Path, version_info: tuple[int, int, int],
     assert_contains(site_py, f'ver_nodot = "{version_mm}".replace(\'.\', \'\')')
     assert_contains(site_py, "def _staticpython_install_runtime_resources():")
 
-    assert_file(source_root / "Lib" / "_staticpython_runtime.py")
+    runtime_py = source_root / "Lib" / "_staticpython_runtime.py"
+    assert_file(runtime_py)
+    assert_contains(runtime_py, "class _StaticPythonFrozenFileFinder:")
+    assert_contains(runtime_py, "staticpython-resource:///Lib/")
     assert_file(source_root / "Tools" / "build" / "freeze_modules.py")
     pyrepl_overlay = source_root / "Lib" / "_pyrepl" / "__main__.py"
     if version_info >= build.PYREPL_MIN_VERSION:
