@@ -57,6 +57,30 @@ jobs:
       - name: Re-audit metadata and assemble index
         shell: pwsh
         run: |
+          @'
+          import json
+          from pathlib import Path
+          from scripts.build_release_index import discover_assets
+
+          _runtimes, packs = discover_assets(Path("dist/assets"))
+          observed = set()
+          for path, metadata in packs:
+              license_metadata = metadata.get("license", {})
+              if license_metadata.get("status") == "complete":
+                  continue
+              key = (metadata.get("name"), metadata.get("version"))
+              if key in observed:
+                  continue
+              observed.add(key)
+              print(json.dumps({
+                  "asset": path.name,
+                  "name": metadata.get("name"),
+                  "version": metadata.get("version"),
+                  "expression": license_metadata.get("expression"),
+                  "status": license_metadata.get("status"),
+                  "files": license_metadata.get("files", []),
+              }, ensure_ascii=False, sort_keys=True))
+          '@ | python -
           python .\scripts\build_release_index.py `
             --asset-root .\dist\assets `
             --output .\dist\runtime-index.v1.json `
