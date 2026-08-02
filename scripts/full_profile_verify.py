@@ -4173,6 +4173,32 @@ assert callable(fltk.run)
         """,
     ),
     (
+        'wxpython-smoke',
+        r"""
+import importlib
+import wx
+
+def assert_builtin_native(name):
+    module = importlib.import_module(name)
+    spec = getattr(module, "__spec__", None)
+    origin = getattr(spec, "origin", None)
+    file_name = getattr(module, "__file__", None)
+    assert origin == "built-in", (name, origin, file_name)
+
+assert_builtin_native("wx.siplib")
+assert_builtin_native("wx._core")
+assert wx.__version__
+assert wx.VERSION[:2] >= (4, 2)
+assert hasattr(wx, "App")
+assert hasattr(wx, "Frame")
+assert hasattr(wx, "Button")
+
+for name in ("wx.adv", "wx.html", "wx.stc", "wx.xrc"):
+    module = importlib.import_module(name)
+    assert module is not None
+        """,
+    ),
+    (
         'dearpygui-smoke',
         r"""
 import dearpygui
@@ -4381,6 +4407,13 @@ SUBPROCESS_TESTS = [
         "kind": "script",
         "name": "pyfltk-runtime",
         "script": "assets/overlay/pyfltk_runtime_test.py",
+        "timeout": 180,
+        "skip_env": "STATICPYTHON_VERIFY_SKIP_GUI",
+    },
+    {
+        "kind": "script",
+        "name": "wxpython-runtime",
+        "script": "assets/overlay/wxpython_runtime_test.py",
         "timeout": 180,
         "skip_env": "STATICPYTHON_VERIFY_SKIP_GUI",
     },
