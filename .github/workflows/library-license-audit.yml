@@ -1,0 +1,104 @@
+name: Audit Current Library Licenses
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  schedule:
+    - cron: "30 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: library-license-audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  resolve-cpython-matrix:
+    runs-on: windows-2022
+    outputs:
+      versions: ${{ steps.resolve.outputs.versions }}
+    steps:
+      - name: Resolve latest target versions
+        id: resolve
+        shell: pwsh
+        run: |
+          $tags = @(git ls-remote --tags --refs https://github.com/python/cpython.git "v3.*" |
+            ForEach-Object {
+              if ($_ -match "refs/tags/v((3)\.(11|12|13|14|15)\.([0-9]+)(?:(a|b|rc)([0-9]+))?)$") {
+                $phase = $matches[5]
+                $phaseRank = 4
+                if ($phase -eq "a") { $phaseRank = 1 }
+                elseif ($phase -eq "b") { $phaseRank = 2 }
+                elseif ($phase -eq "rc") { $phaseRank = 3 }
+                [PSCustomObject]@{
+                  Version = $matches[1]
+                  Series = "3.$($matches[3])"
+                  Major = [int]$matches[2]
+                  Minor = [int]$matches[3]
+                  Micro = [int]$matches[4]
+                  PhaseRank = $phaseRank
+                  PhaseSerial = if ($matches[6]) { [int]$matches[6] } else { 0 }
+                }
+              }
+            })
+          if (-not $tags) { throw "Could not resolve CPython tags" }
+
+          $versions = foreach ($series in @("3.11", "3.12", "3.13", "3.14", "3.15")) {
+            $latest = $tags |
+              Where-Object Series -eq $series |
+              Sort-Object Major, Minor, Micro, PhaseRank, PhaseSerial |
+              Select-Object -Last 1
+            if (-not $latest) { throw "Could not resolve CPython $series" }
+            $latest.Version
+          }
+          $versionsJson = ConvertTo-Json -InputObject @($versions) -Compress
+          "versions=$versionsJson" >> $env:GITHUB_OUTPUT
+          Write-Host "Resolved CPython versions: $($versions -join ', ')"
+
+  audit:
+    name: Audit ${{ matrix.cpython_version }} / ${{ matrix.family }}
+    runs-on: windows-2022
+    timeout-minutes: 180
+    needs: resolve-cpython-matrix
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        cpython_version: ${{ fromJSON(needs.resolve-cpython-matrix.outputs.versions) }}
+        family:
+          - a-f
+          - g-l
+          - m-r
+          - s-z
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install audit dependencies
+        run: python -m pip install "packaging>=24.2"
+      - name: Prepare exact sources and audit license metadata
+        shell: pwsh
+        run: |
+          $safeVersion = "${{ matrix.cpython_version }}" -replace '[^0-9A-Za-z_.-]', '-'
+          $workRoot = Join-Path $env:RUNNER_TEMP "staticpython-license-$safeVersion-${{ matrix.family }}"
+          python .\scripts\audit_library_licenses.py `
+            --cpython-version "${{ matrix.cpython_version }}" `
+            --family "${{ matrix.family }}" `
+            --work-root $workRoot `
+            --output ".tmp\library-license-${{ matrix.cpython_version }}-${{ matrix.family }}.json"
+      - name: Upload license audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: library-license-${{ matrix.cpython_version }}-${{ matrix.family }}
+          path: .tmp/library-license-${{ matrix.cpython_version }}-${{ matrix.family }}.json
+          if-no-files-found: warn

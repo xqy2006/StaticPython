@@ -36,6 +36,14 @@ assert _SHARD_SPEC is not None and _SHARD_SPEC.loader is not None
 build_pack_shard_config = importlib.util.module_from_spec(_SHARD_SPEC)
 _SHARD_SPEC.loader.exec_module(build_pack_shard_config)
 
+_LICENSE_AUDIT_SPEC = importlib.util.spec_from_file_location(
+    "staticpython_audit_library_licenses",
+    REPO_ROOT / "scripts" / "audit_library_licenses.py",
+)
+assert _LICENSE_AUDIT_SPEC is not None and _LICENSE_AUDIT_SPEC.loader is not None
+audit_library_licenses = importlib.util.module_from_spec(_LICENSE_AUDIT_SPEC)
+_LICENSE_AUDIT_SPEC.loader.exec_module(audit_library_licenses)
+
 
 class RuntimeSDKTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -705,6 +713,128 @@ const struct _module_alias aliases[] = {
         self.assertEqual(len(integration.license_files), 1)
         copied_license = source_root / integration.license_files[0]
         self.assertEqual(copied_license.read_text(encoding="utf-8"), "upstream license\n")
+
+    def test_license_expression_inference_prefers_specific_metadata(self) -> None:
+        cases = {
+            "Apache-2.0 AND MIT": "Apache-2.0 AND MIT",
+            "BSD-2-Clause": "BSD-2-Clause",
+            "3-Clause BSD License": "BSD-3-Clause",
+            "Apache License, Version 2.0": "Apache-2.0",
+            "MIT OR Apache-2.0": "MIT OR Apache-2.0",
+            "MPL-2.0 AND MIT": "MPL-2.0 AND MIT",
+            "Unlicense": "Unlicense",
+        }
+        for raw_license, expected in cases.items():
+            with self.subTest(raw_license=raw_license):
+                self.assertEqual(
+                    libs._infer_license_expression(
+                        {
+                            "license": raw_license,
+                            "classifiers": ["License :: OSI Approved :: BSD License"],
+                        }
+                    ),
+                    expected,
+                )
+
+    def test_ambiguous_library_licenses_are_declared_explicitly(self) -> None:
+        config = build.load_config()
+        _profile_name, profile = build.resolve_profile(config, "full")
+        catalog = build.profile_library_catalog(config, profile, "third_party_library_catalog")
+        integrations = libs.load_integration_definitions(
+            build.LIB_PATCH_ROOT,
+            library_catalog=catalog,
+        )
+        by_name = {integration.name: integration for integration in integrations}
+        expected = {
+            "Crypto": "BSD-2-Clause AND LicenseRef-Public-Domain",
+            "dateutil": "Apache-2.0 OR BSD-3-Clause",
+            "dearpygui": "MIT",
+            "dialite": "BSD-2-Clause",
+            "fsspec": "BSD-3-Clause",
+            "glfw": "Zlib",
+            "mypy_extensions": "MIT",
+            "pscript": "BSD-2-Clause",
+            "pyglet": "BSD-3-Clause",
+            "pystray": "LGPL-3.0-only",
+            "socks": "BSD-3-Clause",
+            "text_unidecode": "GPL-1.0-or-later OR Artistic-1.0-Perl",
+        }
+        for name, expression in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(by_name[name].license_expression, expression)
+
+    def test_library_license_audit_reports_all_incomplete_integrations(self) -> None:
+        source_root = self.root / "source"
+        license_path = source_root / "licenses" / "good" / "LICENSE"
+        license_path.parent.mkdir(parents=True)
+        license_path.write_text("permission notice\n", encoding="utf-8")
+        integrations = [
+            libs.LibraryIntegration(
+                name="good",
+                release_version="1.0",
+                license_expression="MIT",
+                license_files=["licenses/good/LICENSE"],
+            ),
+            libs.LibraryIntegration(name="missing-expression", release_version="2.0"),
+            libs.LibraryIntegration(
+                name="missing-file",
+                release_version="3.0",
+                license_expression="Apache-2.0",
+                license_files=["licenses/missing/LICENSE"],
+            ),
+        ]
+
+        summary = audit_library_licenses.audit_integration_licenses(
+            source_root,
+            integrations,
+        )
+
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["integration_count"], 3)
+        self.assertEqual(summary["failure_count"], 2)
+        self.assertEqual(
+            {failure["name"] for failure in summary["failures"]},
+            {"missing-expression", "missing-file"},
+        )
+        self.assertEqual(summary["integrations"][0]["status"], "passed")
+        self.assertEqual(len(summary["integrations"][0]["files"][0]["sha256"]), 64)
+
+    def test_license_collision_names_are_independent_of_source_paths(self) -> None:
+        def materialize(label: str, first_payload: bytes, second_payload: bytes) -> dict[str, bytes]:
+            upstream = self.root / f"upstream-{label}"
+            first = upstream / "a" / "LICENSE"
+            second = upstream / "z" / "LICENSE"
+            first.parent.mkdir(parents=True)
+            second.parent.mkdir(parents=True)
+            first.write_bytes(first_payload)
+            second.write_bytes(second_payload)
+            source_root = self.root / f"source-{label}"
+            source_root.mkdir()
+            context = libs.LibraryHookContext(
+                repo_root=REPO_ROOT,
+                source_root=source_root,
+                version_info=(3, 13, 0),
+                version_mm="3.13",
+                version_full="3.13.0",
+                download_cache_root=self.root / "downloads",
+                work_cache_root=self.root / "work",
+                asset_overlay_root=self.root / "assets",
+                log=lambda _message: None,
+            )
+            integration = libs.LibraryIntegration(name="demo")
+            libs._materialize_license_candidates(
+                context,
+                integration,
+                [first, second],
+            )
+            return {
+                relative: (source_root / relative).read_bytes()
+                for relative in integration.license_files
+            }
+
+        first = materialize("one", b"alpha\n", b"beta\n")
+        second = materialize("two", b"beta\n", b"alpha\n")
+        self.assertEqual(first, second)
 
     def test_native_only_pack_does_not_require_a_frozen_module(self) -> None:
         (self.root / "Python" / "frozen_modules").mkdir(parents=True)

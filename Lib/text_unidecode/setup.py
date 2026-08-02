@@ -73,6 +73,7 @@ def patch_text_unidecode_sources(context) -> None:
 LIBRARY_INTEGRATION = simple_library(
     name="text_unidecode",
     project_name="text-unidecode",
+    license_expression="GPL-1.0-or-later OR Artistic-1.0-Perl",
     overlay_entries=["Lib/text_unidecode"],
     post_patch_hooks=[patch_text_unidecode_sources],
 )

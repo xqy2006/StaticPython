@@ -1210,15 +1210,25 @@ def _infer_license_expression(info: dict) -> str | None:
     known = {
         "mit": "MIT",
         "mit license": "MIT",
+        "apache 2 0 and mit": "Apache-2.0 AND MIT",
+        "mit or apache 2 0": "MIT OR Apache-2.0",
+        "mpl 2 0 and mit": "MPL-2.0 AND MIT",
+        "bsd 2 clause": "BSD-2-Clause",
+        "bsd 2 clause license": "BSD-2-Clause",
         "bsd 3 clause": "BSD-3-Clause",
         "bsd 3 clause license": "BSD-3-Clause",
+        "3 clause bsd license": "BSD-3-Clause",
+        "apache": "Apache-2.0",
         "apache 2": "Apache-2.0",
         "apache 2 0": "Apache-2.0",
+        "apache license 2 0": "Apache-2.0",
+        "apache license version 2 0": "Apache-2.0",
         "apache software license": "Apache-2.0",
         "isc": "ISC",
         "isc license": "ISC",
         "mozilla public license 2 0": "MPL-2.0",
         "python software foundation license": "PSF-2.0",
+        "unlicense": "Unlicense",
     }
     if normalized in known:
         return known[normalized]
@@ -1229,6 +1239,8 @@ def _infer_license_expression(info: dict) -> str | None:
         "License :: OSI Approved :: ISC License (ISCL)": "ISC",
         "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)": "MPL-2.0",
         "License :: OSI Approved :: Python Software Foundation License": "PSF-2.0",
+        "License :: OSI Approved :: The Unlicense (Unlicense)": "Unlicense",
+        "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)": "LGPL-3.0-only",
     }
     expressions = {
         classifier_map[classifier]
@@ -1275,7 +1287,17 @@ def _materialize_license_candidates(
     integration: LibraryIntegration,
     candidates: list[Path],
 ) -> None:
-    unique_candidates = sorted(set(candidates), key=lambda path: path.as_posix().casefold())
+    # Source roots include runner-specific absolute paths.  Deduplicate and
+    # order by basename plus content hash so collision names remain reproducible
+    # for the same locked sources regardless of the build directory.
+    candidate_records: dict[tuple[str, str], tuple[Path, str]] = {}
+    for source in candidates:
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        candidate_records.setdefault((source.name.casefold(), digest), (source, digest))
+    unique_candidates = sorted(
+        candidate_records.values(),
+        key=lambda record: (record[0].name.casefold(), record[1]),
+    )
     if not unique_candidates:
         return
     target_root = context.source_root / "licenses" / re.sub(r"[^0-9A-Za-z_.-]+", "-", integration.name)
@@ -1284,11 +1306,10 @@ def _materialize_license_candidates(
     target_root.mkdir(parents=True, exist_ok=True)
     used_names: set[str] = set()
     integration.license_files.clear()
-    for source in unique_candidates:
+    for source, digest in unique_candidates:
         target_name = source.name
         if target_name.casefold() in used_names:
-            digest = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:8]
-            target_name = f"{digest}-{target_name}"
+            target_name = f"{digest[:12]}-{target_name}"
         used_names.add(target_name.casefold())
         target = target_root / target_name
         shutil.copy2(source, target)

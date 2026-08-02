@@ -40,6 +40,7 @@ def patch_pystray_sources(context) -> None:
 
 LIBRARY_INTEGRATION = pypi_library(
     name="pystray",
+    license_expression="LGPL-3.0-only",
     source_mapping={
         "pystray": "Lib/pystray",
     },

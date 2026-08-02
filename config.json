@@ -213,6 +213,7 @@
       },
       {
         "name": "dateutil",
+        "license_expression": "Apache-2.0 OR BSD-3-Clause",
         "overlay_entries": [
           "Lib/dateutil"
         ],
@@ -234,6 +235,7 @@
       },
       {
         "name": "dialite",
+        "license_expression": "BSD-2-Clause",
         "overlay_entries": [
           "Lib/dialite"
         ],
@@ -335,6 +337,7 @@
       },
       {
         "name": "fsspec",
+        "license_expression": "BSD-3-Clause",
         "overlay_entries": [
           "Lib/fsspec"
         ],
@@ -575,6 +578,7 @@
       },
       {
         "name": "mypy_extensions",
+        "license_expression": "MIT",
         "project_name": "mypy-extensions",
         "overlay_entries": [
           "Lib/mypy_extensions.py"
@@ -706,6 +710,7 @@
       },
       {
         "name": "pscript",
+        "license_expression": "BSD-2-Clause",
         "overlay_entries": [
           "Lib/pscript"
         ],
@@ -780,6 +785,7 @@
       },
       {
         "name": "pyglet",
+        "license_expression": "BSD-3-Clause",
         "minimum_release_version": "1.5.0",
         "overlay_entries": [
           "Lib/pyglet"

@@ -221,6 +221,7 @@ LIBRARY_INTEGRATION = github_library(
     name="dearpygui",
     repo="hoffstadt/DearPyGui",
     ref=f"v{DEARPYGUI_VERSION}",
+    license_expression="MIT",
     source_mapping={
         "dearpygui": "Lib/dearpygui",
         "src": "dearpygui_builtin/src",

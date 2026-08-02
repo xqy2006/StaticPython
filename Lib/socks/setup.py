@@ -77,6 +77,7 @@ LIBRARY_INTEGRATION = LibraryIntegration(
     name="socks",
     source_provider="pypi",
     project_name="PySocks",
+    license_expression="BSD-3-Clause",
     dependencies=[],
     auto_resolve_dependencies=True,
     overlay_entries=[],

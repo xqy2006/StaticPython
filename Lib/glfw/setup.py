@@ -933,6 +933,7 @@ LIBRARY_INTEGRATION = github_library(
     repo="glfw/glfw",
     ref=GLFW_VERSION,
     ref_kind="tags",
+    license_expression="Zlib",
     source_mapping={
         "CMakeLists.txt": f"glfw_builtin/glfw-{GLFW_VERSION}/CMakeLists.txt",
         "cmake": f"glfw_builtin/glfw-{GLFW_VERSION}/cmake",

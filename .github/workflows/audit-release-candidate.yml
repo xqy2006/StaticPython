@@ -1,9 +1,6 @@
 name: Audit existing StaticPython release candidate
 
 on:
-  push:
-    branches: [feature/runtime-pack-sdk]
-    paths: [.github/workflows/audit-release-candidate.yml]
   workflow_dispatch:
     inputs:
       run_id:

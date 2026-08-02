@@ -518,6 +518,7 @@ LIBRARY_INTEGRATION = pypi_library(
     name="Crypto",
     project_name="pycryptodome",
     release_version="3.20.0",
+    license_expression="BSD-2-Clause AND LicenseRef-Public-Domain",
     source_mapping={
         "Crypto": "Lib/Crypto",
         "src": "pycryptodome_builtin/src",
