@@ -68,6 +68,7 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           python .\scripts\test_library_version_contract.py
+          python .\scripts\test_promote_library_contract.py
           python .\scripts\test_build_library_contract_config.py
           python .\scripts\test_library_contract_build.py
           python .\scripts\test_prepare_library_contract_matrix.py
@@ -102,46 +103,103 @@ jobs:
           }
           "versions=$(ConvertTo-Json -InputObject @($versions) -Compress)" >> $env:GITHUB_OUTPUT
 
-      - name: Download last successful master contract
+      - name: Download last-known-good master catalog
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           $baselineDir = Join-Path $env:GITHUB_WORKSPACE ".tmp\baseline"
+          $contractDir = Join-Path $env:GITHUB_WORKSPACE ".tmp\contract"
           New-Item -ItemType Directory -Force $baselineDir | Out-Null
-          $apiPath = "repos/${{ github.repository }}/actions/workflows/library-version-discovery.yml/runs?branch=master&status=success&per_page=100"
+          New-Item -ItemType Directory -Force $contractDir | Out-Null
+          $apiPath = "repos/${{ github.repository }}/actions/workflows/library-version-discovery.yml/runs?branch=master&per_page=100"
           $oldPreference = $ErrorActionPreference
           $ErrorActionPreference = "Continue"
           $responseText = gh api $apiPath 2>$null
           $apiExitCode = $LASTEXITCODE
           $ErrorActionPreference = $oldPreference
           if ($apiExitCode -ne 0) {
-            Write-Host "No successful master contract run exists yet; this run will establish a non-building baseline."
+            Write-Host "No master catalog run is readable; this run will establish a discovery baseline."
             exit 0
           }
-          $runs = @(($responseText | ConvertFrom-Json).workflow_runs)
+          $runs = @(($responseText | ConvertFrom-Json).workflow_runs) |
+            Where-Object {
+              $_.status -eq "completed" -and
+              [string]$_.id -ne "${{ github.run_id }}"
+            } |
+            Sort-Object created_at -Descending
           if ($runs.Count -eq 0) {
-            Write-Host "No successful master contract run exists yet; this run will establish a non-building baseline."
+            Write-Host "No completed master catalog run exists yet; this run will establish a discovery baseline."
             exit 0
           }
-          $priorRun = $runs | Sort-Object created_at -Descending | Select-Object -First 1
-          $artifactResponse = gh api "repos/${{ github.repository }}/actions/runs/$($priorRun.id)/artifacts?per_page=100" | ConvertFrom-Json
-          $artifact = @($artifactResponse.artifacts) |
-            Where-Object { $_.name -eq "library-version-contract" -and -not $_.expired } |
-            Select-Object -First 1
-          if (-not $artifact) {
-            throw "Successful baseline run $($priorRun.id) has no live library-version-contract artifact"
+
+          foreach ($priorRun in $runs) {
+            $artifactResponse = gh api "repos/${{ github.repository }}/actions/runs/$($priorRun.id)/artifacts?per_page=100" | ConvertFrom-Json
+            $artifact = @($artifactResponse.artifacts) |
+              Where-Object { $_.name -eq "library-contract-catalog" -and -not $_.expired } |
+              Select-Object -First 1
+            if (-not $artifact) { continue }
+
+            $catalogDir = Join-Path $baselineDir "catalog"
+            if (Test-Path -LiteralPath $catalogDir) { Remove-Item -LiteralPath $catalogDir -Recurse -Force }
+            New-Item -ItemType Directory -Force $catalogDir | Out-Null
+            gh run download $priorRun.id `
+              --repo "${{ github.repository }}" `
+              --name "library-contract-catalog" `
+              --dir $catalogDir
+            if ($LASTEXITCODE -ne 0) { throw "Could not download catalog from run $($priorRun.id)" }
+            $indexPath = Join-Path $catalogDir "index.v1.json"
+            if (-not (Test-Path -LiteralPath $indexPath -PathType Leaf)) {
+              throw "Catalog from run $($priorRun.id) has no index.v1.json"
+            }
+            $index = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
+            if (-not $index.active -or [string]::IsNullOrWhiteSpace([string]$index.active.contract)) {
+              Write-Host "Catalog from run $($priorRun.id) has no active contract; checking an older run."
+              continue
+            }
+            $catalogRoot = [System.IO.Path]::GetFullPath($catalogDir).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+            $activeContract = [System.IO.Path]::GetFullPath(
+              (Join-Path $catalogDir ([string]$index.active.contract))
+            )
+            if (-not $activeContract.StartsWith($catalogRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+              throw "Catalog from run $($priorRun.id) has an active contract outside its root"
+            }
+            if (-not (Test-Path -LiteralPath $activeContract -PathType Leaf)) {
+              throw "Catalog from run $($priorRun.id) is missing active contract $($index.active.contract)"
+            }
+            Copy-Item -LiteralPath $activeContract -Destination (Join-Path $baselineDir "library-version-contract.json") -Force
+            Copy-Item -LiteralPath $catalogDir -Destination (Join-Path $contractDir "previous-catalog") -Recurse -Force
+            Write-Host "Using active last-known-good catalog from completed master run $($priorRun.id)"
+            exit 0
           }
-          gh run download $priorRun.id `
-            --repo "${{ github.repository }}" `
-            --name "library-version-contract" `
-            --dir $baselineDir
-          if ($LASTEXITCODE -ne 0) { throw "Could not download baseline contract from run $($priorRun.id)" }
-          $baselinePath = Join-Path $baselineDir "library-version-contract.json"
-          if (-not (Test-Path -LiteralPath $baselinePath -PathType Leaf)) {
-            throw "Baseline artifact from run $($priorRun.id) has no library-version-contract.json"
+
+          foreach ($priorRun in @($runs | Where-Object { $_.conclusion -eq "success" })) {
+            $artifactResponse = gh api "repos/${{ github.repository }}/actions/runs/$($priorRun.id)/artifacts?per_page=100" | ConvertFrom-Json
+            $artifact = @($artifactResponse.artifacts) |
+              Where-Object { $_.name -eq "library-version-contract" -and -not $_.expired } |
+              Select-Object -First 1
+            if (-not $artifact) { continue }
+
+            $legacyDir = Join-Path $baselineDir "legacy"
+            if (Test-Path -LiteralPath $legacyDir) { Remove-Item -LiteralPath $legacyDir -Recurse -Force }
+            New-Item -ItemType Directory -Force $legacyDir | Out-Null
+            gh run download $priorRun.id `
+              --repo "${{ github.repository }}" `
+              --name "library-version-contract" `
+              --dir $legacyDir
+            if ($LASTEXITCODE -ne 0) { throw "Could not download legacy baseline from run $($priorRun.id)" }
+            $legacyContract = Join-Path $legacyDir "library-version-contract.json"
+            if (-not (Test-Path -LiteralPath $legacyContract -PathType Leaf)) {
+              throw "Legacy artifact from run $($priorRun.id) has no library-version-contract.json"
+            }
+            Copy-Item -LiteralPath $legacyContract -Destination (Join-Path $baselineDir "library-version-contract.json") -Force
+            Copy-Item -LiteralPath $legacyContract -Destination (Join-Path $contractDir "previous-legacy-contract.json") -Force
+            Write-Host "Using legacy discovery baseline from successful master run $($priorRun.id); it is not marked as historically verified."
+            exit 0
           }
-          Write-Host "Using baseline contract from successful master run $($priorRun.id)"
+
+          Write-Host "No live master catalog or legacy baseline exists; this run will establish a discovery baseline."
 
       - name: Discover stable non-yanked PyPI versions
         shell: pwsh
@@ -316,3 +374,109 @@ jobs:
             ${{ runner.temp }}/library-contract-${{ matrix.slug }}/cpython-${{ matrix.python_version }}/PCbuild/staticpython-verify-report.json
           if-no-files-found: warn
           retention-days: 30
+
+  promote-contract-catalog:
+    needs: [discover, validate-new-candidates]
+    if: ${{ always() && needs.discover.result != 'cancelled' }}
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install promotion dependencies
+        run: python -m pip install packaging
+
+      - name: Download candidate contract
+        uses: actions/download-artifact@v4
+        with:
+          name: library-version-contract
+          path: .tmp/promotion-input
+
+      - name: Download candidate validation evidence
+        if: ${{ needs.validate-new-candidates.result != 'skipped' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: library-contract-*
+          path: .tmp/validation
+
+      - name: Evaluate promotion and materialize catalog
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $inputRoot = Join-Path $env:GITHUB_WORKSPACE ".tmp\promotion-input"
+          $outputRoot = Join-Path $env:GITHUB_WORKSPACE ".tmp\library-contract-catalog"
+          $candidatePath = Join-Path $inputRoot "library-version-contract.json"
+          $deltaPath = Join-Path $inputRoot "library-version-delta.json"
+          $matrixPath = Join-Path $inputRoot "library-version-matrix.json"
+          $previousCatalog = Join-Path $inputRoot "previous-catalog"
+          $legacyBaseline = Join-Path $inputRoot "previous-legacy-contract.json"
+          $validationRoot = Join-Path $env:GITHUB_WORKSPACE ".tmp\validation"
+          $mode = if (
+            "${{ github.event_name }}" -eq "pull_request" -or
+            "${{ github.ref_name }}" -ne "master"
+          ) { "preview" } else { "promote" }
+
+          $promotionArgs = @(
+            ".\scripts\promote_library_contract.py",
+            "--candidate-contract", $candidatePath,
+            "--delta", $deltaPath,
+            "--mode", $mode,
+            "--output", $outputRoot,
+            "--repository", "${{ github.repository }}",
+            "--run-id", "${{ github.run_id }}",
+            "--run-attempt", "${{ github.run_attempt }}",
+            "--run-url", "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "--source-commit", "${{ github.sha }}",
+            "--source-ref", "${{ github.ref }}",
+            "--event-name", "${{ github.event_name }}"
+          )
+          if (Test-Path -LiteralPath $matrixPath -PathType Leaf) {
+            $promotionArgs += @("--matrix", $matrixPath)
+          }
+          if (Test-Path -LiteralPath $validationRoot -PathType Container) {
+            $promotionArgs += @("--validation-root", $validationRoot)
+          }
+          if (Test-Path -LiteralPath (Join-Path $previousCatalog "index.v1.json") -PathType Leaf) {
+            $promotionArgs += @("--previous-catalog", $previousCatalog)
+          }
+          elseif (Test-Path -LiteralPath $legacyBaseline -PathType Leaf) {
+            $promotionArgs += @("--legacy-baseline-contract", $legacyBaseline)
+          }
+          python @promotionArgs
+
+      - name: Add promotion decision to summary
+        if: always()
+        shell: pwsh
+        run: |
+          $summary = ".tmp\library-contract-catalog\promotion-summary.md"
+          if (Test-Path -LiteralPath $summary -PathType Leaf) {
+            Get-Content -LiteralPath $summary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload candidate and last-known-good catalog
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: library-contract-catalog
+          path: .tmp/library-contract-catalog/**
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce promotion gate
+        if: always()
+        shell: pwsh
+        run: |
+          $indexPath = ".tmp\library-contract-catalog\index.v1.json"
+          if (-not (Test-Path -LiteralPath $indexPath -PathType Leaf)) {
+            throw "Promotion did not produce index.v1.json"
+          }
+          $index = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
+          if ($index.decision.gate -ne "passed") {
+            $codes = @($index.decision.blockers | ForEach-Object { $_.code }) -join ", "
+            throw "Library contract promotion is frozen: $codes"
+          }

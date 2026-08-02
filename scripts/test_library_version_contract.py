@@ -275,6 +275,50 @@ class LibraryVersionContractTests(unittest.TestCase):
         self.assertEqual(len(delta["regressions"]), 1)
         self.assertEqual(delta["regressions"][0]["version"], "0.9")
 
+    def test_candidate_regression_to_unbuildable_keeps_both_evidence_records(self) -> None:
+        previous = {
+            "contract_sha256": "previous",
+            "target_python_versions": ["3.13.14"],
+            "libraries": {
+                "demo": {
+                    "versions": {
+                        "1.0": {
+                            "targets": {
+                                "3.13.14": {
+                                    "status": "candidate",
+                                    "source": {"filename": "demo-1.0.tar.gz", "sha256": "a" * 64},
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        }
+        current = {
+            "contract_sha256": "current",
+            "target_python_versions": ["3.13.14"],
+            "libraries": {
+                "demo": {
+                    "versions": {
+                        "1.0": {
+                            "targets": {
+                                "3.13.14": {
+                                    "status": "unbuildable",
+                                    "reason": "native-only release",
+                                    "artifacts": ["demo-1.0-cp313-win_amd64.whl"],
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        }
+        delta = contract.contract_delta(current, previous)
+        self.assertEqual(len(delta["regressions"]), 1)
+        self.assertEqual(len(delta["new_unbuildable"]), 1)
+        self.assertEqual(delta["new_unbuildable"][0]["reason"], "native-only release")
+        self.assertNotIn("previous_status", delta["new_unbuildable"][0])
+
     def test_first_discovery_is_a_non_building_baseline(self) -> None:
         delta = contract.contract_delta({"contract_sha256": "current"}, None)
         self.assertTrue(delta["baseline"])
