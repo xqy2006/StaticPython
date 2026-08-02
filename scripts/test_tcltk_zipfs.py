@@ -100,7 +100,8 @@ class TclTkZipfsTests(unittest.TestCase):
             release_version="9.0.4",
         )
         self.assertIn("TclZipfs_MountBuffer", source)
-        self.assertIn("#include <sys/stat.h>", source)
+        self.assertIn("#define TCL_THREADS 1", source)
+        self.assertIn("staticpython_tkinter_zipfs_mounted", source)
         self.assertIn("StaticPython_TkinterZipfsRestrictAutoPath", source)
         self.assertIn('Tcl_SetVar(interp, "auto_path", staticpython_tcl_library', source)
         self.assertIn('Tcl_SetVar(interp, "tcl_pkgPath", ""', source)
@@ -108,6 +109,7 @@ class TclTkZipfsTests(unittest.TestCase):
         self.assertIn("//zipfs:/staticpython/tcltk-9.0.4/tcl9.0", source)
         self.assertIn("//zipfs:/staticpython/tcltk-9.0.4/tk9.0", source)
         self.assertIn("TCL_DECLARE_MUTEX", source)
+        self.assertNotIn("Tcl_FSStat", source)
         self.assertNotIn("fopen(", source)
         self.assertNotIn("CreateFile", source)
         self.assertNotIn("TCL_LIBRARY", source)
@@ -329,6 +331,22 @@ Tcl_AppInit(Tcl_Interp *interp)
                 "staticpython_tk.lib",
             ],
         )
+
+    def test_ci_preserves_verifier_evidence_when_pack_validation_fails(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "tkinter-zipfs-experiment.yml"
+        ).read_text(encoding="utf-8")
+        build_step = workflow.split(
+            "- name: Build static tkinter pack and verify against runtime SDK",
+            1,
+        )[1].split("- name: Assert no-extraction pack evidence", 1)[0]
+        self.assertIn("finally {", build_step)
+        for evidence in (
+            "staticpython-pack-verify-report.json",
+            "staticpython-pack-verify.map",
+            "staticpython-pack-verify.pdb",
+        ):
+            self.assertIn(evidence, build_step)
 
     def test_archive_manifest_uses_pinned_commit_without_git_checkout(self) -> None:
         source = self.root / "tcl-source"

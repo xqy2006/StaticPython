@@ -1142,6 +1142,13 @@ def _write_report(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
+def _failure_log_line(index: int, failure: dict) -> str:
+    return (
+        f"[pack-sdk-verify] issue {index}: "
+        + json.dumps(failure, ensure_ascii=False, sort_keys=True)
+    )
+
+
 def verify_assets(args: argparse.Namespace) -> int:
     report: dict = {
         "schema_version": 1,
@@ -1225,6 +1232,8 @@ def verify_assets(args: argparse.Namespace) -> int:
     _write_report(args.report_json.resolve(), report)
     if report["status"] != "passed":
         print(f"[pack-sdk-verify] failed with {len(report['failures'])} issue(s)", file=sys.stderr)
+        for index, failure in enumerate(report["failures"], start=1):
+            print(_failure_log_line(index, failure), file=sys.stderr)
         return 1
     print(
         f"[pack-sdk-verify] verified {len(report['packs'])} pack(s) and "

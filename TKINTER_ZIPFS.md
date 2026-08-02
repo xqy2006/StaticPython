@@ -30,7 +30,10 @@ StaticPython removes CPython `_tkinter`'s `TCL_LIBRARY` environment and
 filesystem discovery code with strict patch anchors. `Tcl_AppInit` mounts the
 embedded archive with `TclZipfs_MountBuffer`, then sets `tcl_library` and
 `tk_library` to exact `//zipfs:/staticpython/...` paths before `Tcl_Init` and
-`Tk_Init`. It also pre-seeds `auto_path` with only the mounted Tcl directory and
+`Tk_Init`. A mutex-protected process-local mount flag prevents repeated mounts;
+the code never probes the ZipFS-looking path through the host filesystem before
+the in-memory filesystem is registered. It also pre-seeds `auto_path` with only
+the mounted Tcl directory and
 clears `tcl_pkgPath` before initialization, preventing `TCLLIBPATH` from being
 adopted. Immediately after `Tcl_Init`, it restores that exact path boundary and
 clears Tcl module (`.tm`) search roots derived from the executable and

@@ -103,25 +103,29 @@ jobs:
           $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\tkinter"
           $packDist = Join-Path $resultRoot "packs"
           New-Item -ItemType Directory -Force $packDist | Out-Null
-          python .\build.py `
-            --cpython-version $env:VERIFY_CPYTHON_VERSION `
-            --download-root $packRoot `
-            --profile tkinter-experimental `
-            --pack-only `
-            --pack-runtime-sdk $runtimeSdk[0].FullName `
-            --build-workers $env:STATICPYTHON_BUILD_WORKERS `
-            --output-pack-dir $packDist `
-            --output-pack-name tkinter
           $sourceRoot = Join-Path $packRoot "cpython-$env:VERIFY_CPYTHON_VERSION"
-          Copy-Item `
-            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" `
-            -Destination "$resultRoot\staticpython-pack-verify-report.json"
-          Copy-Item `
-            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.map" `
-            -Destination "$resultRoot\staticpython-pack-verify.map"
-          Copy-Item `
-            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.pdb" `
-            -Destination "$resultRoot\staticpython-pack-verify.pdb"
+          try {
+            python .\build.py `
+              --cpython-version $env:VERIFY_CPYTHON_VERSION `
+              --download-root $packRoot `
+              --profile tkinter-experimental `
+              --pack-only `
+              --pack-runtime-sdk $runtimeSdk[0].FullName `
+              --build-workers $env:STATICPYTHON_BUILD_WORKERS `
+              --output-pack-dir $packDist `
+              --output-pack-name tkinter
+          } finally {
+            $evidence = @{
+              "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" = "$resultRoot\staticpython-pack-verify-report.json"
+              "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.map" = "$resultRoot\staticpython-pack-verify.map"
+              "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.pdb" = "$resultRoot\staticpython-pack-verify.pdb"
+            }
+            foreach ($source in $evidence.Keys) {
+              if (Test-Path -LiteralPath $source -PathType Leaf) {
+                Copy-Item -LiteralPath $source -Destination $evidence[$source]
+              }
+            }
+          }
 
       - name: Assert no-extraction pack evidence
         shell: pwsh

@@ -515,7 +515,6 @@ def patch_tkinter_project(context) -> None:
     definitions = [
         "WITH_APPINIT",
         "STATIC_BUILD",
-        "TCL_THREADS",
         "Py_NO_ENABLE_SHARED",
         "UNICODE",
         "_UNICODE",

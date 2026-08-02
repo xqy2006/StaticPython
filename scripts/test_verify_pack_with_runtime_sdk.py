@@ -268,6 +268,21 @@ Dump of file demo.exe
 """
         self.assertEqual(verifier._dependency_names(output), ["KERNEL32.dll", "USER32.dll"])
 
+    def test_failure_log_includes_structured_smoke_details(self) -> None:
+        line = verifier._failure_log_line(
+            2,
+            {
+                "integration": "tkinter",
+                "name": "tcl-zipfs-no-extraction",
+                "returncode": 1,
+                "stderr": "Tcl_Init error",
+            },
+        )
+        self.assertTrue(line.startswith("[pack-sdk-verify] issue 2: "))
+        payload = json.loads(line.split(": ", 1)[1])
+        self.assertEqual(payload["integration"], "tkinter")
+        self.assertEqual(payload["stderr"], "Tcl_Init error")
+
     def test_existing_msvc_developer_environment_is_reused(self) -> None:
         environment = {
             "INCLUDE": r"C:\VS\include",
