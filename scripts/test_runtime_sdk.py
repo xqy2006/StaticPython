@@ -515,6 +515,32 @@ struct _inittab _PyImport_Inittab[] = {
             [f"{name}.lib" for name in selected_names],
         )
 
+    def test_freezer_preserves_nested_runtime_docs_packages(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_freeze_modules_test",
+            REPO_ROOT / "assets" / "overlay" / "Tools" / "build" / "freeze_modules.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        for relative in (
+            "Lib/docs/__init__.py",
+            "Lib/botocore/__init__.py",
+            "Lib/botocore/docs/__init__.py",
+            "Lib/botocore/docs/bcdoc.py",
+            "Lib/botocore/tests/__init__.py",
+        ):
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# test\n", encoding="utf-8")
+
+        names = {item.fullname for item in module.find_python_modules(str(self.root))}
+        self.assertIn("botocore.docs", names)
+        self.assertIn("botocore.docs.bcdoc", names)
+        self.assertNotIn("docs", names)
+        self.assertNotIn("botocore.tests", names)
+
     def test_native_wheels_are_never_source_inputs(self) -> None:
         files = [
             {
