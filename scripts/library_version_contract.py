@@ -283,6 +283,8 @@ def contract_delta(current: dict, previous: dict | None) -> dict:
                     "previous_status": "candidate",
                 }
             )
+            if status == "unbuildable":
+                new_unbuildable.append(_combination_record(key, target))
         elif status == "unbuildable" and previous_target.get("status") != "unbuildable":
             new_unbuildable.append(_combination_record(key, target))
 
