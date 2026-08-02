@@ -119,6 +119,36 @@
         "source_provider": "pypi"
       },
       {
+        "name": "boto3",
+        "license_expression": "Apache-2.0",
+        "overlay_entries": [
+          "Lib/boto3"
+        ],
+        "smoke_tests": [
+          {
+            "name": "s3-client-model",
+            "kind": "inline",
+            "code": "import boto3; session = boto3.session.Session(aws_access_key_id='staticpython', aws_secret_access_key='staticpython', region_name='us-east-1'); client = session.client('s3'); assert client.meta.service_model.service_name == 's3'"
+          }
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "botocore",
+        "license_expression": "Apache-2.0",
+        "overlay_entries": [
+          "Lib/botocore"
+        ],
+        "smoke_tests": [
+          {
+            "name": "embedded-s3-service-model",
+            "kind": "inline",
+            "code": "from botocore.loaders import Loader; model = Loader().load_service_model('s3', 'service-2'); assert model['metadata']['serviceId'] == 'S3'"
+          }
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "bokeh",
         "overlay_entries": [
           "Lib/bokeh"
@@ -1000,6 +1030,21 @@
         "source_provider": "pypi"
       },
       {
+        "name": "s3transfer",
+        "license_expression": "Apache-2.0",
+        "overlay_entries": [
+          "Lib/s3transfer"
+        ],
+        "smoke_tests": [
+          {
+            "name": "transfer-config",
+            "kind": "inline",
+            "code": "from s3transfer.manager import TransferConfig; config = TransferConfig(); assert config.multipart_threshold > 0"
+          }
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "selenium",
         "overlay_entries": [
           "Lib/selenium"
@@ -1387,6 +1432,8 @@
         "black",
         "bleach",
         "blinker",
+        "boto3",
+        "botocore",
         "bokeh",
         "bs4",
         "cachetools",
@@ -1547,6 +1594,7 @@
         "rfc3986_validator",
         "rich",
         "rsa",
+        "s3transfer",
         "selenium",
         "send2trash",
         "shellingham",

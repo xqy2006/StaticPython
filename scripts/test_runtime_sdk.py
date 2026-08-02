@@ -46,6 +46,15 @@ assert _LICENSE_AUDIT_SPEC is not None and _LICENSE_AUDIT_SPEC.loader is not Non
 audit_library_licenses = importlib.util.module_from_spec(_LICENSE_AUDIT_SPEC)
 _LICENSE_AUDIT_SPEC.loader.exec_module(audit_library_licenses)
 
+_RESOURCE_SCAN_SPEC = importlib.util.spec_from_file_location(
+    "staticpython_scan_library_resources",
+    REPO_ROOT / "scripts" / "scan_library_resources.py",
+)
+assert _RESOURCE_SCAN_SPEC is not None and _RESOURCE_SCAN_SPEC.loader is not None
+scan_library_resources = importlib.util.module_from_spec(_RESOURCE_SCAN_SPEC)
+sys.modules[_RESOURCE_SCAN_SPEC.name] = scan_library_resources
+_RESOURCE_SCAN_SPEC.loader.exec_module(scan_library_resources)
+
 
 class RuntimeSDKTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1173,6 +1182,7 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertEqual(catalog["soupsieve"]["dependencies"], ["bs4"])
         self.assertEqual(catalog["webruntime"]["dependencies"], ["dialite"])
         self.assertEqual(catalog["bleach"]["release_version"], "6.4.0")
+
         self.assertEqual(catalog["bleach"]["dependencies"], ["tinycss2"])
         self.assertEqual(
             catalog["bleach"]["dependency_constraints"],
@@ -1193,6 +1203,95 @@ struct _inittab _PyImport_Inittab[] = {
             dash_module.LIBRARY_INTEGRATION.dependency_constraints,
             {"janus": ">=1.0.0"},
         )
+
+    def test_aws_sdk_catalog_declares_resource_behavior_smokes(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        catalog = {
+            item["name"]: item
+            for item in config["third_party_library_catalog"]["libraries"]
+        }
+        full = config["profiles"]["full"]["third_party_libraries"]
+        self.assertEqual(
+            [name for name in full if name in {"boto3", "botocore", "s3transfer"}],
+            ["boto3", "botocore", "s3transfer"],
+        )
+        self.assertEqual(catalog["boto3"]["license_expression"], "Apache-2.0")
+        self.assertEqual(catalog["botocore"]["license_expression"], "Apache-2.0")
+        self.assertEqual(catalog["s3transfer"]["license_expression"], "Apache-2.0")
+        self.assertEqual(
+            [test["name"] for test in catalog["boto3"]["smoke_tests"]],
+            ["s3-client-model"],
+        )
+        self.assertEqual(
+            [test["name"] for test in catalog["botocore"]["smoke_tests"]],
+            ["embedded-s3-service-model"],
+        )
+        self.assertEqual(
+            [test["name"] for test in catalog["s3transfer"]["smoke_tests"]],
+            ["transfer-config"],
+        )
+
+    def test_resource_scanner_loads_generic_catalog_integrations(self) -> None:
+        config_path = self.root / "config.json"
+        catalog = {
+            "libraries": [
+                {
+                    "name": "demo",
+                    "overlay_entries": ["Lib/demo"],
+                    "source_provider": "pypi",
+                }
+            ]
+        }
+        config_path.write_text(
+            json.dumps({
+                "default_profile": "full",
+                "third_party_library_catalog": catalog,
+                "profiles": {"full": {"third_party_libraries": ["demo"]}},
+            }),
+            encoding="utf-8",
+        )
+        with mock.patch.object(scan_library_resources, "load_integrations", return_value=[]) as load:
+            result = scan_library_resources.main([
+                "--repo-root", str(self.root),
+                "--config", str(config_path),
+                "--profile", "full",
+                "--python-version", "3.13",
+                "--libraries", "demo",
+                "--work-root", str(self.root / "work"),
+                "--json", str(self.root / "report.json"),
+                "--markdown", str(self.root / "report.md"),
+            ])
+        self.assertEqual(result, 0)
+        self.assertEqual(load.call_args.kwargs["library_catalog"], catalog)
+
+    def test_resource_scanner_recognizes_pack_roots_and_custom_pypi_hooks(self) -> None:
+        resource = self.root / "service-2.json"
+        resource.write_text("{}", encoding="utf-8")
+        integration = SimpleNamespace(
+            name="botocore",
+            project_name="botocore",
+            materialized_paths=["Lib/botocore"],
+            prepare_source_hooks=[],
+        )
+        status, reason = scan_library_resources.classify_resource(
+            resource,
+            "Lib/botocore/data/s3/2006-03-01/service-2.json",
+            "botocore/data/s3/2006-03-01/service-2.json",
+            "",
+            integration,
+        )
+        self.assertEqual(status, "handled")
+        self.assertIn("StaticPythonPackV1", reason)
+
+        source_info = scan_library_resources.pypi_source_info(SimpleNamespace(
+            name="six",
+            project_name="six",
+            materialized_paths=["Lib/six"],
+            prepare_source_hooks=[lambda _context: None],
+        ))
+        self.assertIsNotNone(source_info)
+        assert source_info is not None
+        self.assertEqual(source_info.source_mapping, {"six": "Lib/six"})
 
     def test_default_integration_smoke_executes_real_import(self) -> None:
         integration = libs.LibraryIntegration(name="demo", top_level_import_names=["demo.api"])
