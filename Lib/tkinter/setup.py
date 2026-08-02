@@ -56,6 +56,9 @@ ZIPFS_SOURCE = "tkinter_builtin/staticpython_tkinter_zipfs.c"
 PROVENANCE_FILE = "tkinter_builtin/staticpython_tcltk_provenance.json"
 TCL_LICENSE = "licenses/tkinter/tcl-license.terms"
 TK_LICENSE = "licenses/tkinter/tk-license.terms"
+ZLIB_LICENSE = "licenses/tkinter/zlib-LICENSE"
+LIBTOMMATH_LICENSE = "licenses/tkinter/libtommath-LICENSE"
+INFOZIP_LICENSE = "licenses/tkinter/minizip-LICENSE.Info-Zip"
 CPYTHON_LICENSE = "LICENSE"
 
 TCLTK_SYSTEM_LIBRARIES = [
@@ -185,6 +188,9 @@ def prepare_tcltk_sources(context) -> None:
             "library/tzdata/UTC",
             "win/makefile.vc",
             "win/gitmanifest.in",
+            "compat/zlib/LICENSE",
+            "compat/zlib/contrib/minizip/LICENSE.Info-Zip",
+            "libtommath/LICENSE",
             "license.terms",
         ),
     )
@@ -231,6 +237,15 @@ def prepare_tcltk_sources(context) -> None:
     source_path(context, TCL_LICENSE).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(tcl_source / "license.terms", source_path(context, TCL_LICENSE))
     shutil.copy2(tk_source / "license.terms", source_path(context, TK_LICENSE))
+    shutil.copy2(tcl_source / "compat/zlib/LICENSE", source_path(context, ZLIB_LICENSE))
+    shutil.copy2(
+        tcl_source / "libtommath/LICENSE",
+        source_path(context, LIBTOMMATH_LICENSE),
+    )
+    shutil.copy2(
+        tcl_source / "compat/zlib/contrib/minizip/LICENSE.Info-Zip",
+        source_path(context, INFOZIP_LICENSE),
+    )
     provenance = {
         "schema_version": 1,
         "release": TCLTK_RELEASE,
@@ -244,6 +259,23 @@ def prepare_tcltk_sources(context) -> None:
             "commit": TK_COMMIT,
             "archive_sha256": TK_ARCHIVE_SHA256,
         },
+        "bundled_components": [
+            {
+                "name": "zlib",
+                "source_path": "tcl/compat/zlib",
+                "license": "Zlib",
+            },
+            {
+                "name": "LibTomMath",
+                "source_path": "tcl/libtommath",
+                "license": "Unlicense",
+            },
+            {
+                "name": "Info-ZIP minizip code",
+                "source_path": "tcl/compat/zlib/contrib/minizip",
+                "license": "Info-ZIP",
+            },
+        ],
         "zipfs": {
             "mount": f"//zipfs:/staticpython/tcltk-{TCLTK_RELEASE}",
             "tcl_library": f"tcl{TCLTK_ABI}",
@@ -645,6 +677,9 @@ LIBRARY_INTEGRATION = LibraryIntegration(
         PROVENANCE_FILE,
         TCL_LICENSE,
         TK_LICENSE,
+        ZLIB_LICENSE,
+        LIBTOMMATH_LICENSE,
+        INFOZIP_LICENSE,
     ],
     cleanup_paths=[
         f"externals/{TCL_SOURCE_NAME}",
@@ -685,8 +720,15 @@ LIBRARY_INTEGRATION = LibraryIntegration(
             "path": ZIP_RESOURCE,
         }
     ],
-    license_expression="Python-2.0 AND TCL",
-    license_files=[CPYTHON_LICENSE, TCL_LICENSE, TK_LICENSE],
+    license_expression="Python-2.0 AND TCL AND Zlib AND Unlicense AND Info-ZIP",
+    license_files=[
+        CPYTHON_LICENSE,
+        TCL_LICENSE,
+        TK_LICENSE,
+        ZLIB_LICENSE,
+        LIBTOMMATH_LICENSE,
+        INFOZIP_LICENSE,
+    ],
     smoke_tests=[
         inline_verification_step(
             "tcl-zipfs-no-extraction",

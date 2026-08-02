@@ -12,7 +12,9 @@ The generated executable mounts that image from its own linked data before
 - Both codeload archives are checked against their committed SHA-256 digest.
 - Tcl and Tk `license.terms` files are copied into every exported pack. The
   CPython `LICENSE` is included for the frozen tkinter sources, and the
-  integration declares `Python-2.0 AND TCL` as its SPDX license expression.
+  integration also carries the licenses for Tcl's statically compiled zlib,
+  LibTomMath, and Info-ZIP minizip-derived code. Its complete SPDX expression
+  is `Python-2.0 AND TCL AND Zlib AND Unlicense AND Info-ZIP`.
 
 The ZipFS includes Tcl initialization, encodings and time-zone data plus Tk and
 ttk scripts, native themes, messages, images, and fonts shipped in the upstream

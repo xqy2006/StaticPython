@@ -243,8 +243,11 @@ Tcl_AppInit(Tcl_Interp *interp)
         self.assertRegex(tkinter_setup.TK_COMMIT, r"^[0-9a-f]{40}$")
         self.assertRegex(tkinter_setup.TCL_ARCHIVE_SHA256, r"^[0-9a-f]{64}$")
         self.assertRegex(tkinter_setup.TK_ARCHIVE_SHA256, r"^[0-9a-f]{64}$")
-        self.assertEqual(integration.license_expression, "Python-2.0 AND TCL")
-        self.assertEqual(len(integration.license_files), 3)
+        self.assertEqual(
+            integration.license_expression,
+            "Python-2.0 AND TCL AND Zlib AND Unlicense AND Info-ZIP",
+        )
+        self.assertEqual(len(integration.license_files), 6)
         self.assertGreaterEqual(len(integration.smoke_tests), 2)
         smoke_code = "\n".join(step["code"] for step in integration.smoke_tests)
         for variable in (

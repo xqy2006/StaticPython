@@ -154,8 +154,20 @@ jobs:
           foreach ($library in @("_tkinter.lib", "staticpython_tk.lib", "staticpython_tcl.lib")) {
             if ($library -notin @($metadata.libraries)) { throw "tkinter pack is missing $library" }
           }
-          if ($metadata.license.status -ne "complete" -or @($metadata.license.files).Count -ne 3) {
+          if ($metadata.license.status -ne "complete" -or @($metadata.license.files).Count -ne 6) {
             throw "Tcl/Tk license evidence is incomplete"
+          }
+          foreach ($license in @(
+            "licenses/LICENSE",
+            "licenses/tcl-license.terms",
+            "licenses/tk-license.terms",
+            "licenses/zlib-LICENSE",
+            "licenses/libtommath-LICENSE",
+            "licenses/minizip-LICENSE.Info-Zip"
+          )) {
+            if ($license -notin @($metadata.license.files)) {
+              throw "tkinter pack is missing required license evidence $license"
+            }
           }
           $report = Get-Content -LiteralPath "$resultRoot\staticpython-pack-verify-report.json" -Raw | ConvertFrom-Json
           if ($report.status -ne "passed" -or $report.pe_audit.status -ne "passed") {
