@@ -88,8 +88,6 @@ class _StaticPythonFrozenFileFinder:
         origname = getattr(state, "origname", missing)
         if state is None or origname is missing:
             return None
-        if getattr(state, "filename", None):
-            return None
         if fullname.partition(".")[0] in sys.stdlib_module_names:
             # CPython can leave the canonical filename empty while still
             # identifying a stdlib frozen module by origname.  Classify by
@@ -99,6 +97,10 @@ class _StaticPythonFrozenFileFinder:
 
         is_package = spec.submodule_search_locations is not None
         filename, package_dir = _frozen_virtual_paths(fullname, is_package)
+        # FrozenImporter derives a physical ``sys._stdlib_dir`` filename for
+        # every non-empty origname.  Linked pack modules also carry their own
+        # name as origname, so replace that synthetic external path instead of
+        # treating it as evidence that the module belongs to the stdlib.
         state.filename = filename
         if package_dir is not None and package_dir not in spec.submodule_search_locations:
             spec.submodule_search_locations.insert(0, package_dir)

@@ -410,6 +410,25 @@ class RuntimeResourceTests(unittest.TestCase):
             ["staticpython-resource:///Lib/demo_pkg"],
         )
 
+    def test_custom_frozen_module_replaces_synthetic_stdlib_filename(self) -> None:
+        spec = importlib.machinery.ModuleSpec(
+            "demo_pkg.reader",
+            importlib.machinery.FrozenImporter,
+            origin="frozen",
+        )
+        spec.loader_state = SimpleNamespace(
+            filename=r"C:\external-python\Lib\demo_pkg\reader.py",
+            origname="demo_pkg.reader",
+        )
+        with mock.patch.object(importlib.machinery.FrozenImporter, "find_spec", return_value=spec):
+            result = self.runtime._StaticPythonFrozenFileFinder.find_spec("demo_pkg.reader")
+
+        self.assertIs(result, spec)
+        self.assertEqual(
+            spec.loader_state.filename,
+            "staticpython-resource:///Lib/demo_pkg/reader.py",
+        )
+
     def test_stdlib_frozen_location_is_not_replaced(self) -> None:
         spec = importlib.machinery.ModuleSpec(
             "os",
