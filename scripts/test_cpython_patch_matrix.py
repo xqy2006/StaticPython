@@ -235,9 +235,9 @@ def validate_nest_asyncio_patch_applied(source_root: Path) -> None:
     libs.run_prepare_source_hooks(integrations, hook_context)
     libs.run_post_patch_hooks(integrations, hook_context)
 
-    target = source_root / "Lib" / "nest_asyncio.py"
+    target = source_root / "Lib" / "nest_asyncio" / "__init__.py"
     if not target.is_file():
-        raise AssertionError("Lib/nest_asyncio.py is missing from patched source tree")
+        raise AssertionError("Lib/nest_asyncio/__init__.py is missing from patched source tree")
     text = target.read_text(encoding="utf-8")
     required_snippets = [
         "asyncio.tasks._py_register_task = asyncio.tasks._c_register_task",
