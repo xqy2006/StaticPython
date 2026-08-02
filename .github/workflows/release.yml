@@ -42,7 +42,7 @@ jobs:
         run: |
           $source = gh run view $env:SOURCE_RUN_ID `
             --repo $env:GITHUB_REPOSITORY `
-            --json status,conclusion,headSha,workflowName,jobs | ConvertFrom-Json
+            --json status,conclusion,event,headSha,workflowName,jobs | ConvertFrom-Json
           if ($source.status -ne "completed" -or $source.conclusion -ne "success") {
             throw "SDK and pack source run is not successful"
           }
@@ -51,6 +51,28 @@ jobs:
           }
           if ($source.headSha -notmatch "^[0-9a-f]{40}$") {
             throw "SDK and pack source run has no exact Git commit"
+          }
+
+          $artifacts = gh api `
+            "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN_ID/artifacts?per_page=100" |
+            ConvertFrom-Json
+          $releaseArtifacts = @(
+            $artifacts.artifacts |
+              Where-Object { -not $_.expired -and $_.name -match "^staticpython-release-([0-9a-f]{40})$" }
+          )
+          if ($releaseArtifacts.Count -ne 1) {
+            throw "Source run does not have exactly one immutable aggregate artifact"
+          }
+          $artifactName = $releaseArtifacts[0].name
+          $artifactSha = ([regex]::Match($artifactName, "^staticpython-release-([0-9a-f]{40})$")).Groups[1].Value
+          $sourceCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$($source.headSha)" | ConvertFrom-Json
+          $artifactCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$artifactSha" | ConvertFrom-Json
+          if ($artifactCommit.commit.tree.sha -ne $sourceCommit.commit.tree.sha) {
+            throw "Aggregate artifact commit tree differs from the reviewed source head"
+          }
+          $artifactSourceParents = @($artifactCommit.parents | Where-Object { $_.sha -eq $source.headSha })
+          if ($artifactSha -ne $source.headSha -and $artifactSourceParents.Count -ne 1) {
+            throw "Aggregate artifact commit is neither the source head nor its PR merge commit"
           }
 
           $unitJobs = @($source.jobs | Where-Object name -eq "unit-tests")
@@ -102,18 +124,20 @@ jobs:
             throw "Full-profile validation commit changes files beyond its workflow trigger"
           }
 
-          "sha=$($source.headSha)" >> $env:GITHUB_OUTPUT
+          "source_sha=$($source.headSha)" >> $env:GITHUB_OUTPUT
+          "artifact_sha=$artifactSha" >> $env:GITHUB_OUTPUT
+          "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
           "full_sha=$($full.headSha)" >> $env:GITHUB_OUTPUT
       - name: Download verified immutable release artifact
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-          SOURCE_SHA: ${{ steps.gates.outputs.sha }}
+          ARTIFACT_NAME: ${{ steps.gates.outputs.artifact_name }}
         shell: pwsh
         run: |
           gh run download $env:SOURCE_RUN_ID `
             --repo $env:GITHUB_REPOSITORY `
-            --name "staticpython-release-$env:SOURCE_SHA" `
+            --name $env:ARTIFACT_NAME `
             --dir .\dist
       - name: Publish immutable prerelease families
         env:
@@ -122,11 +146,11 @@ jobs:
           python .\scripts\publish_release_assets.py
           --asset-root .\dist
           --repository "${{ github.repository }}"
-          --source-commit "${{ steps.gates.outputs.sha }}"
+          --source-commit "${{ steps.gates.outputs.artifact_sha }}"
       - name: Dispatch exact PySuture feature candidate verification
         env:
           DISPATCH_TOKEN: ${{ secrets.PYSUTURE_DISPATCH_TOKEN }}
-          SOURCE_SHA: ${{ steps.gates.outputs.sha }}
+          SOURCE_SHA: ${{ steps.gates.outputs.artifact_sha }}
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace($env:DISPATCH_TOKEN)) {
