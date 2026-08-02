@@ -250,7 +250,7 @@ jobs:
           python @matrixArgs
           $matrixDocument = Get-Content -LiteralPath $matrixPath -Raw | ConvertFrom-Json
           $dispatchMatrix = [ordered]@{
-            include = @($matrixDocument.include | ForEach-Object {
+            include = @($matrixDocument.batches | ForEach-Object {
               [ordered]@{
                 slug = $_.slug
                 candidate_count = $_.candidate_count
@@ -303,7 +303,7 @@ jobs:
             throw "Downloaded contract artifact has no library-version-matrix.json"
           }
           $matrix = Get-Content -LiteralPath $matrixPath -Raw | ConvertFrom-Json
-          $matches = @($matrix.include | Where-Object slug -eq $env:CONTRACT_BATCH_SLUG)
+          $matches = @($matrix.batches | Where-Object slug -eq $env:CONTRACT_BATCH_SLUG)
           if ($matches.Count -ne 1) {
             throw "Expected exactly one contract batch named $env:CONTRACT_BATCH_SLUG"
           }

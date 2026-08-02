@@ -153,14 +153,14 @@ def prepare_matrix(
             }
         )
     if not include:
-        return {"include": []}
+        return {"include": [], "batches": []}
 
     batch_count = min(len(include), limit)
     batches: list[list[dict]] = [[] for _ in range(batch_count)]
     for index, candidate in enumerate(include):
         batches[index % batch_count].append(candidate)
 
-    matrix_include: list[dict] = []
+    matrix_batches: list[dict] = []
     for index, candidates in enumerate(batches, start=1):
         candidates_json = json.dumps(
             candidates,
@@ -169,23 +169,22 @@ def prepare_matrix(
             separators=(",", ":"),
         )
         digest = hashlib.sha256(candidates_json.encode("utf-8")).hexdigest()[:12]
-        matrix_include.append(
+        matrix_batches.append(
             {
                 "slug": f"batch-{index:03d}-{digest}",
                 "candidate_count": len(candidates),
                 "candidates_json": candidates_json,
             }
         )
-    return {"include": matrix_include}
+    # Keep the candidate-level records stable for promotion and audit consumers.
+    # GitHub Actions dispatches ``batches`` so a contract with more than 256
+    # candidates never exceeds the platform's matrix-job limit.
+    return {"include": include, "batches": matrix_batches}
 
 
 def build_summary(contract: dict, delta: dict, matrix: dict) -> str:
     counts = contract.get("status_counts", {})
-    candidates = [
-        candidate
-        for batch in matrix.get("include", [])
-        for candidate in json.loads(batch.get("candidates_json", "[]"))
-    ]
+    candidates = matrix.get("include", [])
     lines = [
         "## StaticPython library version contract",
         "",
@@ -194,7 +193,7 @@ def build_summary(contract: dict, delta: dict, matrix: dict) -> str:
         f"- Candidate combinations recorded: `{counts.get('candidate', 0)}`",
         f"- Configured non-PyPI combinations: `{counts.get('configured', 0)}`",
         f"- Evidence-backed unbuildable combinations: `{counts.get('unbuildable', 0)}`",
-        f"- Matrix batch jobs: `{len(matrix.get('include', []))}`",
+        f"- Matrix batch jobs: `{len(matrix.get('batches', []))}`",
         f"- New candidate builds: `{sum(1 for item in candidates if item.get('validation_reason') == 'new-candidate')}`",
         f"- Pull-request smoke builds: `{sum(1 for item in candidates if item.get('validation_reason') == 'pull-request-smoke')}`",
         f"- New unbuildable records: `{len(delta.get('new_unbuildable', []))}`",
@@ -242,13 +241,10 @@ def main() -> int:
         encoding="utf-8",
         newline="\n",
     )
-    candidate_count = sum(
-        batch.get("candidate_count", 0)
-        for batch in matrix["include"]
-    )
+    candidate_count = len(matrix["include"])
     print(
         f"[library-contract] prepared {candidate_count} candidate build(s) "
-        f"in {len(matrix['include'])} matrix batch job(s)"
+        f"in {len(matrix['batches'])} matrix batch job(s)"
     )
     return 0
 
