@@ -1,0 +1,318 @@
+name: Daily library version contract
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/library-version-discovery.yml"
+      - "Lib/**"
+      - "scripts/*contract*.py"
+      - "scripts/*library*history*.py"
+      - "scripts/verify_pack_with_runtime_sdk.py"
+      - "scripts/test_verify_pack_with_runtime_sdk.py"
+      - "build.py"
+      - "config.json"
+      - "libs.py"
+      - "manifest.json"
+      - "verify.py"
+  pull_request:
+    paths:
+      - ".github/workflows/library-version-discovery.yml"
+      - "Lib/**"
+      - "scripts/*contract*.py"
+      - "scripts/*library*history*.py"
+      - "scripts/verify_pack_with_runtime_sdk.py"
+      - "scripts/test_verify_pack_with_runtime_sdk.py"
+      - "build.py"
+      - "config.json"
+      - "libs.py"
+      - "manifest.json"
+      - "verify.py"
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: staticpython-library-contract-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  STATICPYTHON_CONTRACT_BUILD_WORKERS: "2"
+
+jobs:
+  discover:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      has_candidates: ${{ steps.matrix.outputs.has_candidates }}
+      contract_sha256: ${{ steps.matrix.outputs.contract_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install discovery dependencies
+        run: python -m pip install packaging
+
+      - name: Run contract unit tests
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\test_library_version_contract.py
+          python .\scripts\test_build_library_contract_config.py
+          python .\scripts\test_library_contract_build.py
+          python .\scripts\test_prepare_library_contract_matrix.py
+          python .\scripts\test_prepare_library_history_batches.py
+          python .\scripts\test_verify_pack_with_runtime_sdk.py
+
+      - name: Resolve latest CPython 3.11 through 3.15 tags
+        id: resolve
+        shell: pwsh
+        run: |
+          $tags = @(git ls-remote --tags --refs https://github.com/python/cpython.git "v3.*" |
+            ForEach-Object {
+              if ($_ -match "refs/tags/v((3)\.(11|12|13|14|15)\.([0-9]+)(?:(a|b|rc)([0-9]+))?)$") {
+                $phaseRank = switch ($matches[5]) { "a" { 1 } "b" { 2 } "rc" { 3 } default { 4 } }
+                [PSCustomObject]@{
+                  Version = $matches[1]
+                  Series = "3.$($matches[3])"
+                  Major = [int]$matches[2]
+                  Minor = [int]$matches[3]
+                  Micro = [int]$matches[4]
+                  PhaseRank = $phaseRank
+                  PhaseSerial = if ($matches[6]) { [int]$matches[6] } else { 0 }
+                }
+              }
+            })
+          if (-not $tags) { throw "Could not resolve CPython tags" }
+          $versions = foreach ($series in @("3.11", "3.12", "3.13", "3.14", "3.15")) {
+            $latest = $tags | Where-Object Series -eq $series |
+              Sort-Object Major, Minor, Micro, PhaseRank, PhaseSerial | Select-Object -Last 1
+            if (-not $latest) { throw "Could not resolve CPython $series" }
+            $latest.Version
+          }
+          "versions=$(ConvertTo-Json -InputObject @($versions) -Compress)" >> $env:GITHUB_OUTPUT
+
+      - name: Download last successful master contract
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $baselineDir = Join-Path $env:GITHUB_WORKSPACE ".tmp\baseline"
+          New-Item -ItemType Directory -Force $baselineDir | Out-Null
+          $apiPath = "repos/${{ github.repository }}/actions/workflows/library-version-discovery.yml/runs?branch=master&status=success&per_page=100"
+          $oldPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          $responseText = gh api $apiPath 2>$null
+          $apiExitCode = $LASTEXITCODE
+          $ErrorActionPreference = $oldPreference
+          if ($apiExitCode -ne 0) {
+            Write-Host "No successful master contract run exists yet; this run will establish a non-building baseline."
+            exit 0
+          }
+          $runs = @(($responseText | ConvertFrom-Json).workflow_runs)
+          if ($runs.Count -eq 0) {
+            Write-Host "No successful master contract run exists yet; this run will establish a non-building baseline."
+            exit 0
+          }
+          $priorRun = $runs | Sort-Object created_at -Descending | Select-Object -First 1
+          $artifactResponse = gh api "repos/${{ github.repository }}/actions/runs/$($priorRun.id)/artifacts?per_page=100" | ConvertFrom-Json
+          $artifact = @($artifactResponse.artifacts) |
+            Where-Object { $_.name -eq "library-version-contract" -and -not $_.expired } |
+            Select-Object -First 1
+          if (-not $artifact) {
+            throw "Successful baseline run $($priorRun.id) has no live library-version-contract artifact"
+          }
+          gh run download $priorRun.id `
+            --repo "${{ github.repository }}" `
+            --name "library-version-contract" `
+            --dir $baselineDir
+          if ($LASTEXITCODE -ne 0) { throw "Could not download baseline contract from run $($priorRun.id)" }
+          $baselinePath = Join-Path $baselineDir "library-version-contract.json"
+          if (-not (Test-Path -LiteralPath $baselinePath -PathType Leaf)) {
+            throw "Baseline artifact from run $($priorRun.id) has no library-version-contract.json"
+          }
+          Write-Host "Using baseline contract from successful master run $($priorRun.id)"
+
+      - name: Discover stable non-yanked PyPI versions
+        shell: pwsh
+        env:
+          CPYTHON_VERSIONS_JSON: ${{ steps.resolve.outputs.versions }}
+        run: |
+          $contractDir = Join-Path $env:GITHUB_WORKSPACE ".tmp\contract"
+          $contractPath = Join-Path $contractDir "library-version-contract.json"
+          $deltaPath = Join-Path $contractDir "library-version-delta.json"
+          $baselinePath = Join-Path $env:GITHUB_WORKSPACE ".tmp\baseline\library-version-contract.json"
+          New-Item -ItemType Directory -Force $contractDir | Out-Null
+          $contractArgs = @(
+            ".\scripts\library_version_contract.py",
+            "--output", $contractPath,
+            "--delta-output", $deltaPath
+          )
+          @($env:CPYTHON_VERSIONS_JSON | ConvertFrom-Json) | ForEach-Object {
+            $contractArgs += @("--python-version", $_)
+          }
+          if (Test-Path -LiteralPath $baselinePath -PathType Leaf) {
+            $contractArgs += @("--previous", $baselinePath)
+          }
+          python @contractArgs
+
+      - name: Validate delta and prepare incremental build matrix
+        id: matrix
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $contractDir = Join-Path $env:GITHUB_WORKSPACE ".tmp\contract"
+          $contractPath = Join-Path $contractDir "library-version-contract.json"
+          $deltaPath = Join-Path $contractDir "library-version-delta.json"
+          $matrixPath = Join-Path $contractDir "library-version-matrix.json"
+          $summaryPath = Join-Path $contractDir "library-version-summary.md"
+          $matrixArgs = @(
+            ".\scripts\prepare_library_contract_matrix.py",
+            "--contract", $contractPath,
+            "--delta", $deltaPath,
+            "--matrix-output", $matrixPath,
+            "--summary-output", $summaryPath
+          )
+          if ("${{ github.event_name }}" -eq "pull_request") {
+            $matrixArgs += @(
+              "--smoke-library", "six",
+              "--smoke-python-series", "3.13"
+            )
+          }
+          python @matrixArgs
+          $matrix = (Get-Content -LiteralPath $matrixPath -Raw).Trim()
+          $includeCount = @((ConvertFrom-Json $matrix).include).Count
+          $hasCandidates = ($includeCount -gt 0).ToString().ToLowerInvariant()
+          $contract = Get-Content -LiteralPath $contractPath -Raw | ConvertFrom-Json
+          "matrix=$matrix" >> $env:GITHUB_OUTPUT
+          "has_candidates=$hasCandidates" >> $env:GITHUB_OUTPUT
+          "contract_sha256=$($contract.contract_sha256)" >> $env:GITHUB_OUTPUT
+          Get-Content -LiteralPath $summaryPath | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload immutable contract and delta
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: library-version-contract
+          path: .tmp/contract/*
+          if-no-files-found: warn
+          retention-days: 90
+
+  validate-new-candidates:
+    needs: discover
+    if: ${{ needs.discover.outputs.has_candidates == 'true' }}
+    runs-on: windows-2022
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    env:
+      CONTRACT_LIBRARY: ${{ matrix.library }}
+      CONTRACT_PROJECT_NAME: ${{ matrix.project_name }}
+      CONTRACT_VERSION: ${{ matrix.version }}
+      CONTRACT_PYTHON_VERSION: ${{ matrix.python_version }}
+      CONTRACT_SOURCE_FILENAME: ${{ matrix.source_filename }}
+      CONTRACT_SOURCE_URL: ${{ matrix.source_url }}
+      CONTRACT_SOURCE_SHA256: ${{ matrix.source_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Define isolated contract paths
+        shell: pwsh
+        run: |
+          "CONTRACT_BUILD_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-contract-${{ matrix.slug }}')" >> $env:GITHUB_ENV
+          "CONTRACT_RESULT_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-contract-result-${{ matrix.slug }}')" >> $env:GITHUB_ENV
+          "CONTRACT_SOURCE_CACHE=$(Join-Path $env:GITHUB_WORKSPACE 'downloads')" >> $env:GITHUB_ENV
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install packaging
+          choco install strawberryperl -y --no-progress
+
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Generate one-library historical build profile
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:CONTRACT_RESULT_ROOT | Out-Null
+          python .\scripts\build_library_contract_config.py `
+            --library $env:CONTRACT_LIBRARY `
+            --version $env:CONTRACT_VERSION `
+            --output-config "$env:CONTRACT_RESULT_ROOT\config.json"
+
+      - name: Stage exact locked PyPI source
+        shell: pwsh
+        run: |
+          python .\scripts\library_contract_build.py stage `
+            --download-root $env:CONTRACT_SOURCE_CACHE `
+            --project-name $env:CONTRACT_PROJECT_NAME `
+            --version $env:CONTRACT_VERSION `
+            --filename $env:CONTRACT_SOURCE_FILENAME `
+            --url $env:CONTRACT_SOURCE_URL `
+            --sha256 $env:CONTRACT_SOURCE_SHA256
+
+      - name: Build, link and run behavior smoke tests
+        shell: pwsh
+        run: |
+          $packDir = "$env:CONTRACT_RESULT_ROOT\packs"
+          New-Item -ItemType Directory -Force $packDir | Out-Null
+          python .\build.py `
+            --cpython-version $env:CONTRACT_PYTHON_VERSION `
+            --download-root $env:CONTRACT_BUILD_ROOT `
+            --config "$env:CONTRACT_RESULT_ROOT\config.json" `
+            --profile library-contract `
+            --build-workers $env:STATICPYTHON_CONTRACT_BUILD_WORKERS `
+            --output-pack-dir $packDir `
+            --output-pack-name $env:CONTRACT_LIBRARY
+
+      - name: Audit source, pack, behavior and PE dependencies
+        shell: pwsh
+        run: |
+          $pythonExe = "$env:CONTRACT_BUILD_ROOT\cpython-$env:CONTRACT_PYTHON_VERSION\PCbuild\amd64\python.exe"
+          python .\scripts\library_contract_build.py verify `
+            --download-root $env:CONTRACT_SOURCE_CACHE `
+            --project-name $env:CONTRACT_PROJECT_NAME `
+            --library $env:CONTRACT_LIBRARY `
+            --version $env:CONTRACT_VERSION `
+            --python-version $env:CONTRACT_PYTHON_VERSION `
+            --filename $env:CONTRACT_SOURCE_FILENAME `
+            --sha256 $env:CONTRACT_SOURCE_SHA256 `
+            --pack-dir "$env:CONTRACT_RESULT_ROOT\packs" `
+            --python-exe $pythonExe `
+            --report "$env:CONTRACT_RESULT_ROOT\library-contract-build-report.json"
+
+      - name: Upload candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: library-contract-${{ matrix.slug }}
+          path: |
+            ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/packs/*.zip
+            ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/library-contract-build-report.json
+            ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/config.json
+            ${{ runner.temp }}/library-contract-${{ matrix.slug }}/cpython-${{ matrix.python_version }}/PCbuild/staticpython-verify-report.json
+          if-no-files-found: warn
+          retention-days: 30

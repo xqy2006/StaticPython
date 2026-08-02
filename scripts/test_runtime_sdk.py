@@ -70,6 +70,46 @@ class RuntimeSDKTests(unittest.TestCase):
         }
         self.assertIn("advapi32.lib", dependencies)
 
+    def test_pack_only_build_compiles_only_integration_owned_projects(self) -> None:
+        pcbuild = self.root / "PCbuild"
+        pcbuild.mkdir(parents=True)
+        (pcbuild / "demo_static.vcxproj").write_text("<Project />", encoding="utf-8")
+        (pcbuild / "pythoncore.vcxproj").write_text("<Project />", encoding="utf-8")
+        (pcbuild / "python.vcxproj").write_text("<Project />", encoding="utf-8")
+        integration = libs.LibraryIntegration(
+            name="demo",
+            static_library_projects_release_x64=["demo_static.vcxproj"],
+        )
+        with (
+            mock.patch.object(build, "run_pre_build_hooks") as pre_build,
+            mock.patch.object(build, "stage_static_libraries") as stage,
+            mock.patch.object(build, "resolve_msbuild_exe", return_value=Path("msbuild.exe")),
+            mock.patch.object(
+                build,
+                "msbuild_args",
+                return_value=["/p:Configuration=Release"],
+            ) as msbuild_args,
+            mock.patch.object(build, "run") as run,
+        ):
+            build.build_pack_static_libraries(
+                self.root,
+                "Release",
+                "x64",
+                [integration],
+                (3, 13, 14),
+                "3.13",
+                "3.13.14",
+                2,
+            )
+        pre_build.assert_called_once()
+        stage.assert_called_once_with(self.root, "x64", {}, [integration])
+        self.assertEqual(run.call_count, 1)
+        command = run.call_args.args[0]
+        self.assertIn(str(pcbuild / "demo_static.vcxproj"), command)
+        self.assertNotIn(str(pcbuild / "pythoncore.vcxproj"), command)
+        self.assertNotIn(str(pcbuild / "python.vcxproj"), command)
+        self.assertIn("BuildProjectReferences=false", msbuild_args.call_args.args)
+
     def test_runtime_sdk_prefers_generated_pyconfig_header(self) -> None:
         generated = build.get_pcbuild_output_dir(self.root, "x64") / "pyconfig.h"
         generated.parent.mkdir(parents=True)
