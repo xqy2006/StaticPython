@@ -170,7 +170,7 @@ def validate_patched_tree(source_root: Path, version_info: tuple[int, int, int],
     assert_contains(pythoncore, "..\\Python\\staticpython_resource_store.c")
     assert_contains(pythoncore, "Py_NO_ENABLE_SHARED")
     assert_contains(pythoncore, "<VcpkgEnabled>false</VcpkgEnabled>")
-    assert_contains(pythoncore, "<AdditionalOptions Condition=\"'$(Configuration)|$(Platform)'=='Release|x64'\">/GL- %(AdditionalOptions)</AdditionalOptions>")
+    assert_contains(pythoncore, "<AdditionalOptions Condition=\"'$(Configuration)|$(Platform)'=='Release|x64'\">/bigobj /GL- %(AdditionalOptions)</AdditionalOptions>")
     assert_not_contains(pythoncore, "<MultiProcessorCompilation")
     assert_not_contains(pythoncore, "..\\Modules\\challenge.c")
     assert_not_contains(pythoncore, "..\\Modules\\sandbox.c")

@@ -1590,6 +1590,7 @@
         "werkzeug",
         "win32_setctime",
         "wsproto",
+        "wxpython",
         "xlsxwriter",
         "xmltodict",
         "xyzservices",

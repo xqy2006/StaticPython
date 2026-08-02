@@ -506,6 +506,36 @@ struct _inittab _PyImport_Inittab[] = {
             [f"{name}.lib" for name in selected_names],
         )
 
+    def test_wxpython_pack_declares_gdiplus_provider_and_behavior_smokes(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_wxpython_pack_test",
+            REPO_ROOT / "Lib" / "wxpython" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        integration = module.LIBRARY_INTEGRATION
+        self.assertEqual(integration.release_version, "4.2.5")
+        self.assertEqual(integration.license_expression, "wxWindows")
+        self.assertEqual(
+            integration.suppressed_system_libraries_release_x64,
+            ["gdiplus.lib"],
+        )
+        self.assertEqual(
+            [
+                name
+                for name in module.WXPYTHON_SYSTEM_LIBRARIES
+                if not build.is_windows_system_library(name)
+                and not build.is_windows_sdk_library(name)
+            ],
+            [],
+        )
+        self.assertEqual(
+            [test["name"] for test in integration.smoke_tests],
+            ["wx-native-modules", "wx-window-lifecycle"],
+        )
+
     def test_native_wheels_are_never_source_inputs(self) -> None:
         files = [
             {
@@ -669,6 +699,7 @@ struct _inittab _PyImport_Inittab[] = {
             python_packages=["demo"],
             top_level_import_names=["demo"],
             materialized_paths=["Lib/demo"],
+            suppressed_system_libraries_release_x64=["GdiPlus.lib"],
             license_expression="MIT",
             license_files=["Lib/demo/LICENSE.txt"],
         )
@@ -696,6 +727,7 @@ struct _inittab _PyImport_Inittab[] = {
             self.assertIn("Lib/demo/data.json", [item["path"] for item in metadata["resources"]])
             self.assertEqual(metadata["license"]["status"], "complete")
             self.assertEqual(metadata["verification"]["status"], "passed")
+            self.assertEqual(metadata["suppressed_system_libraries"], ["gdiplus.lib"])
             self.assertEqual(
                 metadata["verification"]["smoke_tests"],
                 [{"name": "import-demo", "kind": "import", "status": "passed"}],
@@ -703,6 +735,30 @@ struct _inittab _PyImport_Inittab[] = {
             self.assertIn('"demo"', descriptor)
             self.assertIn("staticpython_pack_demo_resource_", descriptor)
             self.assertNotIn('_Py_M__other', descriptor)
+
+    def test_system_library_suppression_resolves_pack_link_collisions(self) -> None:
+        consumer = libs.LibraryIntegration(
+            name="consumer",
+            python_link_dependencies_release_x64=["gdiplus.lib", "user32.lib"],
+        )
+        provider = libs.LibraryIntegration(
+            name="provider",
+            suppressed_system_libraries_release_x64=["GDIPLUS.LIB"],
+        )
+        dependencies = build.iter_python_link_dependencies(
+            self.root,
+            {"python_link_dependencies_release_x64": []},
+            [consumer, provider],
+        )
+        self.assertEqual(dependencies, ["user32.lib"])
+
+        provider.suppressed_system_libraries_release_x64 = ["private.lib"]
+        with self.assertRaisesRegex(RuntimeError, "only name Windows system libraries"):
+            build.iter_python_link_dependencies(
+                self.root,
+                {"python_link_dependencies_release_x64": []},
+                [consumer, provider],
+            )
 
     def test_prepare_hooks_finalize_custom_pypi_license_metadata(self) -> None:
         source_root = self.root / "source"
