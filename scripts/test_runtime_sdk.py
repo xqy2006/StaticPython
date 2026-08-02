@@ -523,6 +523,15 @@ struct _inittab _PyImport_Inittab[] = {
             ["gdiplus.lib"],
         )
         self.assertEqual(
+            [
+                name
+                for name in module.WXPYTHON_SYSTEM_LIBRARIES
+                if not build.is_windows_system_library(name)
+                and not build.is_windows_sdk_library(name)
+            ],
+            [],
+        )
+        self.assertEqual(
             [test["name"] for test in integration.smoke_tests],
             ["wx-native-modules", "wx-window-lifecycle"],
         )

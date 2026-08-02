@@ -164,6 +164,7 @@ WINDOWS_SDK_LIBRARY_NAMES = {
     "oleacc.lib",
     "setupapi.lib",
     "windowscodecs.lib",
+    "wininet.lib",
 }
 
 ET.register_namespace("", MSBUILD_NS)
