@@ -98,6 +98,7 @@ class TclTkZipfsTests(unittest.TestCase):
             release_version="9.0.4",
         )
         self.assertIn("TclZipfs_MountBuffer", source)
+        self.assertIn("#include <sys/stat.h>", source)
         self.assertIn("StaticPython_TkinterZipfsRestrictAutoPath", source)
         self.assertIn('Tcl_SetVar(interp, "auto_path", staticpython_tcl_library', source)
         self.assertIn('Tcl_SetVar(interp, "tcl_pkgPath", ""', source)
@@ -245,6 +246,26 @@ Tcl_AppInit(Tcl_Interp *interp)
         self.assertEqual(len(integration.license_files), 3)
         self.assertGreaterEqual(len(integration.smoke_tests), 2)
         self.assertNotIn("tkinter", build.load_config(REPO_ROOT / "config.json")["profiles"]["full"]["third_party_libraries"])
+
+    def test_archive_manifest_uses_pinned_commit_without_git_checkout(self) -> None:
+        source = self.root / "tcl-source"
+        _write(source / "win" / "gitmanifest.in", b"git-")
+        tkinter_setup._write_archive_manifest_uuid(
+            source,
+            tkinter_setup.TCL_COMMIT,
+            component="Tcl",
+        )
+        self.assertEqual(
+            (source / "manifest.uuid").read_text(encoding="ascii"),
+            f"git-{tkinter_setup.TCL_COMMIT}\n",
+        )
+        (source / "win" / "gitmanifest.in").write_text("fossil-", encoding="ascii")
+        with self.assertRaisesRegex(RuntimeError, "gitmanifest.in drifted"):
+            tkinter_setup._write_archive_manifest_uuid(
+                source,
+                tkinter_setup.TCL_COMMIT,
+                component="Tcl",
+            )
 
 
 if __name__ == "__main__":

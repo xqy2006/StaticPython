@@ -154,6 +154,20 @@ def _require_supported_cpython(context) -> None:
         )
 
 
+def _write_archive_manifest_uuid(source_root: Path, commit: str, *, component: str) -> None:
+    template = source_root / "win" / "gitmanifest.in"
+    prefix = template.read_text(encoding="ascii")
+    if prefix not in {"git-", "git-\n", "git-\r\n"}:
+        raise RuntimeError(
+            f"{component} gitmanifest.in drifted from the expected 'git-' prefix"
+        )
+    (source_root / "manifest.uuid").write_text(
+        f"git-{commit}\n",
+        encoding="ascii",
+        newline="\n",
+    )
+
+
 def prepare_tcltk_sources(context) -> None:
     _require_supported_cpython(context)
     tcl_source = _ensure_source_tree(
@@ -170,6 +184,7 @@ def prepare_tcltk_sources(context) -> None:
             "library/encoding/cp1252.enc",
             "library/tzdata/UTC",
             "win/makefile.vc",
+            "win/gitmanifest.in",
             "license.terms",
         ),
     )
@@ -188,9 +203,15 @@ def prepare_tcltk_sources(context) -> None:
             "library/ttk/vistaTheme.tcl",
             "library/ttk/xpTheme.tcl",
             "win/makefile.vc",
+            "win/gitmanifest.in",
             "license.terms",
         ),
     )
+    # Tcl/Tk's nmake rules call `git rev-parse` whenever manifest.uuid is
+    # absent. Immutable GitHub source archives intentionally have no .git
+    # directory, so materialize the exact pinned commit before nmake runs.
+    _write_archive_manifest_uuid(tcl_source, TCL_COMMIT, component="Tcl")
+    _write_archive_manifest_uuid(tk_source, TK_COMMIT, component="Tk")
 
     write_tcltk_zipfs_artifacts(
         tcl_source / "library",

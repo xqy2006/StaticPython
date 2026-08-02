@@ -25,12 +25,13 @@ StaticPython removes CPython `_tkinter`'s `TCL_LIBRARY` environment and
 filesystem discovery code with strict patch anchors. `Tcl_AppInit` mounts the
 embedded archive with `TclZipfs_MountBuffer`, then sets `tcl_library` and
 `tk_library` to exact `//zipfs:/staticpython/...` paths before `Tcl_Init` and
-`Tk_Init`. Immediately after `Tcl_Init`, it replaces `auto_path` with the
-mounted Tcl path and clears `tcl_pkgPath`, so `TCLLIBPATH`, the executable's
-adjacent `lib`, and compiled installation paths cannot supply scripts. It also
+`Tk_Init`. It also pre-seeds `auto_path` with only the mounted Tcl directory and
+clears `tcl_pkgPath` before initialization, preventing `TCLLIBPATH` from being
+adopted. Immediately after `Tcl_Init`, it restores that exact path boundary and
 clears Tcl module (`.tm`) search roots derived from the executable and
-`TCL*_TM_PATH` environment variables. The build fails if those upstream
-anchors drift.
+`TCL*_TM_PATH` environment variables. The executable's adjacent `lib` and
+compiled installation paths therefore cannot supply scripts. The build fails
+if those upstream anchors drift.
 
 `Lib/tkinter` remains excluded from the base runtime SDK. Selecting this pack
 writes `PCbuild/staticpython_optional_frozen_trees.txt`, which enables freezing
