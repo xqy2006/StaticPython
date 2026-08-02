@@ -164,6 +164,7 @@ def configured_library_contract(
                 "targets": {
                     str(target_version): {
                         "status": "configured",
+                        "reason": "non-PyPI source is pinned and is outside stable PyPI version discovery",
                         "source": {
                             "resolver": integration.source_resolver or integration.source_provider,
                         },
@@ -188,6 +189,24 @@ def _status_counts(libraries: dict[str, dict]) -> dict[str, int]:
 def _contract_sha256(payload: dict) -> str:
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def validate_contract_integrity(payload: dict) -> None:
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        raise RuntimeError(
+            f"unsupported library contract schema: {payload.get('schema_version')!r}"
+        )
+    recorded = payload.get("contract_sha256")
+    if not isinstance(recorded, str) or not SHA256_PATTERN.fullmatch(recorded):
+        raise RuntimeError("library contract has no valid contract_sha256")
+    canonical_payload = {
+        key: value for key, value in payload.items() if key != "contract_sha256"
+    }
+    calculated = _contract_sha256(canonical_payload)
+    if recorded.lower() != calculated:
+        raise RuntimeError(
+            f"library contract SHA-256 mismatch: expected {recorded.lower()}, got {calculated}"
+        )
 
 
 def _target_records(payload: dict) -> dict[tuple[str, str, str], dict]:
@@ -375,6 +394,7 @@ def main() -> int:
         previous = None
         if args.previous is not None and args.previous.is_file():
             previous = json.loads(args.previous.read_text(encoding="utf-8"))
+            validate_contract_integrity(previous)
         delta = contract_delta(payload, previous)
         args.delta_output.parent.mkdir(parents=True, exist_ok=True)
         args.delta_output.write_text(

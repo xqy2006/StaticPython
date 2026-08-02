@@ -136,6 +136,19 @@ class LibraryVersionContractTests(unittest.TestCase):
         self.assertEqual(target["status"], "configured")
         self.assertEqual(target["source"], {"resolver": "github-source"})
 
+    def test_contract_integrity_rejects_modified_baseline(self) -> None:
+        payload = {
+            "schema_version": contract.SCHEMA_VERSION,
+            "target_python_versions": ["3.13.14"],
+            "libraries": {},
+            "status_counts": {},
+        }
+        payload["contract_sha256"] = contract._contract_sha256(payload)
+        contract.validate_contract_integrity(payload)
+        payload["target_python_versions"] = ["3.13.15"]
+        with self.assertRaisesRegex(RuntimeError, "SHA-256 mismatch"):
+            contract.validate_contract_integrity(payload)
+
     def test_minimum_release_version_is_respected(self) -> None:
         integration = libs.LibraryIntegration(
             name="demo",
