@@ -10,6 +10,7 @@ from packaging.version import InvalidVersion, Version
 
 MATRIX_LIMIT = 256
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+DEFERRED_REASON = "weekly-history-shards"
 
 
 def _matrix_slug(library: str, version: str, python_version: str, sha256: str) -> str:
@@ -59,6 +60,43 @@ def _smoke_candidate(contract: dict, library_name: str, python_series: str) -> d
     )
 
 
+def _matrix_record(candidate: object, validation_reason: str, libraries: dict) -> dict:
+    if not isinstance(candidate, dict):
+        raise RuntimeError("candidate record must be an object")
+    library = candidate.get("library")
+    version = candidate.get("version")
+    python_version = candidate.get("python_version")
+    source = candidate.get("source")
+    if not all(isinstance(value, str) and value for value in (library, version, python_version)):
+        raise RuntimeError(f"candidate has invalid identity fields: {candidate!r}")
+    if not isinstance(source, dict):
+        raise RuntimeError(f"candidate {library} {version} has no locked source")
+    filename = source.get("filename")
+    url = source.get("url")
+    sha256 = source.get("sha256")
+    if not all(isinstance(value, str) and value for value in (filename, url, sha256)):
+        raise RuntimeError(f"candidate {library} {version} has incomplete source provenance")
+    if not SHA256_PATTERN.fullmatch(sha256):
+        raise RuntimeError(f"candidate {library} {version} has invalid source SHA-256")
+    library_record = libraries.get(library)
+    if not isinstance(library_record, dict):
+        raise RuntimeError(f"candidate library is missing from contract: {library}")
+    project_name = library_record.get("project_name")
+    if not isinstance(project_name, str) or not project_name:
+        raise RuntimeError(f"candidate library has no PyPI project name: {library}")
+    return {
+        "library": library,
+        "project_name": project_name,
+        "version": version,
+        "python_version": python_version,
+        "source_filename": filename,
+        "source_url": url,
+        "source_sha256": sha256.lower(),
+        "slug": _matrix_slug(library, version, python_version, sha256),
+        "validation_reason": validation_reason,
+    }
+
+
 def prepare_matrix(
     contract: dict,
     delta: dict,
@@ -66,7 +104,10 @@ def prepare_matrix(
     limit: int = MATRIX_LIMIT,
     smoke_library: str | None = None,
     smoke_python_series: str | None = None,
+    defer_overflow_to_history: bool = False,
 ) -> dict:
+    if not isinstance(limit, int) or not 1 <= limit <= MATRIX_LIMIT:
+        raise RuntimeError(f"matrix limit must be between 1 and {MATRIX_LIMIT}")
     if delta.get("current_contract_sha256") != contract.get("contract_sha256"):
         raise RuntimeError("delta does not describe the current contract")
     drifted = delta.get("drifted_candidates")
@@ -84,7 +125,11 @@ def prepare_matrix(
         raise RuntimeError("delta new_candidates must be an array")
     if (smoke_library is None) != (smoke_python_series is None):
         raise RuntimeError("smoke library and Python series must be provided together")
+    libraries = contract.get("libraries")
+    if not isinstance(libraries, dict):
+        raise RuntimeError("contract libraries must be an object")
     candidate_records = [(candidate, "new-candidate") for candidate in delta_candidates]
+    smoke: dict | None = None
     if smoke_library is not None and smoke_python_series is not None:
         smoke = _smoke_candidate(contract, smoke_library, smoke_python_series)
         smoke_identity = (
@@ -103,63 +148,54 @@ def prepare_matrix(
         }
         if smoke_identity not in existing_identities:
             candidate_records.append((smoke, "pull-request-smoke"))
-    if len(candidate_records) > limit:
-        raise RuntimeError(
-            f"incremental contract contains {len(candidate_records)} build jobs, exceeding the "
-            f"GitHub Actions matrix limit of {limit}; shard explicitly instead of skipping combinations"
+    if len(delta_candidates) <= limit < len(candidate_records):
+        # The incremental candidates already consume the complete matrix. The
+        # unrelated PR smoke is optional in that case and must not force an
+        # otherwise representable delta into weekly deferral.
+        candidate_records = [(candidate, "new-candidate") for candidate in delta_candidates]
+    prepared_records = [
+        _matrix_record(candidate, validation_reason, libraries)
+        for candidate, validation_reason in candidate_records
+    ]
+    prepared_slugs = [record["slug"].casefold() for record in prepared_records]
+    if len(prepared_slugs) != len(set(prepared_slugs)):
+        raise RuntimeError("candidate artifact slug collision")
+    if len(prepared_records) > limit:
+        if not defer_overflow_to_history:
+            raise RuntimeError(
+                f"incremental contract contains {len(prepared_records)} build jobs, exceeding the "
+                f"GitHub Actions matrix limit of {limit}; shard explicitly instead of skipping combinations"
+            )
+        deferred_records = list(prepared_records)
+        prepared_records = (
+            [_matrix_record(smoke, "pull-request-smoke", libraries)]
+            if smoke is not None
+            else []
         )
-
-    libraries = contract.get("libraries")
-    if not isinstance(libraries, dict):
-        raise RuntimeError("contract libraries must be an object")
-    include: list[dict] = []
-    slugs: set[str] = set()
-    for candidate, validation_reason in candidate_records:
-        if not isinstance(candidate, dict):
-            raise RuntimeError("candidate record must be an object")
-        library = candidate.get("library")
-        version = candidate.get("version")
-        python_version = candidate.get("python_version")
-        source = candidate.get("source")
-        if not all(isinstance(value, str) and value for value in (library, version, python_version)):
-            raise RuntimeError(f"candidate has invalid identity fields: {candidate!r}")
-        if not isinstance(source, dict):
-            raise RuntimeError(f"candidate {library} {version} has no locked source")
-        filename = source.get("filename")
-        url = source.get("url")
-        sha256 = source.get("sha256")
-        if not all(isinstance(value, str) and value for value in (filename, url, sha256)):
-            raise RuntimeError(f"candidate {library} {version} has incomplete source provenance")
-        if not SHA256_PATTERN.fullmatch(sha256):
-            raise RuntimeError(f"candidate {library} {version} has invalid source SHA-256")
-        library_record = libraries.get(library)
-        if not isinstance(library_record, dict):
-            raise RuntimeError(f"candidate library is missing from contract: {library}")
-        project_name = library_record.get("project_name")
-        if not isinstance(project_name, str) or not project_name:
-            raise RuntimeError(f"candidate library has no PyPI project name: {library}")
-        slug = _matrix_slug(library, version, python_version, sha256)
-        if slug.casefold() in slugs:
-            raise RuntimeError(f"candidate artifact slug collision: {slug}")
-        slugs.add(slug.casefold())
-        include.append(
-            {
-                "library": library,
-                "project_name": project_name,
-                "version": version,
-                "python_version": python_version,
-                "source_filename": filename,
-                "source_url": url,
-                "source_sha256": sha256.lower(),
-                "slug": slug,
-                "validation_reason": validation_reason,
-            }
-        )
-    return {"include": include}
+        if len(prepared_records) > limit:
+            raise RuntimeError(
+                f"overflow smoke matrix contains {len(prepared_records)} build jobs, exceeding "
+                f"the GitHub Actions matrix limit of {limit}"
+            )
+    else:
+        deferred_records = []
+    matrix = {"include": prepared_records}
+    if deferred_records:
+        # The complete candidate identities remain in the immutable delta artifact.
+        # Recording the exact count and contract hash makes this an explicit handoff
+        # to the separately sharded weekly history workflow, never a silent skip.
+        matrix["deferred"] = {
+            "reason": DEFERRED_REASON,
+            "candidate_count": len(delta_candidates),
+            "contract_sha256": contract.get("contract_sha256"),
+            "matrix_limit": limit,
+        }
+    return matrix
 
 
 def build_summary(contract: dict, delta: dict, matrix: dict) -> str:
     counts = contract.get("status_counts", {})
+    deferred = matrix.get("deferred", {})
     lines = [
         "## StaticPython library version contract",
         "",
@@ -170,6 +206,7 @@ def build_summary(contract: dict, delta: dict, matrix: dict) -> str:
         f"- Evidence-backed unbuildable combinations: `{counts.get('unbuildable', 0)}`",
         f"- New candidate build jobs: `{sum(1 for item in matrix.get('include', []) if item.get('validation_reason') == 'new-candidate')}`",
         f"- Pull-request smoke build jobs: `{sum(1 for item in matrix.get('include', []) if item.get('validation_reason') == 'pull-request-smoke')}`",
+        f"- Candidate combinations deferred to weekly shards: `{deferred.get('candidate_count', 0)}`",
         f"- New unbuildable records: `{len(delta.get('new_unbuildable', []))}`",
         f"- Source drift records: `{len(delta.get('drifted_candidates', []))}`",
         f"- Candidate regressions: `{len(delta.get('regressions', []))}`",
@@ -189,6 +226,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=MATRIX_LIMIT)
     parser.add_argument("--smoke-library")
     parser.add_argument("--smoke-python-series")
+    parser.add_argument("--defer-overflow-to-history", action="store_true")
     return parser.parse_args()
 
 
@@ -202,6 +240,7 @@ def main() -> int:
         limit=args.limit,
         smoke_library=args.smoke_library,
         smoke_python_series=args.smoke_python_series,
+        defer_overflow_to_history=args.defer_overflow_to_history,
     )
     args.matrix_output.parent.mkdir(parents=True, exist_ok=True)
     args.matrix_output.write_text(

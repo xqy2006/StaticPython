@@ -373,6 +373,91 @@ class PromotionTests(unittest.TestCase):
         self.assertEqual(result["active"]["contract_sha256"], baseline["contract_sha256"])
         self.assertEqual(result["proposed_active"]["contract_sha256"], candidate["contract_sha256"])
 
+    def test_overflow_deferral_keeps_last_known_good_and_passes_gate(self) -> None:
+        baseline = contract({"3.13.14": {"status": "unbuildable", "reason": "not integrated"}})
+        baseline_path = write_json(self.root / "deferred-legacy.json", baseline)
+        _initial, previous_catalog = self.run_promotion(
+            baseline,
+            delta(baseline["contract_sha256"], baseline["contract_sha256"], baseline=False),
+            legacy_baseline=baseline_path,
+            output_name="deferred-previous",
+        )
+        source_sha = "a" * 64
+        candidate = contract({"3.13.14": {"status": "candidate", "source": source(source_sha)}})
+        result, output = self.run_promotion(
+            candidate,
+            delta(
+                baseline["contract_sha256"],
+                candidate["contract_sha256"],
+                baseline=False,
+                new_candidates=[candidate_record(source_sha)],
+            ),
+            matrix_payload={
+                "include": [],
+                "deferred": {
+                    "reason": "weekly-history-shards",
+                    "candidate_count": 1,
+                    "contract_sha256": candidate["contract_sha256"],
+                    "matrix_limit": 0,
+                },
+            },
+            previous_catalog=previous_catalog,
+            output_name="deferred-candidate",
+        )
+        self.assertEqual(result["decision"]["status"], "frozen")
+        self.assertEqual(result["decision"]["gate"], "failed")
+        self.assertIn(
+            "invalid-history-deferral",
+            {record["code"] for record in result["decision"]["blockers"]},
+        )
+        self.assertEqual(result["active"]["contract_sha256"], baseline["contract_sha256"])
+
+        deferred = {
+            "reason": "weekly-history-shards",
+            "candidate_count": 1,
+            "contract_sha256": candidate["contract_sha256"],
+            "matrix_limit": 1,
+        }
+        # A real overflow must be larger than its matrix limit. Model two
+        # exact candidates without weakening the production invariant.
+        second = candidate_record(source_sha)
+        second["version"] = "1.1"
+        second["source"] = {**second["source"], "filename": "demo-1.1.tar.gz"}
+        candidate["libraries"]["demo"]["versions"]["1.1"] = {
+            "targets": {"3.13.14": {"status": "candidate", "source": second["source"]}}
+        }
+        candidate["status_counts"]["candidate"] = 2
+        candidate["contract_sha256"] = contract_module._contract_sha256(
+            {key: value for key, value in candidate.items() if key != "contract_sha256"}
+        )
+        deferred["candidate_count"] = 2
+        deferred["contract_sha256"] = candidate["contract_sha256"]
+        result, output = self.run_promotion(
+            candidate,
+            delta(
+                baseline["contract_sha256"],
+                candidate["contract_sha256"],
+                baseline=False,
+                new_candidates=[candidate_record(source_sha), second],
+            ),
+            matrix_payload={"include": [], "deferred": deferred},
+            previous_catalog=previous_catalog,
+            output_name="deferred-valid",
+        )
+        self.assertEqual(result["decision"]["status"], "deferred")
+        self.assertEqual(result["decision"]["gate"], "passed")
+        self.assertEqual(result["active"]["contract_sha256"], baseline["contract_sha256"])
+        self.assertIsNone(result["proposed_active"])
+        evidence = json.loads(
+            (
+                output
+                / "candidates"
+                / candidate["contract_sha256"]
+                / "promotion-evidence.v1.json"
+            ).read_text()
+        )
+        self.assertEqual(evidence["validation"]["deferred"], deferred)
+
     def test_tampered_delta_cannot_hide_a_regression(self) -> None:
         source_sha = "a" * 64
         baseline = contract({"3.13.14": {"status": "candidate", "source": source(source_sha)}})

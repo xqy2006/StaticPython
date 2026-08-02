@@ -113,6 +113,101 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "matrix limit"):
             matrix_builder.prepare_matrix(contract(), delta(), limit=0)
 
+    def test_overflow_is_explicitly_deferred_to_weekly_history(self) -> None:
+        payload = contract()
+        payload["libraries"]["demo"]["versions"]["2.0"] = {
+            "targets": {
+                "3.13.14": {
+                    "status": "candidate",
+                    "source": {
+                        "filename": "demo-2.0.tar.gz",
+                        "url": "https://files.pythonhosted.org/demo-2.0.tar.gz",
+                        "sha256": "b" * 64,
+                    },
+                }
+            }
+        }
+        candidate_delta = delta()
+        candidate_delta["new_candidates"].append(
+            {
+                "library": "demo",
+                "version": "2.0",
+                "python_version": "3.13.14",
+                "status": "candidate",
+                "source": {
+                    "filename": "demo-2.0.tar.gz",
+                    "url": "https://files.pythonhosted.org/demo-2.0.tar.gz",
+                    "sha256": "b" * 64,
+                },
+            }
+        )
+        result = matrix_builder.prepare_matrix(
+            payload,
+            candidate_delta,
+            limit=1,
+            smoke_library="demo",
+            smoke_python_series="3.13",
+            defer_overflow_to_history=True,
+        )
+        self.assertEqual(len(result["include"]), 1)
+        self.assertEqual(result["include"][0]["version"], "2.0")
+        self.assertEqual(result["include"][0]["validation_reason"], "pull-request-smoke")
+        self.assertEqual(
+            result["deferred"],
+            {
+                "reason": "weekly-history-shards",
+                "candidate_count": 2,
+                "contract_sha256": "contract",
+                "matrix_limit": 1,
+            },
+        )
+
+    def test_deferred_candidates_are_still_fully_validated(self) -> None:
+        payload = contract()
+        payload["libraries"]["demo"]["versions"]["2.0"] = {
+            "targets": {
+                "3.13.14": {
+                    "status": "candidate",
+                    "source": {
+                        "filename": "demo-2.0.tar.gz",
+                        "url": "https://files.pythonhosted.org/demo-2.0.tar.gz",
+                        "sha256": "b" * 64,
+                    },
+                }
+            }
+        }
+        candidate_delta = delta()
+        invalid_candidate = {
+            "library": "demo",
+            "version": "2.0",
+            "python_version": "3.13.14",
+            "status": "candidate",
+            "source": {
+                "filename": "demo-2.0.tar.gz",
+                "sha256": "b" * 64,
+            },
+        }
+        candidate_delta["new_candidates"].append(invalid_candidate)
+        with self.assertRaisesRegex(RuntimeError, "incomplete source provenance"):
+            matrix_builder.prepare_matrix(
+                payload,
+                candidate_delta,
+                limit=1,
+                defer_overflow_to_history=True,
+            )
+
+    def test_workflows_route_overflow_to_current_source_history(self) -> None:
+        daily = (REPO_ROOT / ".github" / "workflows" / "library-version-discovery.yml").read_text(
+            encoding="utf-8"
+        )
+        weekly = (REPO_ROOT / ".github" / "workflows" / "library-history-weekly.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"--defer-overflow-to-history"', daily)
+        self.assertIn("Discover current source version contract", weekly)
+        self.assertIn('selection = "current-source-discovery"', weekly)
+        self.assertIn('"previous-library-version-contract.json"', weekly)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
