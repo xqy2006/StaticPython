@@ -663,6 +663,49 @@ const struct _module_alias aliases[] = {
             self.assertIn("staticpython_pack_demo_resource_", descriptor)
             self.assertNotIn('_Py_M__other', descriptor)
 
+    def test_prepare_hooks_finalize_custom_pypi_license_metadata(self) -> None:
+        source_root = self.root / "source"
+        package = source_root / "Lib" / "demo"
+        package.mkdir(parents=True)
+        cache_root = self.root / "work"
+        upstream = cache_root / "pypi" / "demo-project" / "1.2.3" / "extracted" / "demo-1.2.3"
+        upstream.mkdir(parents=True)
+        (upstream / "LICENSE.txt").write_text("upstream license\n", encoding="utf-8")
+
+        def prepare_demo(_context: libs.LibraryHookContext) -> None:
+            (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+        integration = libs.LibraryIntegration(
+            name="demo",
+            source_provider="pypi",
+            project_name="demo-project",
+            release_version="1.2.3",
+            materialized_paths=["Lib/demo"],
+            prepare_source_hooks=[prepare_demo],
+        )
+        context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=source_root,
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=self.root / "downloads",
+            work_cache_root=cache_root,
+            asset_overlay_root=self.root / "assets",
+            log=lambda _message: None,
+        )
+        with mock.patch.object(
+            libs,
+            "_load_pypi_release_payload",
+            return_value={"info": {"license_expression": "Apache-2.0"}},
+        ):
+            libs.run_prepare_source_hooks([integration], context)
+
+        self.assertEqual(integration.license_expression, "Apache-2.0")
+        self.assertEqual(len(integration.license_files), 1)
+        copied_license = source_root / integration.license_files[0]
+        self.assertEqual(copied_license.read_text(encoding="utf-8"), "upstream license\n")
+
     def test_native_only_pack_does_not_require_a_frozen_module(self) -> None:
         (self.root / "Python" / "frozen_modules").mkdir(parents=True)
         integration = libs.LibraryIntegration(
@@ -885,6 +928,35 @@ const struct _module_alias aliases[] = {
         build_release_index.validate_expected_pack_matrix(packs, ["demo"])
         with self.assertRaisesRegex(RuntimeError, "missing current library packs"):
             build_release_index.validate_expected_pack_matrix(packs, ["demo", "other"])
+
+    def test_release_index_reports_every_incomplete_license_asset(self) -> None:
+        assets = self.root / "assets"
+        assets.mkdir()
+        commit = build.git_commit_or_none(REPO_ROOT)
+        for name in ("alpha", "beta"):
+            stage = self.root / f"{name}-stage"
+            stage.mkdir()
+            metadata = {
+                "name": name,
+                "version": "1.0",
+                "cpython_abi": "cp313",
+                "staticpython_commit": commit,
+                "verification": {"status": "passed"},
+                "license": {"status": "missing"},
+            }
+            (stage / "pack.json").write_text(json.dumps(metadata), encoding="utf-8")
+            build.write_deterministic_zip(stage, assets / f"{name}.zip")
+
+        with self.assertRaisesRegex(RuntimeError, r"alpha\.zip[\s\S]*beta\.zip"):
+            build_release_index.build_index(
+                assets,
+                "xqy2006/StaticPython",
+                commit,
+                "runtime-tag",
+                "pack-tag",
+                require_all_targets=False,
+                require_verified=True,
+            )
 
     def test_release_index_requires_dependency_assets_for_the_same_abi(self) -> None:
         packs = {

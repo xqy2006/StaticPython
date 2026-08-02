@@ -1,0 +1,54 @@
+name: Audit existing StaticPython release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Completed release workflow run whose immutable artifacts should be re-audited
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  audit:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install audit dependencies
+        run: python -m pip install packaging
+      - name: Resolve candidate provenance
+        id: candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $candidate = gh run view "${{ inputs.run_id }}" --repo "${{ github.repository }}" --json headSha,status | ConvertFrom-Json
+          if ($candidate.status -ne "completed") { throw "candidate run is not complete" }
+          "commit=$($candidate.headSha)" >> $env:GITHUB_OUTPUT
+      - name: Download immutable candidate assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .\dist\assets | Out-Null
+          gh run download "${{ inputs.run_id }}" --repo "${{ github.repository }}" --pattern "runtime-sdk-*" --dir .\dist\assets
+          gh run download "${{ inputs.run_id }}" --repo "${{ github.repository }}" --pattern "library-packs-*" --dir .\dist\assets
+      - name: Re-audit metadata and assemble index
+        shell: pwsh
+        run: |
+          python .\scripts\build_release_index.py `
+            --asset-root .\dist\assets `
+            --output .\dist\runtime-index.v1.json `
+            --repository "${{ github.repository }}" `
+            --staticpython-commit "${{ steps.candidate.outputs.commit }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audited-runtime-index-${{ steps.candidate.outputs.commit }}
+          path: dist/runtime-index.v1.json
+          if-no-files-found: error

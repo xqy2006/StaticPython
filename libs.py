@@ -1245,19 +1245,38 @@ def _materialize_distribution_licenses(
     integration: LibraryIntegration,
     extracted_root: Path,
 ) -> None:
+    _materialize_license_candidates(
+        context,
+        integration,
+        _distribution_license_candidates(extracted_root),
+    )
+
+
+def _distribution_license_candidates(root: Path, *, maximum_depth: int = 3) -> list[Path]:
     prefixes = ("license", "copying", "notice", "copyright", "authors")
     candidates: list[Path] = []
-    for path in extracted_root.rglob("*"):
+    if not root.is_dir():
+        return candidates
+    for path in root.rglob("*"):
         if not path.is_file() or not path.name.casefold().startswith(prefixes):
             continue
         try:
-            relative = path.relative_to(extracted_root)
+            relative = path.relative_to(root)
         except ValueError:
             continue
-        if len(relative.parts) > 3 or path.stat().st_size > 2 * 1024 * 1024:
+        if len(relative.parts) > maximum_depth or path.stat().st_size > 2 * 1024 * 1024:
             continue
         candidates.append(path)
-    if not candidates:
+    return candidates
+
+
+def _materialize_license_candidates(
+    context: LibraryHookContext,
+    integration: LibraryIntegration,
+    candidates: list[Path],
+) -> None:
+    unique_candidates = sorted(set(candidates), key=lambda path: path.as_posix().casefold())
+    if not unique_candidates:
         return
     target_root = context.source_root / "licenses" / re.sub(r"[^0-9A-Za-z_.-]+", "-", integration.name)
     if target_root.exists():
@@ -1265,7 +1284,7 @@ def _materialize_distribution_licenses(
     target_root.mkdir(parents=True, exist_ok=True)
     used_names: set[str] = set()
     integration.license_files.clear()
-    for source in sorted(candidates, key=lambda path: path.as_posix().casefold()):
+    for source in unique_candidates:
         target_name = source.name
         if target_name.casefold() in used_names:
             digest = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:8]
@@ -1275,6 +1294,42 @@ def _materialize_distribution_licenses(
         shutil.copy2(source, target)
         integration.license_files.append(target.relative_to(context.source_root).as_posix())
     context.log(f"materialized {len(integration.license_files)} license/notice file(s) for {integration.name}")
+
+
+def _finalize_integration_license_metadata(
+    context: LibraryHookContext,
+    integration: LibraryIntegration,
+) -> None:
+    if integration.license_expression is None and integration.source_provider == "pypi":
+        project_name = integration.project_name or integration.name
+        release_payload = _load_pypi_release_payload(project_name, integration.release_version)
+        integration.license_expression = _infer_license_expression(release_payload.get("info", {}))
+
+    if integration.license_files:
+        return
+
+    candidates: list[Path] = []
+    for relative in integration.materialized_paths:
+        path = context.source_root / relative
+        root = path if path.is_dir() else path.parent
+        candidates.extend(_distribution_license_candidates(root, maximum_depth=4))
+
+    if integration.source_provider == "pypi" and integration.release_version:
+        project_name = integration.project_name or integration.name
+        cached_distribution_root = (
+            context.work_cache_root
+            / "pypi"
+            / _normalized_project_name(project_name)
+            / integration.release_version
+        )
+        # Custom source hooks use slightly different extraction layouts. The
+        # version-scoped cache root is stable across all of them and keeps the
+        # scan bounded to the exact distribution selected for this pack.
+        candidates.extend(
+            _distribution_license_candidates(cached_distribution_root, maximum_depth=6)
+        )
+
+    _materialize_license_candidates(context, integration, candidates)
 
 
 def _version_format_args(context: LibraryHookContext) -> dict[str, int | str]:
@@ -2442,7 +2497,11 @@ def _apply_versioned_patch_rules(integration: LibraryIntegration, context: Libra
 
 
 def run_prepare_source_hooks(integrations: list[LibraryIntegration], context: LibraryHookContext) -> None:
-    _run_hooks(integrations, context, "prepare_source_hooks", "source")
+    for integration in integrations:
+        for hook in integration.prepare_source_hooks:
+            context.log(f"running {integration.name} source hook {hook.__name__}")
+            hook(context)
+        _finalize_integration_license_metadata(context, integration)
 
 
 def run_pre_patch_hooks(integrations: list[LibraryIntegration], context: LibraryHookContext) -> None:

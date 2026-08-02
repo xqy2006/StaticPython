@@ -243,6 +243,17 @@ def build_index(
     packs: dict[str, dict[str, dict[str, dict]]] = {}
     release_families: dict[str, dict] = {}
     family_counts: dict[str, int] = {}
+    if require_verified:
+        incomplete_licenses = [
+            path.name
+            for path, metadata in pack_assets
+            if metadata.get("license", {}).get("status") != "complete"
+        ]
+        if incomplete_licenses:
+            raise RuntimeError(
+                "release index contains packs with incomplete license metadata:\n- "
+                + "\n- ".join(incomplete_licenses)
+            )
     for path, metadata in pack_assets:
         name = metadata.get("name")
         version = metadata.get("version")
@@ -255,8 +266,6 @@ def build_index(
             raise RuntimeError(f"pack asset {path.name} was built from a different StaticPython commit")
         if require_verified and metadata.get("verification", {}).get("status") != "passed":
             raise RuntimeError(f"pack asset {path.name} is not verified")
-        if require_verified and metadata.get("license", {}).get("status") != "complete":
-            raise RuntimeError(f"pack asset {path.name} has incomplete license metadata")
         if require_verified:
             _validate_verified_provenance(metadata, path)
             runtime_metadata = runtimes.get(abi, {}).get("metadata", {})
