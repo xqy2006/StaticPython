@@ -1,0 +1,171 @@
+name: Pack-only runtime SDK verification
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/pack-sdk-verification.yml"
+      - "assets/overlay/Include/staticpython_pack.h"
+      - "assets/overlay/Python/staticpython_pack_runtime.c"
+      - "build.py"
+      - "libs.py"
+      - "scripts/build_library_contract_config.py"
+      - "scripts/verify_pack_with_runtime_sdk.py"
+      - "scripts/test_verify_pack_with_runtime_sdk.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staticpython-pack-sdk-verification-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  STATICPYTHON_BUILD_WORKERS: "2"
+  VERIFY_CPYTHON_VERSION: "3.13.14"
+  VERIFY_LIBRARY: "six"
+  VERIFY_LIBRARY_VERSION: "1.17.0"
+
+jobs:
+  sdk-linked-pack:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install packaging
+          choco install strawberryperl -y --no-progress
+
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Run verifier unit tests
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\test_verify_pack_with_runtime_sdk.py
+          python .\scripts\test_runtime_sdk.py
+
+      - name: Build exact-commit audited runtime SDK
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP "pack-sdk-runtime"
+          $runtimeDist = Join-Path $env:GITHUB_WORKSPACE "dist\runtime"
+          New-Item -ItemType Directory -Force $runtimeDist | Out-Null
+          python .\build.py `
+            --cpython-version $env:VERIFY_CPYTHON_VERSION `
+            --download-root $runtimeRoot `
+            --profile runtime-sdk `
+            --build-workers $env:STATICPYTHON_BUILD_WORKERS `
+            --output-runtime-sdk-dir $runtimeDist
+
+      - name: Generate exact one-library profile
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\pack-verification"
+          New-Item -ItemType Directory -Force $resultRoot | Out-Null
+          python .\scripts\build_library_contract_config.py `
+            --library $env:VERIFY_LIBRARY `
+            --version $env:VERIFY_LIBRARY_VERSION `
+            --output-config "$resultRoot\config.json"
+
+      - name: Build pack only, link audited SDK, and run behavior smoke
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $runtimeSdk = @(Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE\dist\runtime" -Filter *.zip -File)
+          if ($runtimeSdk.Count -ne 1) {
+            throw "Expected exactly one runtime SDK archive, found $($runtimeSdk.Count)"
+          }
+          $packRoot = Join-Path $env:RUNNER_TEMP "pack-sdk-library"
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\pack-verification"
+          $packDist = Join-Path $resultRoot "packs"
+          New-Item -ItemType Directory -Force $packDist | Out-Null
+          python .\build.py `
+            --cpython-version $env:VERIFY_CPYTHON_VERSION `
+            --download-root $packRoot `
+            --config "$resultRoot\config.json" `
+            --profile library-contract `
+            --pack-only `
+            --pack-runtime-sdk $runtimeSdk[0].FullName `
+            --build-workers $env:STATICPYTHON_BUILD_WORKERS `
+            --output-pack-dir $packDist `
+            --output-pack-name $env:VERIFY_LIBRARY
+          $sourceRoot = Join-Path $packRoot "cpython-$env:VERIFY_CPYTHON_VERSION"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" `
+            -Destination "$resultRoot\staticpython-pack-verify-report.json"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.map" `
+            -Destination "$resultRoot\staticpython-pack-verify.map"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.pdb" `
+            -Destination "$resultRoot\staticpython-pack-verify.pdb"
+
+      - name: Assert final pack was promoted only after SDK verification
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $pack = @(Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE\dist\pack-verification\packs" -Filter *.zip -File)
+          if ($pack.Count -ne 1) { throw "Expected exactly one final pack, found $($pack.Count)" }
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($pack[0].FullName)
+          try {
+            $entry = $archive.GetEntry("pack.json")
+            if (-not $entry) { throw "Final pack has no pack.json" }
+            $reader = [System.IO.StreamReader]::new($entry.Open())
+            try { $metadata = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+          } finally {
+            $archive.Dispose()
+          }
+          if ($metadata.verification.status -ne "passed") {
+            throw "Final pack was not promoted to verification=passed"
+          }
+          $failedSmokes = @($metadata.verification.smoke_tests | Where-Object status -ne "passed")
+          if ($failedSmokes.Count -gt 0) {
+            throw "Final pack contains non-passing smoke evidence"
+          }
+          $report = Get-Content -LiteralPath "$env:GITHUB_WORKSPACE\dist\pack-verification\staticpython-pack-verify-report.json" -Raw | ConvertFrom-Json
+          if ($report.status -ne "passed" -or $report.pe_audit.status -ne "passed") {
+            throw "SDK-linked verification or PE audit did not pass"
+          }
+          @(
+            "## Pack-only SDK verification",
+            "",
+            "- CPython: ``$env:VERIFY_CPYTHON_VERSION``",
+            "- Pack: ``$env:VERIFY_LIBRARY $env:VERIFY_LIBRARY_VERSION``",
+            "- Runtime ABI: ``$($report.runtime_sdk.runtime_abi)``",
+            "- Smoke tests: $(@($report.integration_smoke_tests).Count)",
+            "- PE dependencies: $(@($report.pe_audit.dependencies) -join ', ')"
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload SDK-linked pack evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-sdk-verification-cp313
+          path: |
+            dist/pack-verification/config.json
+            dist/pack-verification/packs/*.zip
+            dist/pack-verification/staticpython-pack-verify-report.json
+            dist/pack-verification/staticpython-pack-verify.map
+            dist/pack-verification/staticpython-pack-verify.pdb
+          if-no-files-found: warn
+          retention-days: 30
