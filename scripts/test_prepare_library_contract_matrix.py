@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -68,6 +69,25 @@ def delta() -> dict:
     }
 
 
+def append_candidates(payload: dict, count: int) -> None:
+    for index in range(1, count):
+        version = f"1.{index}"
+        source_sha256 = f"{index:064x}"
+        payload["new_candidates"].append(
+            {
+                "library": "demo",
+                "version": version,
+                "python_version": "3.13.14",
+                "status": "candidate",
+                "source": {
+                    "filename": f"demo-{version}.tar.gz",
+                    "url": f"https://files.pythonhosted.org/demo-{version}.tar.gz",
+                    "sha256": source_sha256,
+                },
+            }
+        )
+
+
 class PrepareLibraryContractMatrixTests(unittest.TestCase):
     def test_builds_locked_matrix_record(self) -> None:
         result = matrix_builder.prepare_matrix(contract(), delta())
@@ -77,6 +97,9 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
         self.assertEqual(record["source_sha256"], "a" * 64)
         self.assertNotIn("/", record["slug"])
         self.assertEqual(record["validation_reason"], "new-candidate")
+        self.assertEqual(len(result["batches"]), 1)
+        self.assertEqual(result["batches"][0]["candidate_count"], 1)
+        self.assertEqual(json.loads(result["batches"][0]["candidates_json"]), [record])
 
     def test_baseline_produces_an_empty_matrix(self) -> None:
         payload = delta()
@@ -84,7 +107,7 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
         payload["new_candidates"] = []
         self.assertEqual(
             matrix_builder.prepare_matrix(contract(), payload),
-            {"include": []},
+            {"include": [], "batches": []},
         )
 
     def test_source_drift_and_regression_are_red_lights(self) -> None:
@@ -112,6 +135,61 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
     def test_matrix_limit_fails_instead_of_silently_skipping(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "matrix limit"):
             matrix_builder.prepare_matrix(contract(), delta(), limit=0)
+
+    def test_batch_size_is_fail_closed(self) -> None:
+        for invalid in (0, 3, True):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(RuntimeError, "maximum candidates per batch"):
+                    matrix_builder.prepare_matrix(
+                        contract(),
+                        delta(),
+                        max_candidates_per_batch=invalid,
+                    )
+
+    def test_moderate_matrix_is_deterministically_batched_without_truncation(self) -> None:
+        candidate_delta = delta()
+        append_candidates(candidate_delta, 491)
+        result = matrix_builder.prepare_matrix(contract(), candidate_delta)
+        repeated = matrix_builder.prepare_matrix(contract(), candidate_delta)
+
+        self.assertEqual(len(result["include"]), 491)
+        self.assertEqual(len(result["batches"]), 256)
+        self.assertEqual(result["batches"], repeated["batches"])
+        self.assertLessEqual(
+            max(batch["candidate_count"] for batch in result["batches"]),
+            2,
+        )
+        decoded = [
+            candidate
+            for batch in result["batches"]
+            for candidate in json.loads(batch["candidates_json"])
+        ]
+        self.assertEqual(
+            sorted(record["slug"] for record in decoded),
+            sorted(record["slug"] for record in result["include"]),
+        )
+
+    def test_more_than_bounded_daily_capacity_is_deferred(self) -> None:
+        candidate_delta = delta()
+        append_candidates(candidate_delta, 513)
+        result = matrix_builder.prepare_matrix(
+            contract(),
+            candidate_delta,
+            defer_overflow_to_history=True,
+        )
+        self.assertEqual(result["include"], [])
+        self.assertEqual(result["batches"], [])
+        self.assertEqual(
+            result["deferred"],
+            {
+                "reason": "weekly-history-shards",
+                "candidate_count": 513,
+                "contract_sha256": "contract",
+                "matrix_limit": 256,
+                "max_candidates_per_batch": 2,
+                "incremental_candidate_limit": 512,
+            },
+        )
 
     def test_overflow_is_explicitly_deferred_to_weekly_history(self) -> None:
         payload = contract()
@@ -145,6 +223,7 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
             payload,
             candidate_delta,
             limit=1,
+            max_candidates_per_batch=1,
             smoke_library="demo",
             smoke_python_series="3.13",
             defer_overflow_to_history=True,
@@ -159,8 +238,11 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
                 "candidate_count": 2,
                 "contract_sha256": "contract",
                 "matrix_limit": 1,
+                "max_candidates_per_batch": 1,
+                "incremental_candidate_limit": 1,
             },
         )
+        self.assertEqual(len(result["batches"]), 1)
 
     def test_deferred_candidates_are_still_fully_validated(self) -> None:
         payload = contract()
@@ -193,6 +275,7 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
                 payload,
                 candidate_delta,
                 limit=1,
+                max_candidates_per_batch=1,
                 defer_overflow_to_history=True,
             )
 
@@ -209,6 +292,9 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
             daily,
         )
         self.assertNotIn("matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}", daily)
+        self.assertIn("$matrixDocument.batches", daily)
+        self.assertIn("CONTRACT_BATCH_JSON", daily)
+        self.assertIn("Build and verify candidate batch", daily)
         self.assertIn("Discover current source version contract", weekly)
         self.assertIn('selection = "current-source-discovery"', weekly)
         self.assertIn('"previous-library-version-contract.json"', weekly)

@@ -25,6 +25,8 @@ INDEX_KIND = "staticpython-library-contract-index"
 EVIDENCE_KIND = "staticpython-library-contract-promotion-evidence"
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 DEFERRED_REASON = "weekly-history-shards"
+MATRIX_LIMIT = 256
+MAX_CANDIDATES_PER_BATCH = 2
 
 
 def _canonical_sha256(payload: dict) -> str:
@@ -243,16 +245,36 @@ def _validate_matrix_and_reports(
     }
     deferred = None
     if raw_deferred is not None:
+        matrix_limit = (
+            raw_deferred.get("matrix_limit") if isinstance(raw_deferred, dict) else None
+        )
+        max_candidates_per_batch = (
+            raw_deferred.get("max_candidates_per_batch")
+            if isinstance(raw_deferred, dict)
+            else None
+        )
+        incremental_candidate_limit = (
+            raw_deferred.get("incremental_candidate_limit")
+            if isinstance(raw_deferred, dict)
+            else None
+        )
         valid_deferred = (
             isinstance(raw_deferred, dict)
             and raw_deferred.get("reason") == DEFERRED_REASON
             and raw_deferred.get("candidate_count") == len(delta_candidates)
             and raw_deferred.get("candidate_count") == len(delta_identities)
             and raw_deferred.get("contract_sha256") == delta.get("current_contract_sha256")
-            and isinstance(raw_deferred.get("matrix_limit"), int)
-            and 0 < raw_deferred["matrix_limit"] <= 256
+            and isinstance(matrix_limit, int)
+            and not isinstance(matrix_limit, bool)
+            and 0 < matrix_limit <= MATRIX_LIMIT
+            and isinstance(max_candidates_per_batch, int)
+            and not isinstance(max_candidates_per_batch, bool)
+            and 0 < max_candidates_per_batch <= MAX_CANDIDATES_PER_BATCH
+            and isinstance(incremental_candidate_limit, int)
+            and not isinstance(incremental_candidate_limit, bool)
+            and incremental_candidate_limit == matrix_limit * max_candidates_per_batch
             and not matrix_new_identities
-            and len(delta_candidates) > raw_deferred["matrix_limit"]
+            and len(delta_candidates) > incremental_candidate_limit
         )
         if valid_deferred:
             deferred = dict(raw_deferred)

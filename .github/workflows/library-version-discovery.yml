@@ -249,8 +249,17 @@ jobs:
             )
           }
           python @matrixArgs
-          $matrix = (Get-Content -LiteralPath $matrixPath -Raw).Trim()
-          $includeCount = @((ConvertFrom-Json $matrix).include).Count
+          $matrixDocument = Get-Content -LiteralPath $matrixPath -Raw | ConvertFrom-Json
+          $dispatchMatrix = [ordered]@{
+            include = @($matrixDocument.batches | ForEach-Object {
+              [ordered]@{
+                slug = $_.slug
+                candidate_count = $_.candidate_count
+              }
+            })
+          }
+          $matrix = ConvertTo-Json -InputObject $dispatchMatrix -Depth 4 -Compress
+          $includeCount = @($dispatchMatrix.include).Count
           $hasCandidates = ($includeCount -gt 0).ToString().ToLowerInvariant()
           $contract = Get-Content -LiteralPath $contractPath -Raw | ConvertFrom-Json
           "matrix=$matrix" >> $env:GITHUB_OUTPUT
@@ -278,21 +287,44 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.discover.outputs.matrix).include }}
     env:
-      CONTRACT_LIBRARY: ${{ matrix.library }}
-      CONTRACT_PROJECT_NAME: ${{ matrix.project_name }}
-      CONTRACT_VERSION: ${{ matrix.version }}
-      CONTRACT_PYTHON_VERSION: ${{ matrix.python_version }}
-      CONTRACT_SOURCE_FILENAME: ${{ matrix.source_filename }}
-      CONTRACT_SOURCE_URL: ${{ matrix.source_url }}
-      CONTRACT_SOURCE_SHA256: ${{ matrix.source_sha256 }}
+      CONTRACT_BATCH_SLUG: ${{ matrix.slug }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download immutable contract matrix
+        uses: actions/download-artifact@v4
+        with:
+          name: library-version-contract
+          path: .tmp/contract
+
+      - name: Load exact candidate batch
+        shell: pwsh
+        run: |
+          $matrixPath = Join-Path $env:GITHUB_WORKSPACE ".tmp\contract\library-version-matrix.json"
+          if (-not (Test-Path -LiteralPath $matrixPath -PathType Leaf)) {
+            throw "Downloaded contract artifact has no library-version-matrix.json"
+          }
+          $matrix = Get-Content -LiteralPath $matrixPath -Raw | ConvertFrom-Json
+          $matches = @($matrix.batches | Where-Object slug -eq $env:CONTRACT_BATCH_SLUG)
+          if ($matches.Count -ne 1) {
+            throw "Expected exactly one contract batch named $env:CONTRACT_BATCH_SLUG"
+          }
+          $batch = $matches[0]
+          $candidates = @($batch.candidates_json | ConvertFrom-Json)
+          if (
+            $candidates.Count -lt 1 -or
+            $candidates.Count -gt 2 -or
+            $candidates.Count -ne [int]$batch.candidate_count
+          ) {
+            throw "Contract batch candidate count does not match its manifest"
+          }
+          "CONTRACT_BATCH_JSON=$($batch.candidates_json)" >> $env:GITHUB_ENV
 
       - name: Define isolated contract paths
         shell: pwsh
         run: |
-          "CONTRACT_BUILD_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-contract-${{ matrix.slug }}')" >> $env:GITHUB_ENV
-          "CONTRACT_RESULT_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-contract-result-${{ matrix.slug }}')" >> $env:GITHUB_ENV
+          "CONTRACT_BATCH_BUILD_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-contract-build-${{ matrix.slug }}')" >> $env:GITHUB_ENV
+          "CONTRACT_BATCH_RESULT_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-contract-result-${{ matrix.slug }}')" >> $env:GITHUB_ENV
           "CONTRACT_SOURCE_CACHE=$(Join-Path $env:GITHUB_WORKSPACE 'downloads')" >> $env:GITHUB_ENV
 
       - uses: actions/setup-python@v5
@@ -314,55 +346,67 @@ jobs:
         with:
           arch: amd64
 
-      - name: Generate one-library historical build profile
+      - name: Build and verify candidate batch
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force $env:CONTRACT_RESULT_ROOT | Out-Null
-          python .\scripts\build_library_contract_config.py `
-            --library $env:CONTRACT_LIBRARY `
-            --version $env:CONTRACT_VERSION `
-            --output-config "$env:CONTRACT_RESULT_ROOT\config.json"
-
-      - name: Stage exact locked PyPI source
-        shell: pwsh
-        run: |
-          python .\scripts\library_contract_build.py stage `
-            --download-root $env:CONTRACT_SOURCE_CACHE `
-            --project-name $env:CONTRACT_PROJECT_NAME `
-            --version $env:CONTRACT_VERSION `
-            --filename $env:CONTRACT_SOURCE_FILENAME `
-            --url $env:CONTRACT_SOURCE_URL `
-            --sha256 $env:CONTRACT_SOURCE_SHA256
-
-      - name: Build, link and run behavior smoke tests
-        shell: pwsh
-        run: |
-          $packDir = "$env:CONTRACT_RESULT_ROOT\packs"
-          New-Item -ItemType Directory -Force $packDir | Out-Null
-          python .\build.py `
-            --cpython-version $env:CONTRACT_PYTHON_VERSION `
-            --download-root $env:CONTRACT_BUILD_ROOT `
-            --config "$env:CONTRACT_RESULT_ROOT\config.json" `
-            --profile library-contract `
-            --build-workers $env:STATICPYTHON_CONTRACT_BUILD_WORKERS `
-            --output-pack-dir $packDir `
-            --output-pack-name $env:CONTRACT_LIBRARY
-
-      - name: Audit source, pack, behavior and PE dependencies
-        shell: pwsh
-        run: |
-          $pythonExe = "$env:CONTRACT_BUILD_ROOT\cpython-$env:CONTRACT_PYTHON_VERSION\PCbuild\amd64\python.exe"
-          python .\scripts\library_contract_build.py verify `
-            --download-root $env:CONTRACT_SOURCE_CACHE `
-            --project-name $env:CONTRACT_PROJECT_NAME `
-            --library $env:CONTRACT_LIBRARY `
-            --version $env:CONTRACT_VERSION `
-            --python-version $env:CONTRACT_PYTHON_VERSION `
-            --filename $env:CONTRACT_SOURCE_FILENAME `
-            --sha256 $env:CONTRACT_SOURCE_SHA256 `
-            --pack-dir "$env:CONTRACT_RESULT_ROOT\packs" `
-            --python-exe $pythonExe `
-            --report "$env:CONTRACT_RESULT_ROOT\library-contract-build-report.json"
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $candidates = @($env:CONTRACT_BATCH_JSON | ConvertFrom-Json)
+          $failures = [System.Collections.Generic.List[string]]::new()
+          foreach ($candidate in $candidates) {
+            $buildRoot = Join-Path $env:CONTRACT_BATCH_BUILD_ROOT $candidate.slug
+            $resultRoot = Join-Path $env:CONTRACT_BATCH_RESULT_ROOT $candidate.slug
+            $identity = "$($candidate.library) $($candidate.version) / CPython $($candidate.python_version)"
+            try {
+              New-Item -ItemType Directory -Force $resultRoot | Out-Null
+              python .\scripts\build_library_contract_config.py `
+                --library $candidate.library `
+                --version $candidate.version `
+                --output-config (Join-Path $resultRoot "config.json")
+              python .\scripts\library_contract_build.py stage `
+                --download-root $env:CONTRACT_SOURCE_CACHE `
+                --project-name $candidate.project_name `
+                --version $candidate.version `
+                --filename $candidate.source_filename `
+                --url $candidate.source_url `
+                --sha256 $candidate.source_sha256
+              $packDir = Join-Path $resultRoot "packs"
+              New-Item -ItemType Directory -Force $packDir | Out-Null
+              python .\build.py `
+                --cpython-version $candidate.python_version `
+                --download-root $buildRoot `
+                --config (Join-Path $resultRoot "config.json") `
+                --profile library-contract `
+                --build-workers $env:STATICPYTHON_CONTRACT_BUILD_WORKERS `
+                --output-pack-dir $packDir `
+                --output-pack-name $candidate.library
+              $pythonExe = Join-Path $buildRoot "cpython-$($candidate.python_version)\PCbuild\amd64\python.exe"
+              python .\scripts\library_contract_build.py verify `
+                --download-root $env:CONTRACT_SOURCE_CACHE `
+                --project-name $candidate.project_name `
+                --library $candidate.library `
+                --version $candidate.version `
+                --python-version $candidate.python_version `
+                --filename $candidate.source_filename `
+                --sha256 $candidate.source_sha256 `
+                --pack-dir $packDir `
+                --python-exe $pythonExe `
+                --report (Join-Path $resultRoot "library-contract-build-report.json")
+            }
+            catch {
+              New-Item -ItemType Directory -Force $resultRoot | Out-Null
+              $message = "$identity failed: $($_.Exception.Message)"
+              $failures.Add($message)
+              Set-Content `
+                -LiteralPath (Join-Path $resultRoot "library-contract-batch-failure.txt") `
+                -Value $message `
+                -Encoding utf8
+              Write-Warning $message
+            }
+          }
+          if ($failures.Count -gt 0) {
+            throw ("$($failures.Count) candidate build(s) failed:`n" + ($failures -join "`n"))
+          }
 
       - name: Upload candidate evidence
         if: always()
@@ -370,10 +414,8 @@ jobs:
         with:
           name: library-contract-${{ matrix.slug }}
           path: |
-            ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/packs/*.zip
-            ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/library-contract-build-report.json
-            ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/config.json
-            ${{ runner.temp }}/library-contract-${{ matrix.slug }}/cpython-${{ matrix.python_version }}/PCbuild/staticpython-verify-report.json
+            ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/**/*
+            ${{ runner.temp }}/library-contract-build-${{ matrix.slug }}/**/staticpython-verify-report.json
           if-no-files-found: warn
           retention-days: 30
 

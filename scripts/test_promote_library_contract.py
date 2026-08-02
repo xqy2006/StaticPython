@@ -399,6 +399,8 @@ class PromotionTests(unittest.TestCase):
                     "candidate_count": 1,
                     "contract_sha256": candidate["contract_sha256"],
                     "matrix_limit": 0,
+                    "max_candidates_per_batch": 1,
+                    "incremental_candidate_limit": 0,
                 },
             },
             previous_catalog=previous_catalog,
@@ -417,6 +419,8 @@ class PromotionTests(unittest.TestCase):
             "candidate_count": 1,
             "contract_sha256": candidate["contract_sha256"],
             "matrix_limit": 1,
+            "max_candidates_per_batch": 1,
+            "incremental_candidate_limit": 1,
         }
         # A real overflow must be larger than its matrix limit. Model two
         # exact candidates without weakening the production invariant.
@@ -457,6 +461,34 @@ class PromotionTests(unittest.TestCase):
             ).read_text()
         )
         self.assertEqual(evidence["validation"]["deferred"], deferred)
+
+        for label, updates in (
+            (
+                "oversized-batch",
+                {"max_candidates_per_batch": 3, "incremental_candidate_limit": 3},
+            ),
+            ("capacity-mismatch", {"max_candidates_per_batch": 2}),
+            ("not-overflow", {"incremental_candidate_limit": 2}),
+        ):
+            with self.subTest(label=label):
+                tampered = {**deferred, **updates}
+                invalid, _invalid_output = self.run_promotion(
+                    candidate,
+                    delta(
+                        baseline["contract_sha256"],
+                        candidate["contract_sha256"],
+                        baseline=False,
+                        new_candidates=[candidate_record(source_sha), second],
+                    ),
+                    matrix_payload={"include": [], "deferred": tampered},
+                    previous_catalog=previous_catalog,
+                    output_name=f"deferred-{label}",
+                )
+                self.assertEqual(invalid["decision"]["status"], "frozen")
+                self.assertIn(
+                    "invalid-history-deferral",
+                    {record["code"] for record in invalid["decision"]["blockers"]},
+                )
 
     def test_tampered_delta_cannot_hide_a_regression(self) -> None:
         source_sha = "a" * 64
