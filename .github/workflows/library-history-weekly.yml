@@ -283,8 +283,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.plan.outputs.plan_artifact }}
-          path: .tmp/history-plan/**
+          path: |
+            .tmp/history-plan/library-version-contract.json
+            .tmp/history-plan/contract-source.v1.json
+            .tmp/history-plan/library-history-manifest.json
           if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload previous last-known-good support for promotion
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.plan.outputs.plan_artifact }}-previous-support
+          path: .tmp/history-plan/previous-catalog/**
+          if-no-files-found: ignore
           retention-days: 90
 
   runtime-sdks:
@@ -375,6 +386,13 @@ jobs:
         with:
           name: ${{ needs.plan.outputs.plan_artifact }}
           path: .tmp/history-plan
+
+      - name: Download previous last-known-good support
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.plan.outputs.plan_artifact }}-previous-support
+          path: .tmp/history-plan/previous-catalog
 
       - name: Download completed shard evidence
         continue-on-error: true
