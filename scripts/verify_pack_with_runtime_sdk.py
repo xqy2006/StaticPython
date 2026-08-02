@@ -729,6 +729,26 @@ def _run_tool(command: list[str], *, cwd: Path, timeout: float | None = None) ->
     return result.stdout
 
 
+def resolve_verifier_tool(name: str) -> str:
+    """Reuse an existing Developer Command Prompt before invoking vcvars again.
+
+    GitHub's msvc-dev-cmd action exports a complete environment whose PATH,
+    INCLUDE and LIB values can exceed cmd.exe's input-line limit if vcvars64
+    tries to append the same values a second time.
+    """
+    required_environment = (
+        "INCLUDE",
+        "LIB",
+        "VCToolsInstallDir",
+        "WindowsSdkDir",
+    )
+    if all(os.environ.get(key) for key in required_environment):
+        configured = shutil.which(name)
+        if configured:
+            return configured
+    return resolve_tool_exe(name)
+
+
 def _compile_source(
     cl: str,
     source: Path,
@@ -849,9 +869,9 @@ def build_harness(
         for pack in packs
         for relative in pack.metadata["sources"]
     )
-    cl = resolve_tool_exe("cl")
-    link = resolve_tool_exe("link")
-    dumpbin = resolve_tool_exe("dumpbin")
+    cl = resolve_verifier_tool("cl")
+    link = resolve_verifier_tool("link")
+    dumpbin = resolve_verifier_tool("dumpbin")
     max_workers = build_workers or max(1, min(8, (os.cpu_count() or 2) - 1))
     max_workers = max(1, min(max_workers, len(sources)))
     jobs = []

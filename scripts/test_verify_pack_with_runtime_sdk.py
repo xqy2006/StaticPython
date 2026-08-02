@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -250,6 +251,31 @@ Dump of file demo.exe
   Summary
 """
         self.assertEqual(verifier._dependency_names(output), ["KERNEL32.dll", "USER32.dll"])
+
+    def test_existing_msvc_developer_environment_is_reused(self) -> None:
+        environment = {
+            "INCLUDE": r"C:\VS\include",
+            "LIB": r"C:\VS\lib",
+            "VCToolsInstallDir": "C:\\VS\\Tools\\",
+            "WindowsSdkDir": "C:\\Windows SDK\\",
+        }
+        with (
+            mock.patch.dict(verifier.os.environ, environment, clear=True),
+            mock.patch.object(verifier.shutil, "which", return_value=r"C:\VS\bin\cl.exe"),
+            mock.patch.object(verifier, "resolve_tool_exe") as fallback,
+        ):
+            self.assertEqual(verifier.resolve_verifier_tool("cl"), r"C:\VS\bin\cl.exe")
+        fallback.assert_not_called()
+
+    def test_missing_msvc_environment_uses_the_vcvars_fallback(self) -> None:
+        with (
+            mock.patch.dict(verifier.os.environ, {}, clear=True),
+            mock.patch.object(verifier.shutil, "which") as which,
+            mock.patch.object(verifier, "resolve_tool_exe", return_value=r"C:\VS\bin\cl.exe") as fallback,
+        ):
+            self.assertEqual(verifier.resolve_verifier_tool("cl"), r"C:\VS\bin\cl.exe")
+        which.assert_not_called()
+        fallback.assert_called_once_with("cl")
 
 
 if __name__ == "__main__":
