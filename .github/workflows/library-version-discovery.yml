@@ -353,11 +353,32 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           $candidates = @($env:CONTRACT_BATCH_JSON | ConvertFrom-Json)
           $failures = [System.Collections.Generic.List[string]]::new()
+          $batchBuildRootPath = [IO.Path]::GetFullPath($env:CONTRACT_BATCH_BUILD_ROOT)
           foreach ($candidate in $candidates) {
             $buildRoot = Join-Path $env:CONTRACT_BATCH_BUILD_ROOT $candidate.slug
             $resultRoot = Join-Path $env:CONTRACT_BATCH_RESULT_ROOT $candidate.slug
             $identity = "$($candidate.library) $($candidate.version) / CPython $($candidate.python_version)"
+            $buildRootPath = $null
+            $safeBuildRoot = $false
+            $staticVerifyReport = Join-Path `
+              $buildRoot `
+              "cpython-$($candidate.python_version)\PCbuild\staticpython-verify-report.json"
             try {
+              $buildRootPath = [IO.Path]::GetFullPath($buildRoot)
+              $relativeBuildRoot = [IO.Path]::GetRelativePath(
+                $batchBuildRootPath,
+                $buildRootPath
+              )
+              if (
+                $relativeBuildRoot -eq "." -or
+                $relativeBuildRoot -eq ".." -or
+                $relativeBuildRoot.StartsWith("..\") -or
+                $relativeBuildRoot.StartsWith("../") -or
+                [IO.Path]::IsPathRooted($relativeBuildRoot)
+              ) {
+                throw "Candidate build root escapes the isolated batch directory"
+              }
+              $safeBuildRoot = $true
               New-Item -ItemType Directory -Force $resultRoot | Out-Null
               python .\scripts\build_library_contract_config.py `
                 --library $candidate.library `
@@ -392,6 +413,13 @@ jobs:
                 --pack-dir $packDir `
                 --python-exe $pythonExe `
                 --report (Join-Path $resultRoot "library-contract-build-report.json")
+              if (-not (Test-Path -LiteralPath $staticVerifyReport -PathType Leaf)) {
+                throw "StaticPython verification report is missing"
+              }
+              Copy-Item `
+                -LiteralPath $staticVerifyReport `
+                -Destination (Join-Path $resultRoot "staticpython-verify-report.json") `
+                -Force
             }
             catch {
               New-Item -ItemType Directory -Force $resultRoot | Out-Null
@@ -403,9 +431,36 @@ jobs:
                 -Encoding utf8
               Write-Warning $message
             }
+            finally {
+              if ($safeBuildRoot -and (Test-Path -LiteralPath $buildRootPath -PathType Container)) {
+                try {
+                  $savedVerifyReport = Join-Path $resultRoot "staticpython-verify-report.json"
+                  if (
+                    (Test-Path -LiteralPath $staticVerifyReport -PathType Leaf) -and
+                    -not (Test-Path -LiteralPath $savedVerifyReport -PathType Leaf)
+                  ) {
+                    Copy-Item `
+                      -LiteralPath $staticVerifyReport `
+                      -Destination $savedVerifyReport `
+                      -Force
+                  }
+                  Remove-Item -LiteralPath $buildRootPath -Recurse -Force
+                }
+                catch {
+                  New-Item -ItemType Directory -Force $resultRoot | Out-Null
+                  $message = "$identity cleanup failed: $($_.Exception.Message)"
+                  $failures.Add($message)
+                  Add-Content `
+                    -LiteralPath (Join-Path $resultRoot "library-contract-batch-failure.txt") `
+                    -Value $message `
+                    -Encoding utf8
+                  Write-Warning $message
+                }
+              }
+            }
           }
           if ($failures.Count -gt 0) {
-            throw ("$($failures.Count) candidate build(s) failed:`n" + ($failures -join "`n"))
+            throw ("$($failures.Count) candidate batch operation(s) failed:`n" + ($failures -join "`n"))
           }
 
       - name: Upload candidate evidence
@@ -415,7 +470,6 @@ jobs:
           name: library-contract-${{ matrix.slug }}
           path: |
             ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/**/*
-            ${{ runner.temp }}/library-contract-build-${{ matrix.slug }}/**/staticpython-verify-report.json
           if-no-files-found: warn
           retention-days: 30
 
