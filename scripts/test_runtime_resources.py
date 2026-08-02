@@ -375,7 +375,7 @@ class RuntimeResourceTests(unittest.TestCase):
             importlib.machinery.FrozenImporter,
             origin="frozen",
         )
-        spec.loader_state = SimpleNamespace(filename=None, origname=None)
+        spec.loader_state = SimpleNamespace(filename=None, origname="demo_pkg.reader")
         with mock.patch.object(importlib.machinery.FrozenImporter, "find_spec", return_value=spec):
             result = self.runtime._StaticPythonFrozenFileFinder.find_spec("demo_pkg.reader")
 
@@ -396,7 +396,7 @@ class RuntimeResourceTests(unittest.TestCase):
             origin="frozen",
             is_package=True,
         )
-        spec.loader_state = SimpleNamespace(filename=None, origname=None)
+        spec.loader_state = SimpleNamespace(filename=None, origname="demo_pkg")
         with mock.patch.object(importlib.machinery.FrozenImporter, "find_spec", return_value=spec):
             result = self.runtime._StaticPythonFrozenFileFinder.find_spec("demo_pkg")
 
@@ -416,12 +416,12 @@ class RuntimeResourceTests(unittest.TestCase):
             importlib.machinery.FrozenImporter,
             origin="frozen",
         )
-        spec.loader_state = SimpleNamespace(filename="C:/Python/Lib/os.py", origname="os")
+        spec.loader_state = SimpleNamespace(filename=None, origname="os")
         with mock.patch.object(importlib.machinery.FrozenImporter, "find_spec", return_value=spec):
             result = self.runtime._StaticPythonFrozenFileFinder.find_spec("os")
 
         self.assertIsNone(result)
-        self.assertEqual(spec.loader_state.filename, "C:/Python/Lib/os.py")
+        self.assertIsNone(spec.loader_state.filename)
 
     def test_frozen_file_finder_installation_is_ordered_and_reversible(self) -> None:
         finder = self.runtime._StaticPythonFrozenFileFinder

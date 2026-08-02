@@ -86,11 +86,15 @@ class _StaticPythonFrozenFileFinder:
         state = getattr(spec, "loader_state", None)
         missing = object()
         origname = getattr(state, "origname", missing)
-        if state is None or origname is missing or origname is not None:
-            # Named stdlib frozen modules already receive CPython's canonical
-            # source location.  Never replace it with a StaticPython URI.
+        if state is None or origname is missing:
             return None
         if getattr(state, "filename", None):
+            return None
+        if fullname.partition(".")[0] in sys.stdlib_module_names:
+            # CPython can leave the canonical filename empty while still
+            # identifying a stdlib frozen module by origname.  Classify by
+            # the target runtime's inventory instead: linked pack modules can
+            # report their own name in origname too.
             return None
 
         is_package = spec.submodule_search_locations is not None

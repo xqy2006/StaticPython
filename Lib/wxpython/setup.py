@@ -108,7 +108,6 @@ WXPYTHON_SYSTEM_LIBRARIES = [
     "glu32.lib",
 ]
 
-
 def _project_guid(name: str) -> str:
     return "{" + str(uuid.uuid5(WXPYTHON_GUID_NAMESPACE, name)).upper() + "}"
 
@@ -600,6 +599,8 @@ LIBRARY_INTEGRATION = pypi_library(
                 "import importlib, wx; "
                 "mods=('wx.siplib','wx._core','wx.adv','wx.html','wx.stc','wx.xrc'); "
                 "assert all(importlib.import_module(name) is not None for name in mods); "
+                "core=importlib.import_module('wx.core'); "
+                "assert core.__file__.startswith('staticpython-resource:///Lib/wx/'); "
                 "assert wx.VERSION[:2] >= (4, 2); "
                 "assert all(hasattr(wx, name) for name in ('App','Frame','Button'))"
             ),
