@@ -46,7 +46,11 @@ jobs:
           if ($source.status -ne "completed" -or $source.conclusion -ne "success") {
             throw "SDK and pack source run is not successful"
           }
-          if ($source.workflowName -ne "Build StaticPython Release") {
+          $allowedSourceWorkflows = @(
+            "Build StaticPython Release",
+            "Build immutable StaticPython prerelease"
+          )
+          if ($source.workflowName -notin $allowedSourceWorkflows) {
             throw "Unexpected SDK and pack workflow: $($source.workflowName)"
           }
           if ($source.headSha -notmatch "^[0-9a-f]{40}$") {
@@ -98,7 +102,11 @@ jobs:
           if ($full.status -ne "completed" -or $full.conclusion -ne "success") {
             throw "Full-profile validation run is not successful"
           }
-          if ($full.workflowName -ne "Validate wxPython full-profile candidate") {
+          $allowedFullWorkflows = @(
+            "Validate wxPython full-profile candidate",
+            "Weekly full-profile conflict regression"
+          )
+          if ($full.workflowName -notin $allowedFullWorkflows) {
             throw "Unexpected full-profile workflow: $($full.workflowName)"
           }
           if ($full.headSha -notmatch "^[0-9a-f]{40}$") {
