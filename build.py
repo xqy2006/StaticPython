@@ -1278,6 +1278,34 @@ def runtime_frozen_module_names(source_root: Path) -> list[str]:
     return sorted(names, key=str.casefold)
 
 
+def runtime_builtin_module_names(source_root: Path) -> list[str]:
+    """Return the exact names registered in the target CPython inittab."""
+    config_path = source_root / "PC" / "config.c"
+    text = config_path.read_text(encoding="utf-8", errors="replace")
+    table = re.search(
+        r"struct\s+_inittab\s+_PyImport_Inittab\s*\[\s*\]\s*=\s*\{",
+        text,
+    )
+    if table is None:
+        raise RuntimeError(f"could not locate _PyImport_Inittab in {config_path}")
+    tail = text[table.end():]
+    sentinel = re.search(
+        r"^\s*\{\s*(?:0|NULL)\s*,\s*(?:0|NULL)\s*\}\s*,?",
+        tail,
+        re.MULTILINE,
+    )
+    if sentinel is None:
+        raise RuntimeError(f"could not locate _PyImport_Inittab sentinel in {config_path}")
+    names = {
+        name
+        for name in re.findall(r'^\s*\{\s*"([^"]+)"\s*,', tail[:sentinel.start()], re.MULTILINE)
+        if name
+    }
+    if not names:
+        raise RuntimeError(f"_PyImport_Inittab contains no modules in {config_path}")
+    return sorted(names, key=str.casefold)
+
+
 def resolve_runtime_sdk_pyconfig_header(source_root: Path, platform: str) -> Path:
     candidates = [
         get_pcbuild_output_dir(source_root, platform) / "pyconfig.h",
@@ -1371,12 +1399,14 @@ def export_runtime_sdk(
             })
         cpython_source = cpython_source_provenance(source_root, version_full)
         builtin_registrations = iter_builtin_module_registrations(source_root, manifest, integrations)
+        builtin_module_names = runtime_builtin_module_names(source_root)
         frozen_module_names = runtime_frozen_module_names(source_root)
         stdlib_top_level_import_names = sorted(
             {
                 name.split(".", 1)[0]
                 for name in [
                     *frozen_module_names,
+                    *builtin_module_names,
                     *(registration["name"] for registration in builtin_registrations),
                 ]
                 if name
@@ -1412,6 +1442,7 @@ def export_runtime_sdk(
             "link_libraries": ordered_libraries,
             "system_libraries": list(dict.fromkeys(system_libraries)),
             "builtin_module_registrations": builtin_registrations,
+            "builtin_module_names": builtin_module_names,
             "frozen_module_names": frozen_module_names,
             "stdlib_top_level_import_names": stdlib_top_level_import_names,
             "libraries": [

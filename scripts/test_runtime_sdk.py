@@ -116,6 +116,29 @@ const struct _module_alias aliases[] = {
             ["asyncio", "asyncio.tasks", "importlib._bootstrap", "os.path"],
         )
 
+    def test_runtime_builtin_module_names_come_from_target_inittab(self) -> None:
+        config = self.root / "PC" / "config.c"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            '''
+static struct _inittab unrelated[] = {
+    {"must_not_ship", PyInit_must_not_ship},
+    {0, 0}
+};
+struct _inittab _PyImport_Inittab[] = {
+    {"_abc", PyInit__abc},
+    {"builtins", NULL},
+    {"sys", NULL},
+    {0, 0} /* Sentinel */
+};
+''',
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            build.runtime_builtin_module_names(self.root),
+            ["_abc", "builtins", "sys"],
+        )
+
     def test_cpython_tag_resolution_prefers_peeled_commit(self) -> None:
         direct = "1" * 40
         peeled = "2" * 40
