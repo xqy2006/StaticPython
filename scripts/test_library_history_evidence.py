@@ -227,14 +227,19 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
             self.manifest,
             0,
             plan_artifact="library-history-plan-demo",
+            artifact_suffix="a2",
         )
         self.assertEqual(len(matrix["include"]), 1)
         self.assertEqual(
             matrix["include"][0]["runtime_artifact"],
             evidence_module.runtime_artifact_name(
-                self.contract["contract_sha256"], "3.13.14"
+                self.contract["contract_sha256"], "3.13.14", "a2"
             ),
         )
+        with self.assertRaisesRegex(RuntimeError, "suffix is invalid"):
+            evidence_module.runtime_artifact_name(
+                self.contract["contract_sha256"], "3.13.14", "../attempt-2"
+            )
         self.assertEqual(
             plan["shard"]["shard_sha256"],
             self.manifest["run_shards"][0]["shard_sha256"],

@@ -15,6 +15,9 @@ on:
       manifest_sha256:
         required: true
         type: string
+      artifact_suffix:
+        required: true
+        type: string
       shard_index:
         required: true
         type: number
@@ -62,6 +65,7 @@ jobs:
             --manifest .tmp\history-plan\library-history-manifest.json `
             --shard-index ${{ inputs.shard_index }} `
             --plan-artifact "${{ inputs.plan_artifact }}" `
+            --artifact-suffix "${{ inputs.artifact_suffix }}" `
             --plan-output .tmp\shard-plan\library-history-shard-plan.v1.json `
             --matrix-output .tmp\shard-plan\library-history-shard-matrix.json `
             --github-output $env:GITHUB_OUTPUT

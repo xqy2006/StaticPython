@@ -242,7 +242,9 @@ jobs:
           }
           python @planArgs
           $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-          $manifestKey = ([string]$manifest.manifest_sha256).Substring(0, 16)
+          $manifestHashKey = ([string]$manifest.manifest_sha256).Substring(0, 16)
+          $artifactSuffix = "a${{ github.run_attempt }}"
+          $manifestKey = "$manifestHashKey-$artifactSuffix"
           $planArtifact = "library-history-plan-$manifestKey"
           $shardMatrix = [ordered]@{
             include = @($manifest.run_shards | ForEach-Object {
@@ -256,7 +258,7 @@ jobs:
               ForEach-Object {
                 [ordered]@{
                   python_version = [string]$_
-                  runtime_artifact = "library-history-runtime-$(([string]$manifest.contract_sha256).Substring(0, 16))-py$_"
+                  runtime_artifact = "library-history-runtime-$(([string]$manifest.contract_sha256).Substring(0, 16))-py$_-$artifactSuffix"
                 }
               })
           }
@@ -364,6 +366,7 @@ jobs:
       manifest_key: ${{ needs.plan.outputs.manifest_key }}
       contract_sha256: ${{ needs.plan.outputs.contract_sha256 }}
       manifest_sha256: ${{ needs.plan.outputs.manifest_sha256 }}
+      artifact_suffix: a${{ github.run_attempt }}
       shard_index: ${{ matrix.shard_index }}
 
   promote-support:

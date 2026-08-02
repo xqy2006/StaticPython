@@ -93,7 +93,11 @@ def _safe_relative(root: Path, relative: str, description: str) -> Path:
     return path
 
 
-def runtime_artifact_name(contract_sha256: str, python_version: str) -> str:
+def runtime_artifact_name(
+    contract_sha256: str,
+    python_version: str,
+    artifact_suffix: str | None = None,
+) -> str:
     if not SHA256_PATTERN.fullmatch(contract_sha256):
         raise RuntimeError("runtime artifact contract SHA-256 is invalid")
     if not re.fullmatch(
@@ -102,7 +106,17 @@ def runtime_artifact_name(contract_sha256: str, python_version: str) -> str:
         raise RuntimeError(
             f"runtime artifact Python version is invalid: {python_version!r}"
         )
-    return f"library-history-runtime-{contract_sha256[:16].lower()}-py{python_version}"
+    suffix = ""
+    if artifact_suffix is not None:
+        if not isinstance(artifact_suffix, str) or not SAFE_ID_PATTERN.fullmatch(
+            artifact_suffix
+        ):
+            raise RuntimeError("runtime artifact suffix is invalid")
+        suffix = f"-{artifact_suffix}"
+    return (
+        f"library-history-runtime-{contract_sha256[:16].lower()}-py{python_version}"
+        f"{suffix}"
+    )
 
 
 def expected_combinations(contract: dict, batch: dict) -> list[dict]:
@@ -322,6 +336,7 @@ def prepare_shard_plan(
     shard_index: int,
     *,
     plan_artifact: str,
+    artifact_suffix: str | None = None,
 ) -> tuple[dict, dict]:
     manifest_sha = validate_manifest(manifest, contract)
     shards = manifest["run_shards"]
@@ -341,7 +356,9 @@ def prepare_shard_plan(
             "python_version": batch["python_version"],
             "build_kind": batch["build_kind"],
             "runtime_artifact": runtime_artifact_name(
-                manifest["contract_sha256"], batch["python_version"]
+                manifest["contract_sha256"],
+                batch["python_version"],
+                artifact_suffix,
             ),
         }
         for batch in batches
@@ -1532,6 +1549,7 @@ def parse_args() -> argparse.Namespace:
     prepare.add_argument("--manifest", type=Path, required=True)
     prepare.add_argument("--shard-index", type=int, required=True)
     prepare.add_argument("--plan-artifact", required=True)
+    prepare.add_argument("--artifact-suffix")
     prepare.add_argument("--plan-output", type=Path, required=True)
     prepare.add_argument("--matrix-output", type=Path, required=True)
     prepare.add_argument("--github-output", type=Path)
@@ -1566,6 +1584,7 @@ def main() -> int:
             manifest,
             args.shard_index,
             plan_artifact=args.plan_artifact,
+            artifact_suffix=args.artifact_suffix,
         )
         write_object(args.plan_output, plan)
         write_object(args.matrix_output, matrix)
