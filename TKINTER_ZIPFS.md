@@ -36,11 +36,13 @@ the in-memory filesystem is registered. It also pre-seeds `auto_path` with only
 the mounted Tcl directory and
 clears `tcl_pkgPath` before initialization, preventing `TCLLIBPATH` from being
 adopted. Immediately after `Tcl_Init`, it restores that exact path boundary and
-clears Tcl module (`.tm`) search roots derived from the executable and
-`TCL*_TM_PATH` environment variables. The executable's adjacent `lib` and
-compiled installation paths therefore cannot supply scripts. The build fails
-if those upstream anchors drift. Dedicated behavior tests deliberately poison
-all of these environment variables with an external directory and require the
+explicitly loads `tm.tcl` from the mounted archive and clears Tcl module (`.tm`)
+search roots. The locked `tm.tcl` initialization is patched through a strict
+single-match anchor so it never adds executable-relative directories or
+`TCL*_TM_PATH` environment paths. The executable's adjacent `lib` and compiled
+installation paths therefore cannot supply scripts. The build fails if those
+upstream anchors drift. Dedicated behavior tests deliberately poison all of
+these environment variables with an external directory and require the
 effective Tcl/Tk search paths to remain entirely inside the mounted ZipFS.
 
 `Lib/tkinter` remains excluded from the base runtime SDK. Selecting this pack

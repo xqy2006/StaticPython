@@ -59,7 +59,14 @@ class TclTkZipfsTests(unittest.TestCase):
         self.tcl = self.root / "tcl-library"
         self.tk = self.root / "tk-library"
         for relative in tcltk_zipfs.TCL_REQUIRED_PATHS:
-            _write(self.tcl / relative, relative.encode("utf-8"))
+            payload = relative.encode("utf-8")
+            if relative == "tm.tcl":
+                payload = (
+                    b"namespace eval ::tcl::tm { variable paths {} }\n"
+                    + tcltk_zipfs.TCL_TM_DEFAULTS_ANCHOR
+                    + b"\n"
+                )
+            _write(self.tcl / relative, payload)
         for relative in tcltk_zipfs.TK_REQUIRED_PATHS:
             _write(self.tk / relative, relative.encode("utf-8"))
         _write(self.tcl / "msgs" / "en.msg")
@@ -79,6 +86,7 @@ class TclTkZipfsTests(unittest.TestCase):
         with ZipFile(io.BytesIO(first)) as archive:
             names = set(archive.namelist())
             self.assertIn("tcl9.0/init.tcl", names)
+            self.assertIn("tcl9.0/tm.tcl", names)
             self.assertIn("tcl9.0/encoding/cp1252.enc", names)
             self.assertIn("tcl9.0/msgs/en.msg", names)
             self.assertIn("tk9.0/tk.tcl", names)
@@ -87,10 +95,30 @@ class TclTkZipfsTests(unittest.TestCase):
             self.assertNotIn("tcl9.0/tcltest/tcltest.tcl", names)
             self.assertNotIn("tk9.0/demos/widget", names)
             self.assertIsNone(archive.testzip())
+            tm_source = archive.read("tcl9.0/tm.tcl")
+            self.assertNotIn(tcltk_zipfs.TCL_TM_DEFAULTS_ANCHOR, tm_source)
+            self.assertIn(
+                tcltk_zipfs.TCL_TM_STATICPYTHON_INITIALIZATION,
+                tm_source,
+            )
 
     def test_missing_required_file_is_a_hard_failure(self) -> None:
         (self.tk / "ttk" / "ttk.tcl").unlink()
         with self.assertRaisesRegex(RuntimeError, "ttk/ttk.tcl"):
+            tcltk_zipfs.build_tcltk_zipfs(self.tcl, self.tk)
+
+    def test_tcl_module_path_patch_fails_closed_on_upstream_drift(self) -> None:
+        (self.tcl / "tm.tcl").write_bytes(b"# upstream changed initialization\n")
+        with self.assertRaisesRegex(RuntimeError, "anchor must match exactly once"):
+            tcltk_zipfs.build_tcltk_zipfs(self.tcl, self.tk)
+
+    def test_tcl_module_path_patch_rejects_ambiguous_anchor(self) -> None:
+        (self.tcl / "tm.tcl").write_bytes(
+            tcltk_zipfs.TCL_TM_DEFAULTS_ANCHOR
+            + b"\n"
+            + tcltk_zipfs.TCL_TM_DEFAULTS_ANCHOR
+        )
+        with self.assertRaisesRegex(RuntimeError, "found 2 matches"):
             tcltk_zipfs.build_tcltk_zipfs(self.tcl, self.tk)
 
     def test_rendered_mount_uses_only_linked_memory_and_fixed_virtual_paths(self) -> None:
@@ -105,7 +133,12 @@ class TclTkZipfsTests(unittest.TestCase):
         self.assertIn("StaticPython_TkinterZipfsRestrictAutoPath", source)
         self.assertIn('Tcl_SetVar(interp, "auto_path", staticpython_tcl_library', source)
         self.assertIn('Tcl_SetVar(interp, "tcl_pkgPath", ""', source)
+        self.assertIn("Tcl_EvalFile(interp, staticpython_tcl_tm_file)", source)
         self.assertIn('Tcl_SetVar(interp, "::tcl::tm::paths", ""', source)
+        self.assertLess(
+            source.index("Tcl_EvalFile(interp, staticpython_tcl_tm_file)"),
+            source.index('Tcl_SetVar(interp, "::tcl::tm::paths", ""'),
+        )
         self.assertIn("//zipfs:/staticpython/tcltk-9.0.4/tcl9.0", source)
         self.assertIn("//zipfs:/staticpython/tcltk-9.0.4/tk9.0", source)
         self.assertIn("TCL_DECLARE_MUTEX", source)
