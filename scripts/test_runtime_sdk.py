@@ -62,6 +62,14 @@ class RuntimeSDKTests(unittest.TestCase):
         self.assertEqual(profile["core_libraries"], "all")
         self.assertEqual(profile["third_party_libraries"], [])
 
+    def test_runtime_sdk_links_pythoncore_registry_and_security_apis(self) -> None:
+        manifest = build.load_manifest()
+        dependencies = {
+            build.normalize_library_name(name).casefold()
+            for name in manifest["python_link_dependencies_release_x64"]
+        }
+        self.assertIn("advapi32.lib", dependencies)
+
     def test_runtime_sdk_prefers_generated_pyconfig_header(self) -> None:
         generated = build.get_pcbuild_output_dir(self.root, "x64") / "pyconfig.h"
         generated.parent.mkdir(parents=True)

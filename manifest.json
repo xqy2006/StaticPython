@@ -160,6 +160,7 @@
     "wbemuuid.lib",
     "ole32.lib",
     "Crypt32.lib",
+    "Advapi32.lib",
     "legacy_stdio_definitions.lib",
     "bcrypt.lib",
     "version.lib",
