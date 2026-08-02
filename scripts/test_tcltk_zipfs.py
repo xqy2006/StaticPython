@@ -248,6 +248,27 @@ Tcl_AppInit(Tcl_Interp *interp)
             "Python-2.0 AND TCL AND Zlib AND Unlicense AND Info-ZIP",
         )
         self.assertEqual(len(integration.license_files), 6)
+        self.assertEqual(
+            integration.python_link_dependencies_release_x64[:4],
+            [
+                "_tkinter.lib",
+                "staticpython_tk.lib",
+                "staticpython_tclstub.lib",
+                "staticpython_tcl.lib",
+            ],
+        )
+        staged_names = {
+            item["target_name"]
+            for item in integration.staged_static_libraries_release_x64
+        }
+        self.assertEqual(
+            staged_names,
+            {
+                "staticpython_tk.lib",
+                "staticpython_tclstub.lib",
+                "staticpython_tcl.lib",
+            },
+        )
         self.assertGreaterEqual(len(integration.smoke_tests), 2)
         smoke_code = "\n".join(step["code"] for step in integration.smoke_tests)
         for variable in (

@@ -151,7 +151,12 @@ jobs:
           if ($resourcePaths.Count -ne 1 -or $resourcePaths[0] -ne "Lib/tkinter/_staticpython/tcltk-library.zip") {
             throw "tkinter pack resource boundary is not the exact ZipFS image"
           }
-          foreach ($library in @("_tkinter.lib", "staticpython_tk.lib", "staticpython_tcl.lib")) {
+          foreach ($library in @(
+            "_tkinter.lib",
+            "staticpython_tk.lib",
+            "staticpython_tclstub.lib",
+            "staticpython_tcl.lib"
+          )) {
             if ($library -notin @($metadata.libraries)) { throw "tkinter pack is missing $library" }
           }
           if ($metadata.license.status -ne "complete" -or @($metadata.license.files).Count -ne 6) {

@@ -49,6 +49,7 @@ TK_ARCHIVE_SHA256 = "9d1a731333424682d7980c3469aeefadd01886a516bb53860d3772bd6b1
 TCL_SOURCE_NAME = f"staticpython-tcl-{TCLTK_RELEASE}"
 TK_SOURCE_NAME = f"staticpython-tk-{TCLTK_RELEASE}"
 TCL_STAGED_LIBRARY = "staticpython_tcl.lib"
+TCL_STUB_STAGED_LIBRARY = "staticpython_tclstub.lib"
 TK_STAGED_LIBRARY = "staticpython_tk.lib"
 OPTIONAL_FREEZE_MARKER = "PCbuild/staticpython_optional_frozen_trees.txt"
 ZIP_RESOURCE = "Lib/tkinter/_staticpython/tcltk-library.zip"
@@ -620,8 +621,9 @@ def prepare_tcltk_artifacts(context) -> None:
         raise RuntimeError("experimental tkinter static pack currently supports Release|x64 only")
     staged_dir = source_path(context, "tkinter_builtin/lib")
     staged_tcl = staged_dir / TCL_STAGED_LIBRARY
+    staged_tcl_stub = staged_dir / TCL_STUB_STAGED_LIBRARY
     staged_tk = staged_dir / TK_STAGED_LIBRARY
-    if staged_tcl.is_file() and staged_tk.is_file():
+    if staged_tcl.is_file() and staged_tcl_stub.is_file() and staged_tk.is_file():
         context.log("using already built Tcl/Tk static archives")
         return
 
@@ -634,14 +636,25 @@ def prepare_tcltk_artifacts(context) -> None:
         "/nologo",
         "/f",
         "makefile.vc",
-        "core",
+    ]
+    build_options = [
         "OPTS=static,nomsvcrt,noembed",
         "MACHINE=AMD64",
     ]
-    run(context.log, common, cwd=tcl_source / "win", timeout=60 * 45)
+    # Tk is deliberately compiled against Tcl's stubs ABI even for a static
+    # build.  Tcl's `core` target does not produce tclstub.lib, while `shell`
+    # depends on both the core and stub archives.  The temporary tclsh is not
+    # staged or exported; invoking this upstream target avoids a fragile build
+    # directory guess or a patch to Tcl's makefile.
     run(
         context.log,
-        [*common, f"TCLDIR={tcl_source}"],
+        [*common, "shell", *build_options],
+        cwd=tcl_source / "win",
+        timeout=60 * 45,
+    )
+    run(
+        context.log,
+        [*common, "core", *build_options, f"TCLDIR={tcl_source}"],
         cwd=tk_source / "win",
         timeout=60 * 45,
     )
@@ -651,6 +664,11 @@ def prepare_tcltk_artifacts(context) -> None:
         "tcl90*.lib",
         excluded=("stub", "reg", "dde", "tcl9tk"),
     )
+    tcl_stub_library = _find_built_library(
+        tcl_source / "win",
+        "tclstub.lib",
+        excluded=(),
+    )
     tk_library = _find_built_library(
         tk_source / "win",
         "tcl9tk90*.lib",
@@ -658,9 +676,11 @@ def prepare_tcltk_artifacts(context) -> None:
     )
     staged_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(tcl_library, staged_tcl)
+    shutil.copy2(tcl_stub_library, staged_tcl_stub)
     shutil.copy2(tk_library, staged_tk)
     context.log(
-        f"staged Tcl/Tk static archives from {tcl_library.name} and {tk_library.name}"
+        "staged Tcl/Tk static archives from "
+        f"{tcl_library.name}, {tcl_stub_library.name}, and {tk_library.name}"
     )
 
 
@@ -706,10 +726,15 @@ LIBRARY_INTEGRATION = LibraryIntegration(
             "source_glob": f"tkinter_builtin/lib/{TCL_STAGED_LIBRARY}",
             "target_name": TCL_STAGED_LIBRARY,
         },
+        {
+            "source_glob": f"tkinter_builtin/lib/{TCL_STUB_STAGED_LIBRARY}",
+            "target_name": TCL_STUB_STAGED_LIBRARY,
+        },
     ],
     python_link_dependencies_release_x64=[
         "_tkinter.lib",
         TK_STAGED_LIBRARY,
+        TCL_STUB_STAGED_LIBRARY,
         TCL_STAGED_LIBRARY,
         *TCLTK_SYSTEM_LIBRARIES,
     ],

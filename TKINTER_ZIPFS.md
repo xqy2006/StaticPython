@@ -4,6 +4,9 @@ The `tkinter-experimental` profile builds `_tkinter`, Tcl, and Tk as static
 libraries and packages the Tcl/Tk script libraries in a read-only ZipFS image.
 The generated executable mounts that image from its own linked data before
 `Tcl_Init`; it does not create or extract a Tcl/Tk directory at runtime.
+Tk uses Tcl's supported stubs ABI, so the pack also carries the static
+`tclstub.lib` archive and links it between Tk and the Tcl core archive. No Tcl
+shell executable produced as an intermediate build dependency is exported.
 
 ## Pinned inputs
 
