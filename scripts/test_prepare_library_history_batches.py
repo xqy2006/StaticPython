@@ -85,6 +85,14 @@ class PrepareLibraryHistoryBatchesTests(unittest.TestCase):
         self.assertEqual(result["batch_count"], 5)
         self.assertEqual(result["run_shard_count"], 3)
         self.assertEqual(
+            [shard["batch_count"] for shard in result["run_shards"]],
+            [2, 2, 1],
+        )
+        self.assertEqual(
+            sum(shard["combination_count"] for shard in result["run_shards"]),
+            result["combination_count"],
+        )
+        self.assertEqual(
             [batch["run_shard_index"] for batch in result["batches"]],
             [0, 1, 2, 0, 1],
         )
@@ -116,6 +124,29 @@ class PrepareLibraryHistoryBatchesTests(unittest.TestCase):
                 contract(),
                 {"pure": "pure-python", "native": "native"},
                 max_jobs_per_run=257,
+            )
+
+    def test_pull_request_smoke_selects_one_latest_candidate(self) -> None:
+        result = history.prepare_history_batches(
+            contract(),
+            {"pure": "pure-python", "native": "native"},
+            smoke_library="pure",
+            smoke_python_series="3.13",
+        )
+        self.assertEqual(result["selection"]["mode"], "smoke")
+        self.assertEqual(result["combination_count"], 1)
+        self.assertEqual(result["batches"][0]["versions"], ["2.0"])
+        self.assertEqual(result["batches"][0]["python_version"], "3.13.14")
+
+    def test_excess_run_shards_are_rejected_without_dropping_batches(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "needs 7 run shards"):
+            history.prepare_history_batches(
+                contract(),
+                {"pure": "pure-python", "native": "native"},
+                pure_batch_size=1,
+                native_batch_size=1,
+                max_jobs_per_run=1,
+                max_run_shards=6,
             )
 
 
