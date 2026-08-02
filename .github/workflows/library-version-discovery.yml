@@ -512,6 +512,16 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $candidatePath = Join-Path $env:GITHUB_WORKSPACE ".tmp\promotion-input\library-version-contract.json"
+          $matrixPath = Join-Path $env:GITHUB_WORKSPACE ".tmp\promotion-input\library-version-matrix.json"
+          if (-not (Test-Path -LiteralPath $matrixPath -PathType Leaf)) {
+            Write-Host "Candidate has no validation matrix; no history adoption is possible."
+            exit 0
+          }
+          $matrix = Get-Content -LiteralPath $matrixPath -Raw | ConvertFrom-Json
+          if ($null -eq $matrix.deferred) {
+            Write-Host "Candidate delta is not deferred; skipping weekly history catalog lookup."
+            exit 0
+          }
           $candidateHash = [string](Get-Content -LiteralPath $candidatePath -Raw | ConvertFrom-Json).contract_sha256
           $apiPath = "repos/${{ github.repository }}/actions/workflows/library-history-weekly.yml/runs?branch=master&status=completed&per_page=100"
           $oldPreference = $ErrorActionPreference
