@@ -246,6 +246,16 @@ Tcl_AppInit(Tcl_Interp *interp)
         self.assertEqual(integration.license_expression, "Python-2.0 AND TCL")
         self.assertEqual(len(integration.license_files), 3)
         self.assertGreaterEqual(len(integration.smoke_tests), 2)
+        smoke_code = "\n".join(step["code"] for step in integration.smoke_tests)
+        for variable in (
+            "TCL_LIBRARY",
+            "TK_LIBRARY",
+            "TCLLIBPATH",
+            "TCL9.0_TM_PATH",
+            "TCL9_0_TM_PATH",
+        ):
+            self.assertIn(variable, smoke_code)
+        self.assertIn("clock format 0 -timezone :UTC", smoke_code)
         self.assertNotIn("tkinter", build.load_config(REPO_ROOT / "config.json")["profiles"]["full"]["third_party_libraries"])
 
     def test_archive_manifest_uses_pinned_commit_without_git_checkout(self) -> None:

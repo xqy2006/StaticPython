@@ -690,7 +690,10 @@ LIBRARY_INTEGRATION = LibraryIntegration(
     smoke_tests=[
         inline_verification_step(
             "tcl-zipfs-no-extraction",
-            """import tkinter
+            """import os
+for name in ("TCL_LIBRARY", "TK_LIBRARY", "TCLLIBPATH", "TCL9.0_TM_PATH", "TCL9_0_TM_PATH"):
+    os.environ[name] = r"C:\\Windows"
+import tkinter
 interp = tkinter.Tcl()
 assert interp.eval("info patchlevel") == "9.0.4"
 mount = interp.getvar("staticpython_tkinter_zipfs")
@@ -702,11 +705,15 @@ assert auto_path and all(path.startswith(mount + "/") for path in auto_path), au
 assert interp.eval("::tcl::tm::path list") == ""
 assert interp.eval("file exists [file join $tcl_library encoding cp1252.enc]") == "1"
 assert "cp1252" in interp.tk.splitlist(interp.eval("encoding names"))
+assert interp.eval("clock format 0 -timezone :UTC -format %Y") == "1970"
 """,
         ),
         inline_verification_step(
             "tk-ttk-themes",
-            """import tkinter
+            """import os
+for name in ("TCL_LIBRARY", "TK_LIBRARY", "TCLLIBPATH", "TCL9.0_TM_PATH", "TCL9_0_TM_PATH"):
+    os.environ[name] = r"C:\\Windows"
+import tkinter
 from tkinter import ttk
 root = tkinter.Tk()
 try:
