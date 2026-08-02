@@ -9,6 +9,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 from zipfile import ZipFile
 
 
@@ -281,6 +282,53 @@ Tcl_AppInit(Tcl_Interp *interp)
             self.assertIn(variable, smoke_code)
         self.assertIn("clock format 0 -timezone :UTC", smoke_code)
         self.assertNotIn("tkinter", build.load_config(REPO_ROOT / "config.json")["profiles"]["full"]["third_party_libraries"])
+
+    def test_artifact_build_produces_and_stages_tcl_stubs(self) -> None:
+        source_root = self.root / "cpython"
+        tcl_win = (
+            source_root
+            / "externals"
+            / tkinter_setup.TCL_SOURCE_NAME
+            / "win"
+        )
+        tk_win = (
+            source_root
+            / "externals"
+            / tkinter_setup.TK_SOURCE_NAME
+            / "win"
+        )
+        _write(tcl_win / "Release_AMD64_VC1944" / "tcl90sx.lib", b"tcl")
+        _write(tcl_win / "Release_AMD64_VC1944" / "tclstub.lib", b"stubs")
+        _write(tk_win / "Release_AMD64_VC1944" / "tcl9tk90sx.lib", b"tk")
+        context = SimpleNamespace(
+            source_root=source_root,
+            configuration="Release",
+            platform="x64",
+            log=lambda _message: None,
+        )
+
+        with (
+            mock.patch.object(tkinter_setup, "ensure_tool"),
+            mock.patch.object(tkinter_setup, "run") as run,
+        ):
+            tkinter_setup.prepare_tcltk_artifacts(context)
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[1][4], "shell")
+        self.assertEqual(run.call_args_list[1].args[1][4], "core")
+        staged = source_root / "tkinter_builtin" / "lib"
+        self.assertEqual(
+            (staged / tkinter_setup.TCL_STUB_STAGED_LIBRARY).read_bytes(),
+            b"stubs",
+        )
+        self.assertEqual(
+            sorted(path.name for path in staged.iterdir()),
+            [
+                "staticpython_tcl.lib",
+                "staticpython_tclstub.lib",
+                "staticpython_tk.lib",
+            ],
+        )
 
     def test_archive_manifest_uses_pinned_commit_without_git_checkout(self) -> None:
         source = self.root / "tcl-source"
