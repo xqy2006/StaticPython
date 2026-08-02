@@ -46,6 +46,15 @@ assert _LICENSE_AUDIT_SPEC is not None and _LICENSE_AUDIT_SPEC.loader is not Non
 audit_library_licenses = importlib.util.module_from_spec(_LICENSE_AUDIT_SPEC)
 _LICENSE_AUDIT_SPEC.loader.exec_module(audit_library_licenses)
 
+_RESOURCE_SCAN_SPEC = importlib.util.spec_from_file_location(
+    "staticpython_scan_library_resources",
+    REPO_ROOT / "scripts" / "scan_library_resources.py",
+)
+assert _RESOURCE_SCAN_SPEC is not None and _RESOURCE_SCAN_SPEC.loader is not None
+scan_library_resources = importlib.util.module_from_spec(_RESOURCE_SCAN_SPEC)
+sys.modules[_RESOURCE_SCAN_SPEC.name] = scan_library_resources
+_RESOURCE_SCAN_SPEC.loader.exec_module(scan_library_resources)
+
 
 class RuntimeSDKTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -899,14 +908,17 @@ struct _inittab _PyImport_Inittab[] = {
             "dateutil": "Apache-2.0 OR BSD-3-Clause",
             "dearpygui": "MIT",
             "dialite": "BSD-2-Clause",
+            "exceptiongroup": "MIT",
             "fsspec": "BSD-3-Clause",
             "glfw": "Zlib",
+            "jwt": "MIT",
             "mypy_extensions": "MIT",
             "pscript": "BSD-2-Clause",
             "pyglet": "BSD-3-Clause",
             "pystray": "LGPL-3.0-only",
             "socks": "BSD-3-Clause",
             "text_unidecode": "GPL-1.0-or-later OR Artistic-1.0-Perl",
+            "tomli": "MIT",
         }
         for name, expression in expected.items():
             with self.subTest(name=name):
@@ -1193,6 +1205,25 @@ struct _inittab _PyImport_Inittab[] = {
             dash_module.LIBRARY_INTEGRATION.dependency_constraints,
             {"janus": ">=1.0.0"},
         )
+
+    def test_resource_scanner_keeps_root_library_catalog(self) -> None:
+        profile_name, config, profile = scan_library_resources.read_config(
+            REPO_ROOT / "config.json",
+            "full",
+        )
+        self.assertEqual(profile_name, "full")
+        catalog = profile.get(
+            "third_party_library_catalog",
+            config.get("third_party_library_catalog"),
+        )
+        integrations = libs.load_integration_definitions(
+            REPO_ROOT / "Lib",
+            library_catalog=catalog,
+        )
+        by_name = {integration.name: integration for integration in integrations}
+        self.assertEqual(by_name["jwt"].project_name, "PyJWT")
+        self.assertEqual(by_name["tomli"].top_level_import_names, ["tomli"])
+        self.assertTrue(by_name["exceptiongroup"].auto_resolve_dependencies)
 
     def test_default_integration_smoke_executes_real_import(self) -> None:
         integration = libs.LibraryIntegration(name="demo", top_level_import_names=["demo.api"])

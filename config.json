@@ -286,6 +286,21 @@
         "source_provider": "pypi"
       },
       {
+        "name": "exceptiongroup",
+        "overlay_entries": [
+          "Lib/exceptiongroup"
+        ],
+        "source_provider": "pypi",
+        "license_expression": "MIT",
+        "smoke_tests": [
+          {
+            "name": "exception-group-shape",
+            "kind": "inline",
+            "code": "from exceptiongroup import ExceptionGroup\n\ngroup = ExceptionGroup('wave', [ValueError('first'), TypeError('second')])\nassert group.message == 'wave'\nassert [type(item) for item in group.exceptions] == [ValueError, TypeError]"
+          }
+        ]
+      },
+      {
         "name": "executing",
         "overlay_entries": [
           "Lib/executing"
@@ -508,6 +523,22 @@
           "Lib/jsonpickle"
         ],
         "source_provider": "pypi"
+      },
+      {
+        "name": "jwt",
+        "project_name": "PyJWT",
+        "overlay_entries": [
+          "Lib/jwt"
+        ],
+        "source_provider": "pypi",
+        "license_expression": "MIT",
+        "smoke_tests": [
+          {
+            "name": "hs256-round-trip",
+            "kind": "inline",
+            "code": "import jwt\n\nkey = '0123456789abcdef0123456789abcdef'\ntoken = jwt.encode({'sub': 'staticpython', 'admin': True}, key, algorithm='HS256')\npayload = jwt.decode(token, key, algorithms=['HS256'])\nassert payload == {'sub': 'staticpython', 'admin': True}"
+          }
+        ]
       },
       {
         "name": "jupyter_core",
@@ -1139,6 +1170,21 @@
         "source_provider": "pypi"
       },
       {
+        "name": "tomli",
+        "overlay_entries": [
+          "Lib/tomli"
+        ],
+        "source_provider": "pypi",
+        "license_expression": "MIT",
+        "smoke_tests": [
+          {
+            "name": "toml-loads",
+            "kind": "inline",
+            "code": "import tomli\n\npayload = tomli.loads('title = \"StaticPython\"\\n[pack]\\nenabled = true\\n')\nassert payload == {'title': 'StaticPython', 'pack': {'enabled': True}}"
+          }
+        ]
+      },
+      {
         "name": "tomlkit",
         "overlay_entries": [
           "Lib/tomlkit"
@@ -1417,6 +1463,7 @@
         "dotenv",
         "email_validator",
         "et_xmlfile",
+        "exceptiongroup",
         "executing",
         "faker",
         "fastjsonschema",
@@ -1454,6 +1501,7 @@
         "json5",
         "jsonpickle",
         "jsonschema",
+        "jwt",
         "jupyter_client",
         "jupyter_core",
         "jupyter_events",
@@ -1567,6 +1615,7 @@
         "text_unidecode",
         "threadpoolctl",
         "tinycss2",
+        "tomli",
         "tomlkit",
         "tornado",
         "tqdm",
