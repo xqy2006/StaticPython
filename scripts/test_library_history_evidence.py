@@ -112,10 +112,8 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
         batch_root = (evidence_parent or (self.root / "batch-evidence")) / batch[
             "batch_id"
         ]
-        detail_path = batch_root / "detail.json"
-        detail_path.parent.mkdir(parents=True, exist_ok=True)
-        detail_path.write_text('{"status":"recorded"}\n', encoding="utf-8")
         results = []
+        files = []
         for record in evidence_module.expected_combinations(self.contract, batch):
             result = {
                 "library": record["library"],
@@ -130,14 +128,60 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
                     "message": "patch anchor drift",
                 }
             else:
+                combination_root = batch_root / record["version"]
+                verifier_path = write_json(
+                    combination_root / "staticpython-pack-verify-report.json",
+                    {"status": "passed", "version": record["version"]},
+                )
+                pack_metadata_path = write_json(
+                    combination_root / "pack-metadata.json",
+                    {
+                        "name": record["library"],
+                        "version": record["version"],
+                        "cpython_version": record["python_version"],
+                        "verification": {"status": "passed"},
+                    },
+                )
+                combination = {
+                    "schema_version": 1,
+                    "kind": evidence_module.COMBINATION_EVIDENCE_KIND,
+                    "library": record["library"],
+                    "version": record["version"],
+                    "python_version": record["python_version"],
+                    "source_sha256": record["source_sha256"],
+                    "runtime_sdk_sha256": "e" * 64,
+                    "pack_sha256": "a" * 64,
+                    "status": "passed",
+                }
+                combination["evidence_sha256"] = evidence_module.canonical_sha256(
+                    combination
+                )
+                combination_path = write_json(
+                    combination_root / "combination-evidence.v1.json", combination
+                )
                 result.update(
                     {
                         "pack_sha256": "a" * 64,
                         "runtime_sdk_sha256": "e" * 64,
-                        "verifier_report_sha256": "b" * 64,
-                        "combination_evidence_sha256": "c" * 64,
+                        "verifier_report_sha256": evidence_module.file_sha256(
+                            verifier_path
+                        ),
+                        "combination_evidence_sha256": combination[
+                            "evidence_sha256"
+                        ],
                     }
                 )
+                for path in (
+                    verifier_path,
+                    pack_metadata_path,
+                    combination_path,
+                ):
+                    files.append(
+                        {
+                            "path": path.relative_to(batch_root).as_posix(),
+                            "sha256": evidence_module.file_sha256(path),
+                        }
+                    )
             results.append(result)
         payload = {
             "schema_version": 1,
@@ -149,12 +193,7 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
             "shard_index": batch["run_shard_index"],
             "runtime_sdk_sha256": "e" * 64,
             "results": results,
-            "files": [
-                {
-                    "path": "detail.json",
-                    "sha256": evidence_module.file_sha256(detail_path),
-                }
-            ],
+            "files": files,
             "status": status,
             "provenance": {"artifact": f"batch-{batch['batch_id']}"},
         }
@@ -304,12 +343,123 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
             {record["code"] for record in index["decision"]["blockers"]},
         )
 
+    def test_pull_request_smoke_passes_without_becoming_eligible(self) -> None:
+        self.manifest = history_batches.prepare_history_batches(
+            self.contract,
+            {"demo": "pure-python"},
+            smoke_library="demo",
+            smoke_python_series="3.13",
+        )
+        self.manifest_path = write_json(
+            self.root / "smoke-preview-manifest.json", self.manifest
+        )
+        index = evidence_module.promote_support_catalog(
+            self.contract_path,
+            self.manifest_path,
+            self.finalize_all_shards(),
+            self.root / "smoke-preview-catalog",
+            mode="preview",
+        )
+        self.assertEqual(index["decision"]["status"], "preview-passed")
+        self.assertEqual(index["decision"]["gate"], "passed")
+        self.assertIsNone(index["active"])
+        self.assertIsNone(index["proposed_active"])
+
+    def test_empty_full_history_can_never_promote_active_support(self) -> None:
+        empty_contract = contract()
+        empty_contract["libraries"]["demo"]["versions"] = {}
+        empty_contract["status_counts"] = {
+            "candidate": 0,
+            "configured": 0,
+            "not-applicable": 0,
+            "unbuildable": 0,
+        }
+        empty_contract["contract_sha256"] = contract_module._contract_sha256(
+            {key: value for key, value in empty_contract.items() if key != "contract_sha256"}
+        )
+        empty_manifest = history_batches.prepare_history_batches(
+            empty_contract,
+            {"demo": "pure-python"},
+        )
+        empty_contract_path = write_json(
+            self.root / "empty-contract.json", empty_contract
+        )
+        empty_manifest_path = write_json(
+            self.root / "empty-manifest.json", empty_manifest
+        )
+        empty_shards = self.root / "empty-shards"
+        empty_shards.mkdir()
+        index = evidence_module.promote_support_catalog(
+            empty_contract_path,
+            empty_manifest_path,
+            empty_shards,
+            self.root / "empty-catalog",
+            mode="promote",
+        )
+        self.assertEqual(index["decision"]["status"], "frozen")
+        self.assertIsNone(index["active"])
+        self.assertIn(
+            "empty-full-history-selection",
+            {record["code"] for record in index["decision"]["blockers"]},
+        )
+
+    def test_forged_shard_aggregate_cannot_promote(self) -> None:
+        shard_root = self.finalize_all_shards()
+        shard_path = next(
+            shard_root.rglob("library-history-shard-evidence.v1.json")
+        )
+        forged = json.loads(shard_path.read_text(encoding="utf-8"))
+        forged["batches"] = []
+        forged["evidence_sha256"] = evidence_module.canonical_sha256(
+            {key: value for key, value in forged.items() if key != "evidence_sha256"}
+        )
+        write_json(shard_path, forged)
+        index = evidence_module.promote_support_catalog(
+            self.contract_path,
+            self.manifest_path,
+            shard_root,
+            self.root / "forged-catalog",
+            mode="promote",
+        )
+        self.assertEqual(index["decision"]["status"], "frozen")
+        self.assertIsNone(index["active"])
+        self.assertIn(
+            "invalid-shard-evidence",
+            {record["code"] for record in index["decision"]["blockers"]},
+        )
+
+    def test_runtime_sdk_hash_drift_across_shards_freezes_promotion(self) -> None:
+        shard_root = self.finalize_all_shards()
+        shard_paths = sorted(
+            shard_root.rglob("library-history-shard-evidence.v1.json")
+        )
+        self.assertGreaterEqual(len(shard_paths), 2)
+        drifted = json.loads(shard_paths[1].read_text(encoding="utf-8"))
+        drifted["batches"][0]["runtime_sdk_sha256"] = "d" * 64
+        drifted["evidence_sha256"] = evidence_module.canonical_sha256(
+            {key: value for key, value in drifted.items() if key != "evidence_sha256"}
+        )
+        write_json(shard_paths[1], drifted)
+        index = evidence_module.promote_support_catalog(
+            self.contract_path,
+            self.manifest_path,
+            shard_root,
+            self.root / "runtime-drift-catalog",
+            mode="promote",
+        )
+        self.assertEqual(index["decision"]["status"], "frozen")
+        self.assertIn(
+            "runtime-sdk-hash-mismatch",
+            {record["code"] for record in index["decision"]["blockers"]},
+        )
+
     def test_tampered_batch_file_becomes_structured_failed_shard(self) -> None:
         batch = self.manifest["batches"][0]
         evidence_path = self.write_batch_evidence(batch)
-        (evidence_path.parent / "detail.json").write_text(
-            "tampered\n", encoding="utf-8"
+        verifier_path = next(
+            evidence_path.parent.rglob("staticpython-pack-verify-report.json")
         )
+        verifier_path.write_text("tampered\n", encoding="utf-8")
         shard_path = self.root / "tampered-shard.json"
         shard = evidence_module.finalize_shard(
             self.contract_path,

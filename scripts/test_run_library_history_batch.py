@@ -96,27 +96,64 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
             "provenance": {"artifact": "batch-artifact"},
         }
 
+    def passed_execution(
+        self, record: dict, context: dict
+    ) -> tuple[dict, list[Path]]:
+        combination_root = Path(context["result_root"]) / record["version"]
+        verifier_path = combination_root / "staticpython-pack-verify-report.json"
+        verifier_path.parent.mkdir(parents=True, exist_ok=True)
+        verifier_path.write_text(
+            json.dumps({"status": "passed", "version": record["version"]}),
+            encoding="utf-8",
+        )
+        pack_metadata_path = combination_root / "pack-metadata.json"
+        pack_metadata_path.write_text(
+            json.dumps(
+                {
+                    "name": record["library"],
+                    "version": record["version"],
+                    "cpython_version": record["python_version"],
+                    "verification": {"status": "passed"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        combination = {
+            "schema_version": 1,
+            "kind": history_evidence.COMBINATION_EVIDENCE_KIND,
+            "library": record["library"],
+            "version": record["version"],
+            "python_version": record["python_version"],
+            "source_sha256": record["source_sha256"],
+            "runtime_sdk_sha256": context["runtime_sdk_sha256"],
+            "pack_sha256": "a" * 64,
+            "status": "passed",
+        }
+        combination["evidence_sha256"] = history_evidence.canonical_sha256(
+            combination
+        )
+        combination_path = combination_root / "combination-evidence.v1.json"
+        combination_path.write_text(json.dumps(combination), encoding="utf-8")
+        return (
+            {
+                "library": record["library"],
+                "version": record["version"],
+                "python_version": record["python_version"],
+                "source_sha256": record["source_sha256"],
+                "pack_sha256": "a" * 64,
+                "runtime_sdk_sha256": context["runtime_sdk_sha256"],
+                "verifier_report_sha256": history_evidence.file_sha256(
+                    verifier_path
+                ),
+                "combination_evidence_sha256": combination["evidence_sha256"],
+                "status": "passed",
+            },
+            [verifier_path, pack_metadata_path, combination_path],
+        )
+
     def test_runner_records_every_passed_combination_and_hashed_files(self) -> None:
         def fake_executor(record: dict, context: dict) -> tuple[dict, list[Path]]:
-            detail = Path(context["result_root"]) / f"{record['version']}.json"
-            detail.parent.mkdir(parents=True, exist_ok=True)
-            detail.write_text(
-                json.dumps({"version": record["version"]}), encoding="utf-8"
-            )
-            return (
-                {
-                    "library": record["library"],
-                    "version": record["version"],
-                    "python_version": record["python_version"],
-                    "source_sha256": record["source_sha256"],
-                    "pack_sha256": "a" * 64,
-                    "runtime_sdk_sha256": context["runtime_sdk_sha256"],
-                    "verifier_report_sha256": "b" * 64,
-                    "combination_evidence_sha256": "c" * 64,
-                    "status": "passed",
-                },
-                [detail],
-            )
+            return self.passed_execution(record, context)
 
         evidence = runner.run_history_batch(
             self.contract,
@@ -127,7 +164,7 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
         )
         self.assertEqual(evidence["status"], "passed")
         self.assertEqual(len(evidence["results"]), 2)
-        self.assertEqual(len(evidence["files"]), 2)
+        self.assertEqual(len(evidence["files"]), 6)
         history_evidence.validate_batch_evidence(
             evidence,
             self.result_root,
@@ -135,6 +172,28 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
             self.manifest,
             self.batch,
         )
+        unlinked = json.loads(json.dumps(evidence))
+        pack_metadata_hash = next(
+            record["sha256"]
+            for record in unlinked["files"]
+            if Path(record["path"]).name == "pack-metadata.json"
+        )
+        unlinked["results"][0]["verifier_report_sha256"] = pack_metadata_hash
+        unlinked["evidence_sha256"] = history_evidence.canonical_sha256(
+            {
+                key: value
+                for key, value in unlinked.items()
+                if key != "evidence_sha256"
+            }
+        )
+        with self.assertRaisesRegex(RuntimeError, "not hash-linked"):
+            history_evidence.validate_batch_evidence(
+                unlinked,
+                self.result_root,
+                self.contract,
+                self.manifest,
+                self.batch,
+            )
 
     def test_runner_continues_after_failure_and_returns_structured_evidence(
         self,
@@ -145,23 +204,7 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
             attempted.append(record["version"])
             if record["version"] == "1.0":
                 raise RuntimeError("strict patch anchor mismatch")
-            detail = Path(context["result_root"]) / "passed.json"
-            detail.parent.mkdir(parents=True, exist_ok=True)
-            detail.write_text("{}\n", encoding="utf-8")
-            return (
-                {
-                    "library": record["library"],
-                    "version": record["version"],
-                    "python_version": record["python_version"],
-                    "source_sha256": record["source_sha256"],
-                    "pack_sha256": "a" * 64,
-                    "runtime_sdk_sha256": context["runtime_sdk_sha256"],
-                    "verifier_report_sha256": "b" * 64,
-                    "combination_evidence_sha256": "c" * 64,
-                    "status": "passed",
-                },
-                [detail],
-            )
+            return self.passed_execution(record, context)
 
         evidence = runner.run_history_batch(
             self.contract,

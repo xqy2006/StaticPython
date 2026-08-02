@@ -25,6 +25,7 @@ SCHEMA_VERSION = 1
 MANIFEST_KIND = "staticpython-library-history-batches"
 SHARD_PLAN_KIND = "staticpython-library-history-shard-plan"
 BATCH_EVIDENCE_KIND = "staticpython-library-history-batch-evidence"
+COMBINATION_EVIDENCE_KIND = "staticpython-library-history-combination-evidence"
 SHARD_EVIDENCE_KIND = "staticpython-library-history-shard-evidence"
 SUPPORT_KIND = "staticpython-library-history-support"
 SUPPORT_INDEX_KIND = "staticpython-library-history-support-index"
@@ -360,10 +361,13 @@ def prepare_shard_plan(
     return plan, matrix
 
 
-def _validate_file_records(evidence_root: Path, records: object) -> None:
+def _validate_file_records(
+    evidence_root: Path, records: object
+) -> dict[str, tuple[Path, str]]:
     if not isinstance(records, list):
         raise RuntimeError("batch evidence files must be an array")
     seen: set[str] = set()
+    validated: dict[str, tuple[Path, str]] = {}
     for record in records:
         if not isinstance(record, dict):
             raise RuntimeError("batch evidence file record must be an object")
@@ -381,6 +385,8 @@ def _validate_file_records(evidence_root: Path, records: object) -> None:
             raise RuntimeError(f"batch evidence file is missing: {relative}")
         if file_sha256(path) != sha256.lower():
             raise RuntimeError(f"batch evidence file SHA-256 mismatch: {relative}")
+        validated[relative] = (path, sha256.lower())
+    return validated
 
 
 def validate_batch_evidence(
@@ -467,7 +473,96 @@ def validate_batch_evidence(
         raise RuntimeError(
             f"batch evidence result coverage mismatch: {batch['batch_id']}"
         )
-    _validate_file_records(evidence_root, evidence.get("files"))
+    validated_files = _validate_file_records(evidence_root, evidence.get("files"))
+    passed_results = {
+        (
+            str(result.get("library", "")).casefold(),
+            result.get("version"),
+            result.get("python_version"),
+            str(result.get("source_sha256", "")).lower(),
+        ): result
+        for result in results
+        if result.get("status") == "passed"
+    }
+    verifier_records = [
+        (path, sha256)
+        for relative, (path, sha256) in validated_files.items()
+        if Path(relative).name == "staticpython-pack-verify-report.json"
+    ]
+    verifier_hashes = {sha256 for _path, sha256 in verifier_records}
+    for key, result in passed_results.items():
+        if result["verifier_report_sha256"].lower() not in verifier_hashes:
+            raise RuntimeError(
+                f"passed batch result verifier report is not hash-linked: {key!r}"
+            )
+    if len(verifier_records) != len(passed_results):
+        raise RuntimeError("batch evidence verifier report coverage mismatch")
+
+    combination_records: dict[tuple[str, object, object, str], dict] = {}
+    pack_records: set[tuple[str, object, object]] = set()
+    for relative, (path, _sha256) in validated_files.items():
+        if Path(relative).name == "combination-evidence.v1.json":
+            combination = load_object(path, "combination evidence")
+            if (
+                combination.get("schema_version") != SCHEMA_VERSION
+                or combination.get("kind") != COMBINATION_EVIDENCE_KIND
+            ):
+                raise RuntimeError(
+                    f"combination evidence has an unsupported schema or kind: {relative}"
+                )
+            combination_sha = _recorded_hash(
+                combination, "evidence_sha256", "combination evidence"
+            )
+            key = (
+                str(combination.get("library", "")).casefold(),
+                combination.get("version"),
+                combination.get("python_version"),
+                str(combination.get("source_sha256", "")).lower(),
+            )
+            if key in combination_records:
+                raise RuntimeError(f"duplicate combination evidence: {key!r}")
+            result = passed_results.get(key)
+            if result is None:
+                raise RuntimeError(
+                    f"combination evidence has no passed batch result: {key!r}"
+                )
+            expected_combination = {
+                "status": "passed",
+                "runtime_sdk_sha256": runtime_sdk_sha.lower(),
+                "pack_sha256": result["pack_sha256"].lower(),
+                "evidence_sha256": result["combination_evidence_sha256"].lower(),
+            }
+            actual_combination = {
+                "status": combination.get("status"),
+                "runtime_sdk_sha256": str(
+                    combination.get("runtime_sdk_sha256", "")
+                ).lower(),
+                "pack_sha256": str(combination.get("pack_sha256", "")).lower(),
+                "evidence_sha256": combination_sha,
+            }
+            if actual_combination != expected_combination:
+                raise RuntimeError(f"combination evidence mismatch: {key!r}")
+            combination_records[key] = combination
+        elif Path(relative).name == "pack-metadata.json":
+            metadata = load_object(path, "history pack metadata")
+            key = (
+                str(metadata.get("name", "")).casefold(),
+                metadata.get("version"),
+                metadata.get("cpython_version"),
+            )
+            if key in pack_records:
+                raise RuntimeError(f"duplicate history pack metadata: {key!r}")
+            if metadata.get("verification", {}).get("status") != "passed":
+                raise RuntimeError(f"history pack metadata is not verified: {key!r}")
+            pack_records.add(key)
+
+    if set(combination_records) != set(passed_results):
+        raise RuntimeError("batch combination evidence coverage mismatch")
+    expected_pack_records = {
+        (key[0], key[1], key[2]) for key in passed_results
+    }
+    if pack_records != expected_pack_records:
+        raise RuntimeError("batch pack metadata coverage mismatch")
     all_passed = all(result.get("status") == "passed" for result in results)
     if all_passed and not evidence.get("files"):
         raise RuntimeError("passed batch evidence has no immutable files")
@@ -476,6 +571,124 @@ def validate_batch_evidence(
         raise RuntimeError(
             f"batch evidence aggregate status mismatch: {batch['batch_id']}"
         )
+    return evidence_sha
+
+
+def validate_shard_evidence(
+    evidence: dict,
+    manifest: dict,
+    shard: dict,
+) -> str:
+    if (
+        evidence.get("schema_version") != SCHEMA_VERSION
+        or evidence.get("kind") != SHARD_EVIDENCE_KIND
+    ):
+        raise RuntimeError("shard evidence has an unsupported schema or kind")
+    evidence_sha = _recorded_hash(
+        evidence, "evidence_sha256", "history shard evidence"
+    )
+    expected_identity = {
+        "contract_sha256": manifest["contract_sha256"],
+        "manifest_sha256": manifest["manifest_sha256"],
+        "shard_index": shard["shard_index"],
+        "shard_sha256": shard["shard_sha256"],
+        "expected_batch_count": shard["batch_count"],
+        "expected_combination_count": shard["combination_count"],
+    }
+    mismatches = [
+        key for key, expected in expected_identity.items() if evidence.get(key) != expected
+    ]
+    if mismatches:
+        raise RuntimeError(
+            "shard evidence identity mismatch: " + ", ".join(mismatches)
+        )
+
+    expected_batches = {
+        batch["batch_id"]: batch
+        for batch in manifest["batches"]
+        if batch["run_shard_index"] == shard["shard_index"]
+    }
+    records = evidence.get("batches")
+    blockers = evidence.get("blockers")
+    if not isinstance(records, list) or not isinstance(blockers, list):
+        raise RuntimeError("shard evidence batches and blockers must be arrays")
+    for blocker in blockers:
+        if (
+            not isinstance(blocker, dict)
+            or not isinstance(blocker.get("code"), str)
+            or not blocker["code"]
+        ):
+            raise RuntimeError("shard evidence has an invalid blocker record")
+
+    seen: set[str] = set()
+    passed_batch_count = 0
+    passed_combination_count = 0
+    for record in records:
+        if not isinstance(record, dict):
+            raise RuntimeError("shard evidence batch records must be objects")
+        batch_id = record.get("batch_id")
+        if not isinstance(batch_id, str) or batch_id in seen:
+            raise RuntimeError(
+                f"shard evidence has an invalid or duplicate batch ID: {batch_id!r}"
+            )
+        seen.add(batch_id)
+        batch = expected_batches.get(batch_id)
+        if batch is None:
+            raise RuntimeError(f"shard evidence contains an unexpected batch: {batch_id}")
+        expected_record = {
+            "batch_sha256": batch["batch_sha256"],
+            "python_version": batch["python_version"],
+            "combination_count": batch["combination_count"],
+        }
+        for key, expected in expected_record.items():
+            if record.get(key) != expected:
+                raise RuntimeError(
+                    f"shard evidence batch {batch_id} {key} mismatch"
+                )
+        batch_evidence_sha = record.get("evidence_sha256")
+        if not isinstance(batch_evidence_sha, str) or not SHA256_PATTERN.fullmatch(
+            batch_evidence_sha
+        ):
+            raise RuntimeError(
+                f"shard evidence batch {batch_id} has no valid evidence SHA-256"
+            )
+        runtime_sdk_sha = record.get("runtime_sdk_sha256")
+        if not isinstance(runtime_sdk_sha, str) or not SHA256_PATTERN.fullmatch(
+            runtime_sdk_sha
+        ):
+            raise RuntimeError(
+                f"shard evidence batch {batch_id} has no valid runtime SDK SHA-256"
+            )
+        artifact = record.get("artifact")
+        if not isinstance(artifact, str) or not artifact:
+            raise RuntimeError(
+                f"shard evidence batch {batch_id} has no immutable artifact name"
+            )
+        status = record.get("status")
+        if status not in {"passed", "failed"}:
+            raise RuntimeError(
+                f"shard evidence batch {batch_id} has invalid status: {status!r}"
+            )
+        if status == "passed":
+            passed_batch_count += 1
+            passed_combination_count += batch["combination_count"]
+
+    if evidence.get("passed_batch_count") != passed_batch_count:
+        raise RuntimeError("shard evidence passed_batch_count mismatch")
+    if evidence.get("passed_combination_count") != passed_combination_count:
+        raise RuntimeError("shard evidence passed_combination_count mismatch")
+    status = evidence.get("status")
+    if status not in {"passed", "failed"}:
+        raise RuntimeError(f"shard evidence has invalid status: {status!r}")
+    if status == "passed":
+        if blockers:
+            raise RuntimeError("passed shard evidence contains blockers")
+        if seen != set(expected_batches):
+            raise RuntimeError("passed shard evidence does not cover every expected batch")
+        if passed_batch_count != len(expected_batches):
+            raise RuntimeError("passed shard evidence contains a failed batch")
+    elif not blockers:
+        raise RuntimeError("failed shard evidence has no structured blocker")
     return evidence_sha
 
 
@@ -552,6 +765,8 @@ def finalize_shard(
                 "batch_sha256": batch["batch_sha256"],
                 "evidence_sha256": evidence_sha,
                 "artifact": evidence.get("provenance", {}).get("artifact"),
+                "python_version": batch["python_version"],
+                "runtime_sdk_sha256": evidence["runtime_sdk_sha256"],
                 "status": evidence["status"],
                 "combination_count": batch["combination_count"],
             }
@@ -673,7 +888,7 @@ def promote_support_catalog(
         previous_active = dict(active) if isinstance(active, dict) else None
 
     blockers: list[dict] = []
-    found: dict[int, dict] = {}
+    found: dict[int, tuple[dict, Path, str]] = {}
     for path in sorted(
         shard_evidence_root.rglob("library-history-shard-evidence.v1.json")
     ):
@@ -695,10 +910,7 @@ def promote_support_catalog(
                     {"code": "duplicate-shard-evidence", "shard_index": shard_index}
                 )
                 continue
-            evidence = dict(evidence)
-            evidence["_path"] = path
-            evidence["_validated_sha256"] = evidence_sha
-            found[shard_index] = evidence
+            found[shard_index] = (evidence, path, evidence_sha)
         except Exception as exc:
             blockers.append(
                 {
@@ -710,50 +922,49 @@ def promote_support_catalog(
 
     shard_records: list[dict] = []
     shard_source_paths: dict[int, Path] = {}
+    runtime_sdk_hashes: dict[str, set[str]] = {}
     passed_combinations = 0
     for shard in manifest["run_shards"]:
         shard_index = shard["shard_index"]
-        evidence = found.pop(shard_index, None)
-        if evidence is None:
+        item = found.pop(shard_index, None)
+        if item is None:
             blockers.append(
                 {"code": "missing-shard-evidence", "shard_index": shard_index}
             )
             continue
-        shard_source_paths[shard_index] = evidence["_path"]
+        evidence, evidence_path, evidence_sha = item
+        shard_source_paths[shard_index] = evidence_path
         accepted = False
-        mismatches = [
-            key
-            for key, expected in (
-                ("contract_sha256", manifest["contract_sha256"]),
-                ("manifest_sha256", manifest_sha),
-                ("shard_sha256", shard["shard_sha256"]),
-                ("expected_batch_count", shard["batch_count"]),
-                ("expected_combination_count", shard["combination_count"]),
-            )
-            if evidence.get(key) != expected
-        ]
-        if mismatches:
+        try:
+            validate_shard_evidence(evidence, manifest, shard)
+        except Exception as exc:
             blockers.append(
                 {
-                    "code": "shard-evidence-mismatch",
+                    "code": "invalid-shard-evidence",
                     "shard_index": shard_index,
-                    "fields": mismatches,
+                    "error": str(exc),
                 }
             )
-        elif (
-            evidence.get("status") != "passed"
-            or evidence.get("passed_batch_count") != shard["batch_count"]
-            or evidence.get("passed_combination_count") != shard["combination_count"]
-        ):
-            blockers.append({"code": "failed-shard", "shard_index": shard_index})
         else:
-            passed_combinations += shard["combination_count"]
-            accepted = True
+            if (
+                evidence.get("status") != "passed"
+                or evidence.get("passed_batch_count") != shard["batch_count"]
+                or evidence.get("passed_combination_count")
+                != shard["combination_count"]
+            ):
+                blockers.append({"code": "failed-shard", "shard_index": shard_index})
+            else:
+                passed_combinations += shard["combination_count"]
+                for batch_record in evidence["batches"]:
+                    runtime_sdk_hashes.setdefault(
+                        batch_record["python_version"], set()
+                    ).add(batch_record["runtime_sdk_sha256"].lower())
+                accepted = True
         shard_records.append(
             {
                 "shard_index": shard_index,
                 "shard_sha256": shard["shard_sha256"],
-                "evidence_sha256": evidence["_validated_sha256"],
+                "evidence_sha256": evidence_sha,
                 "status": "passed" if accepted else "failed",
                 "batch_count": shard["batch_count"] if accepted else 0,
                 "combination_count": shard["combination_count"] if accepted else 0,
@@ -765,7 +976,7 @@ def promote_support_catalog(
         )
     if passed_combinations != manifest["combination_count"] and not any(
         blocker.get("code")
-        in {"missing-shard-evidence", "failed-shard", "shard-evidence-mismatch"}
+        in {"missing-shard-evidence", "failed-shard", "invalid-shard-evidence"}
         for blocker in blockers
     ):
         blockers.append(
@@ -776,11 +987,40 @@ def promote_support_catalog(
             }
         )
 
+    if (
+        manifest.get("selection", {}).get("mode") == "full-history"
+        and (
+            manifest.get("combination_count") == 0
+            or manifest.get("batch_count") == 0
+            or manifest.get("run_shard_count") == 0
+        )
+    ):
+        blockers.append({"code": "empty-full-history-selection"})
+
+    runtime_sdks: list[dict] = []
+    for python_version, hashes in sorted(runtime_sdk_hashes.items()):
+        if len(hashes) != 1:
+            blockers.append(
+                {
+                    "code": "runtime-sdk-hash-mismatch",
+                    "python_version": python_version,
+                    "sha256s": sorted(hashes),
+                }
+            )
+            continue
+        runtime_sdks.append(
+            {"python_version": python_version, "sha256": next(iter(hashes))}
+        )
+
     if blockers:
         decision_status = "frozen"
         gate = "failed"
     elif mode == "preview":
-        decision_status = "eligible"
+        decision_status = (
+            "eligible"
+            if manifest.get("selection", {}).get("mode") == "full-history"
+            else "preview-passed"
+        )
         gate = "passed"
     else:
         decision_status = "promoted"
@@ -819,6 +1059,7 @@ def promote_support_catalog(
         "verified_shard_count": sum(
             record.get("status") == "passed" for record in shard_records
         ),
+        "runtime_sdks": runtime_sdks,
         "shards": shard_records,
         "provenance": provenance,
     }
@@ -834,6 +1075,7 @@ def promote_support_catalog(
         "received_shard_count": len(shard_records),
         "expected_combination_count": manifest["combination_count"],
         "passed_combination_count": passed_combinations,
+        "runtime_sdks": runtime_sdks,
         "shards": shard_records,
         "decision": decision,
         "provenance": provenance,

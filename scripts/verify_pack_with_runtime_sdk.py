@@ -27,6 +27,13 @@ from tools import resolve_tool_exe
 
 RUNTIME_METADATA_PATH = "metadata/runtime-sdk.v1.json"
 PACK_METADATA_PATH = "pack.json"
+TOOLCHAIN_ABI_FIELDS = (
+    "visual_studio_version",
+    "vc_tools_version",
+    "windows_sdk_version",
+    "platform_toolset",
+    "runtime_library",
+)
 REQUIRED_WINDOWS_SYSTEM_LIBRARIES = (
     "advapi32.lib",
     "shell32.lib",
@@ -361,10 +368,33 @@ def validate_pack(root: Path, runtime: dict) -> dict:
         "cpython_tag",
         "staticpython_commit",
         "platform",
-        "toolchain",
     ):
         if metadata.get(field) != runtime.get(field):
             raise RuntimeError(f"pack {owner} {field} does not match the runtime SDK")
+    pack_toolchain = metadata.get("toolchain")
+    runtime_toolchain = runtime.get("toolchain")
+    if not isinstance(pack_toolchain, dict) or not isinstance(runtime_toolchain, dict):
+        raise RuntimeError(f"pack {owner} has invalid toolchain metadata")
+    missing_toolchain_fields = [
+        field
+        for field in (*TOOLCHAIN_ABI_FIELDS, "vscmd_version")
+        if not isinstance(pack_toolchain.get(field), str) or not pack_toolchain[field]
+    ]
+    if missing_toolchain_fields:
+        raise RuntimeError(
+            f"pack {owner} toolchain metadata is missing: "
+            + ", ".join(missing_toolchain_fields)
+        )
+    mismatched_toolchain_fields = [
+        field
+        for field in TOOLCHAIN_ABI_FIELDS
+        if pack_toolchain.get(field) != runtime_toolchain.get(field)
+    ]
+    if mismatched_toolchain_fields:
+        raise RuntimeError(
+            f"pack {owner} toolchain ABI does not match the runtime SDK: "
+            + ", ".join(mismatched_toolchain_fields)
+        )
     verification = metadata.get("verification")
     if not isinstance(verification, dict) or verification.get("status") not in {"not-run", "passed"}:
         raise RuntimeError(f"pack {owner} has invalid verification state")

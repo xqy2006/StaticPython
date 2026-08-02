@@ -225,7 +225,7 @@ def execute_combination(record: dict, context: dict) -> tuple[dict, list[Path]]:
     shutil.copy2(verifier_path, copied_verifier)
     normalized_report = {
         "schema_version": 1,
-        "kind": "staticpython-library-history-combination-evidence",
+        "kind": history_evidence.COMBINATION_EVIDENCE_KIND,
         "library": record["library"],
         "project_name": record["project_name"],
         "version": record["version"],
