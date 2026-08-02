@@ -17,6 +17,7 @@ if str(SCRIPT_ROOT) not in sys.path:
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import library_history_evidence as history_evidence
 import library_version_contract as version_contract
 
 
@@ -149,6 +150,38 @@ def _load_previous_catalog(root: Path) -> tuple[dict | None, dict | None]:
             raise RuntimeError("previous verified combination must be an object")
         _verified_identity(record)
     return index, contract
+
+
+def _matching_history_validation(root: Path, candidate: dict) -> dict | None:
+    index, support = history_evidence._load_previous_support_catalog(root)
+    active = index.get("active")
+    if not isinstance(active, dict) or not isinstance(support, dict):
+        return None
+    candidate_sha = candidate.get("contract_sha256")
+    if active.get("contract_sha256") != candidate_sha:
+        return None
+    contract_path = history_evidence._safe_relative(
+        root,
+        active.get("contract"),
+        "history-validated contract path",
+    )
+    history_contract = history_evidence.load_object(
+        contract_path,
+        "history-validated contract",
+    )
+    if history_contract != candidate:
+        raise RuntimeError(
+            "history support contract payload does not match the exact candidate contract"
+        )
+    return {
+        "contract_sha256": candidate_sha,
+        "index_sha256": index.get("index_sha256"),
+        "manifest_sha256": active.get("manifest_sha256"),
+        "support_sha256": active.get("support_sha256"),
+        "evidence_sha256": active.get("evidence_sha256"),
+        "verified_combination_count": active.get("verified_combination_count"),
+        "provenance": active.get("provenance"),
+    }
 
 
 def _legacy_active(contract: dict) -> dict:
@@ -472,6 +505,7 @@ def promote_catalog(
     validation_root: Path | None = None,
     previous_catalog_root: Path | None = None,
     legacy_baseline_contract_path: Path | None = None,
+    history_support_catalog_root: Path | None = None,
     mode: str = "preview",
     provenance: dict | None = None,
 ) -> dict:
@@ -528,6 +562,15 @@ def promote_catalog(
         validation_root,
     )
     blockers.extend(validation_blockers)
+    history_validation = None
+    if (
+        validation.get("deferred") is not None
+        and history_support_catalog_root is not None
+    ):
+        history_validation = _matching_history_validation(
+            history_support_catalog_root,
+            candidate,
+        )
 
     bootstrap = previous_contract is None and bool(delta.get("baseline"))
     if previous_contract is None and not bootstrap:
@@ -557,7 +600,7 @@ def promote_catalog(
     if blockers:
         decision_status = "frozen"
         gate_status = "failed"
-    elif validation.get("deferred") is not None:
+    elif validation.get("deferred") is not None and history_validation is None:
         decision_status = "deferred"
         gate_status = "passed"
     elif previous_sha == candidate_sha:
@@ -594,6 +637,7 @@ def promote_catalog(
         "supplied_delta_sha256": _canonical_sha256(supplied_delta),
         "calculated_delta_sha256": _canonical_sha256(calculated_delta),
         "validation": validation,
+        "history_validation": history_validation,
         "decision": decision,
     }
     evidence["evidence_sha256"] = _canonical_sha256(evidence)
@@ -614,6 +658,8 @@ def promote_catalog(
     if decision_status == "promoted":
         if bootstrap:
             promotion_basis = "discovery-baseline"
+        elif history_validation is not None:
+            promotion_basis = "weekly-history-validation"
         elif verified_new:
             promotion_basis = "incremental-validation"
         elif new_unbuildable:
@@ -625,6 +671,7 @@ def promote_catalog(
             "contract": "active/library-version-contract.json",
             "promotion_basis": promotion_basis,
             "verified_combinations": _merge_verified(previous_verified, verified_new),
+            "history_validation": history_validation,
             "provenance": provenance,
         }
         active_contract = candidate
@@ -636,6 +683,8 @@ def promote_catalog(
             "promotion_basis": (
                 "discovery-baseline"
                 if bootstrap
+                else "weekly-history-validation"
+                if history_validation is not None
                 else "incremental-validation"
                 if verified_new
                 else "unbuildable-evidence-update"
@@ -643,6 +692,7 @@ def promote_catalog(
                 else "contract-metadata-update"
             ),
             "verified_combinations": _merge_verified(previous_verified, verified_new),
+            "history_validation": history_validation,
             "provenance": provenance,
         }
 
@@ -697,6 +747,7 @@ def build_summary(index: dict, evidence: dict) -> str:
     active = index.get("active")
     proposed = index.get("proposed_active")
     deferred = validation.get("deferred")
+    history_validation = evidence.get("history_validation")
     lines = [
         "## StaticPython library contract promotion",
         "",
@@ -706,6 +757,7 @@ def build_summary(index: dict, evidence: dict) -> str:
         f"- Proposed active: `{proposed.get('contract_sha256') if isinstance(proposed, dict) else '<none>'}`",
         f"- Validation: `{validation['passed_count']}/{validation['expected_count']}` passed",
         f"- Deferred to weekly history shards: `{deferred.get('candidate_count', 0) if isinstance(deferred, dict) else 0}`",
+        f"- Matching full-history validation: `{bool(history_validation)}`",
         f"- New evidence-backed unbuildable records: `{len(delta['new_unbuildable'])}`",
         f"- Source drift records: `{len(delta['drifted_candidates'])}`",
         f"- Regression records: `{len(delta['regressions'])}`",
@@ -728,6 +780,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delta", type=Path, required=True)
     parser.add_argument("--matrix", type=Path)
     parser.add_argument("--validation-root", type=Path)
+    parser.add_argument("--history-support-catalog", type=Path)
     previous = parser.add_mutually_exclusive_group()
     previous.add_argument("--previous-catalog", type=Path)
     previous.add_argument("--legacy-baseline-contract", type=Path)
@@ -762,6 +815,7 @@ def main() -> int:
         validation_root=args.validation_root,
         previous_catalog_root=args.previous_catalog,
         legacy_baseline_contract_path=args.legacy_baseline_contract,
+        history_support_catalog_root=args.history_support_catalog,
         mode=args.mode,
         provenance=provenance,
     )

@@ -505,6 +505,53 @@ jobs:
           pattern: library-contract-*
           path: .tmp/validation
 
+      - name: Download matching full-history validation
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $candidatePath = Join-Path $env:GITHUB_WORKSPACE ".tmp\promotion-input\library-version-contract.json"
+          $candidateHash = [string](Get-Content -LiteralPath $candidatePath -Raw | ConvertFrom-Json).contract_sha256
+          $apiPath = "repos/${{ github.repository }}/actions/workflows/library-history-weekly.yml/runs?branch=master&status=completed&per_page=100"
+          $oldPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          $responseText = gh api $apiPath 2>$null
+          $apiExitCode = $LASTEXITCODE
+          $ErrorActionPreference = $oldPreference
+          if ($apiExitCode -ne 0 -or -not $responseText) {
+            Write-Host "No weekly history catalog is readable; oversized deltas will remain deferred."
+            exit 0
+          }
+          $runs = @(($responseText | ConvertFrom-Json).workflow_runs) |
+            Where-Object { $_.conclusion -eq "success" } |
+            Sort-Object id -Descending |
+            Select-Object -First 10
+          $lookupRoot = Join-Path $env:GITHUB_WORKSPACE ".tmp\history-support-lookup"
+          foreach ($priorRun in $runs) {
+            $artifacts = @((gh api "repos/${{ github.repository }}/actions/runs/$($priorRun.id)/artifacts?name=library-history-support-catalog&per_page=100" | ConvertFrom-Json).artifacts)
+            $artifact = $artifacts |
+              Where-Object { $_.name -eq "library-history-support-catalog" -and -not $_.expired } |
+              Select-Object -First 1
+            if (-not $artifact) { continue }
+            $downloadRoot = Join-Path $lookupRoot "catalog-$($priorRun.id)"
+            New-Item -ItemType Directory -Force $downloadRoot | Out-Null
+            gh run download $priorRun.id `
+              --repo "${{ github.repository }}" `
+              --name "library-history-support-catalog" `
+              --dir $downloadRoot
+            if ($LASTEXITCODE -ne 0) { continue }
+            $indexPath = Join-Path $downloadRoot "index.v1.json"
+            if (-not (Test-Path -LiteralPath $indexPath -PathType Leaf)) { continue }
+            $index = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
+            if ([string]$index.active.contract_sha256 -ne $candidateHash) { continue }
+            $destination = Join-Path $env:GITHUB_WORKSPACE ".tmp\history-support-catalog"
+            New-Item -ItemType Directory -Force $destination | Out-Null
+            Copy-Item -Path (Join-Path $downloadRoot "*") -Destination $destination -Recurse -Force
+            Write-Host "Using exact full-history validation from run $($priorRun.id) for contract $candidateHash"
+            break
+          }
+
       - name: Evaluate promotion and materialize catalog
         shell: pwsh
         run: |
@@ -517,6 +564,7 @@ jobs:
           $previousCatalog = Join-Path $inputRoot "previous-catalog"
           $legacyBaseline = Join-Path $inputRoot "previous-legacy-contract.json"
           $validationRoot = Join-Path $env:GITHUB_WORKSPACE ".tmp\validation"
+          $historySupportCatalog = Join-Path $env:GITHUB_WORKSPACE ".tmp\history-support-catalog"
           $mode = if (
             "${{ github.event_name }}" -eq "pull_request" -or
             "${{ github.ref_name }}" -ne "master"
@@ -541,6 +589,9 @@ jobs:
           }
           if (Test-Path -LiteralPath $validationRoot -PathType Container) {
             $promotionArgs += @("--validation-root", $validationRoot)
+          }
+          if (Test-Path -LiteralPath (Join-Path $historySupportCatalog "index.v1.json") -PathType Leaf) {
+            $promotionArgs += @("--history-support-catalog", $historySupportCatalog)
           }
           if (Test-Path -LiteralPath (Join-Path $previousCatalog "index.v1.json") -PathType Leaf) {
             $promotionArgs += @("--previous-catalog", $previousCatalog)
