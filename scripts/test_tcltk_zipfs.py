@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
 from zipfile import ZipFile
@@ -266,6 +267,24 @@ Tcl_AppInit(Tcl_Interp *interp)
                 tkinter_setup.TCL_COMMIT,
                 component="Tcl",
             )
+
+    def test_project_keeps_generic_cpython_property_sheet(self) -> None:
+        namespace = "http://schemas.microsoft.com/developer/msbuild/2003"
+        root = ET.fromstring(
+            f'''<Project xmlns="{namespace}">
+  <ImportGroup Label="PropertySheets">
+    <Import Project="tcltk.props" />
+  </ImportGroup>
+</Project>'''
+        )
+        tkinter_setup._replace_tcltk_props_import(root)
+        imports = list(root.iter(tkinter_setup.msbuild_tag("Import")))
+        self.assertEqual(len(imports), 1)
+        self.assertEqual(imports[0].get("Project"), "pyproject.props")
+        self.assertEqual(
+            imports[0].get("Condition"),
+            "$(__PyProject_Props_Imported) != 'true'",
+        )
 
 
 if __name__ == "__main__":

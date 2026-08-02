@@ -443,24 +443,31 @@ def patch_tkinter_sources(context) -> None:
             context.log(f"strictly patched {relative} for in-memory Tcl/Tk ZipFS")
 
 
-def _remove_tcltk_props_import(root: ET.Element) -> None:
-    removed = 0
+def _replace_tcltk_props_import(root: ET.Element) -> None:
+    replaced = 0
     for parent in root.iter():
         for child in list(parent):
             if child.tag != msbuild_tag("Import"):
                 continue
             project = (child.get("Project") or "").replace("/", "\\").casefold()
             if project.endswith("tcltk.props"):
-                parent.remove(child)
-                removed += 1
-    if removed != 1:
-        raise RuntimeError(f"_tkinter.vcxproj tcltk.props import expected once, found {removed}")
+                # tcltk.props also imports pyproject.props, which supplies the
+                # CPython Include/, PC/, and generated pyconfig.h paths.  Keep
+                # that generic project wiring while dropping all dynamic
+                # Tcl/Tk configuration from the property sheet.
+                child.set("Project", "pyproject.props")
+                child.set("Condition", "$(__PyProject_Props_Imported) != 'true'")
+                replaced += 1
+    if replaced != 1:
+        raise RuntimeError(
+            f"_tkinter.vcxproj tcltk.props import expected once, found {replaced}"
+        )
 
 
 def patch_tkinter_project(context) -> None:
     project = source_path(context, "PCbuild/_tkinter.vcxproj")
     tree, root = load_msbuild_project(project)
-    _remove_tcltk_props_import(root)
+    _replace_tcltk_props_import(root)
     set_or_create_property(root, "ConfigurationType", "StaticLibrary")
     set_or_create_property(root, "TargetExt", ".lib")
     set_or_create_property(root, "TargetName", "_tkinter")
