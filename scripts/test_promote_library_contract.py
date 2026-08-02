@@ -668,6 +668,8 @@ class PromotionTests(unittest.TestCase):
             "candidate_count": 2,
             "contract_sha256": candidate["contract_sha256"],
             "matrix_limit": 1,
+            "max_candidates_per_batch": 1,
+            "incremental_candidate_limit": 1,
         }
         history_root = self.root / "history-support"
         history_contract = write_json(
@@ -676,6 +678,7 @@ class PromotionTests(unittest.TestCase):
         )
         history_active = {
             "contract_sha256": candidate["contract_sha256"],
+            "directory": "validated",
             "contract": history_contract.relative_to(history_root).as_posix(),
             "manifest_sha256": "b" * 64,
             "support_sha256": "c" * 64,
@@ -688,7 +691,7 @@ class PromotionTests(unittest.TestCase):
             "_load_previous_support_catalog",
             return_value=(
                 {"active": history_active, "index_sha256": "e" * 64},
-                {"status": "verified"},
+                {"status": "verified", "selection": {"mode": "full-history"}},
             ),
         ):
             result, output = self.run_promotion(
@@ -705,6 +708,10 @@ class PromotionTests(unittest.TestCase):
         self.assertEqual(result["active"]["promotion_basis"], "weekly-history-validation")
         self.assertEqual(result["active"]["history_validation"]["evidence_sha256"], "d" * 64)
         self.assertEqual(result["active"]["history_validation"]["index_sha256"], "e" * 64)
+        self.assertEqual(
+            result["active"]["history_validation"]["selection"],
+            {"mode": "full-history"},
+        )
         evidence = json.loads(
             (
                 output
@@ -724,15 +731,55 @@ class PromotionTests(unittest.TestCase):
         )
         active = {
             "contract_sha256": candidate["contract_sha256"],
+            "directory": "validated",
             "contract": mismatched_path.relative_to(history_root).as_posix(),
         }
         with mock.patch.object(
             promotion.history_evidence,
             "_load_previous_support_catalog",
-            return_value=({"active": active}, {"status": "verified"}),
+            return_value=(
+                {"active": active},
+                {"status": "verified", "selection": {"mode": "full-history"}},
+            ),
         ):
             with self.assertRaisesRegex(RuntimeError, "exact candidate contract"):
                 promotion._matching_history_validation(history_root, candidate)
+
+    def test_legacy_or_non_full_history_support_cannot_adopt_a_contract(self) -> None:
+        candidate = contract({"3.13.14": {"status": "candidate", "source": source("a" * 64)}})
+        history_root = self.root / "insufficient-history-support"
+        history_contract = write_json(
+            history_root / "validated" / "library-version-contract.json",
+            candidate,
+        )
+        active = {
+            "contract_sha256": candidate["contract_sha256"],
+            "contract": history_contract.relative_to(history_root).as_posix(),
+        }
+        with mock.patch.object(
+            promotion.history_evidence,
+            "_load_previous_support_catalog",
+            return_value=(
+                {"active": active},
+                {"status": "verified", "selection": {"mode": "full-history"}},
+            ),
+        ):
+            self.assertIsNone(
+                promotion._matching_history_validation(history_root, candidate)
+            )
+
+        active["directory"] = "validated"
+        with mock.patch.object(
+            promotion.history_evidence,
+            "_load_previous_support_catalog",
+            return_value=(
+                {"active": active},
+                {"status": "verified", "selection": {"mode": "pull-request-smoke"}},
+            ),
+        ):
+            self.assertIsNone(
+                promotion._matching_history_validation(history_root, candidate)
+            )
 
     def test_tampered_delta_cannot_hide_a_regression(self) -> None:
         source_sha = "a" * 64

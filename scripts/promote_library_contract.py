@@ -160,6 +160,14 @@ def _matching_history_validation(root: Path, candidate: dict) -> dict | None:
     candidate_sha = candidate.get("contract_sha256")
     if active.get("contract_sha256") != candidate_sha:
         return None
+    # Legacy support records without an immutable active directory receive a
+    # deliberately narrower compatibility check in the history loader. They
+    # remain useful as last-known-good context, but are not sufficient proof
+    # for adopting a deferred discovery contract.
+    if not isinstance(active.get("directory"), str) or not active["directory"]:
+        return None
+    if support.get("selection", {}).get("mode") != "full-history":
+        return None
     contract_path = history_evidence._safe_relative(
         root,
         active.get("contract"),
@@ -180,6 +188,7 @@ def _matching_history_validation(root: Path, candidate: dict) -> dict | None:
         "support_sha256": active.get("support_sha256"),
         "evidence_sha256": active.get("evidence_sha256"),
         "verified_combination_count": active.get("verified_combination_count"),
+        "selection": support.get("selection"),
         "provenance": active.get("provenance"),
     }
 
