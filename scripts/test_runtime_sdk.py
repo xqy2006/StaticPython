@@ -46,6 +46,15 @@ assert _LICENSE_AUDIT_SPEC is not None and _LICENSE_AUDIT_SPEC.loader is not Non
 audit_library_licenses = importlib.util.module_from_spec(_LICENSE_AUDIT_SPEC)
 _LICENSE_AUDIT_SPEC.loader.exec_module(audit_library_licenses)
 
+_RESOURCE_SCAN_SPEC = importlib.util.spec_from_file_location(
+    "staticpython_scan_library_resources",
+    REPO_ROOT / "scripts" / "scan_library_resources.py",
+)
+assert _RESOURCE_SCAN_SPEC is not None and _RESOURCE_SCAN_SPEC.loader is not None
+scan_library_resources = importlib.util.module_from_spec(_RESOURCE_SCAN_SPEC)
+sys.modules[_RESOURCE_SCAN_SPEC.name] = scan_library_resources
+_RESOURCE_SCAN_SPEC.loader.exec_module(scan_library_resources)
+
 
 class RuntimeSDKTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -576,6 +585,32 @@ struct _inittab _PyImport_Inittab[] = {
             ["wx-native-modules", "wx-window-lifecycle"],
         )
 
+    def test_freezer_preserves_nested_runtime_docs_packages(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_freeze_modules_test",
+            REPO_ROOT / "assets" / "overlay" / "Tools" / "build" / "freeze_modules.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        for relative in (
+            "Lib/docs/__init__.py",
+            "Lib/botocore/__init__.py",
+            "Lib/botocore/docs/__init__.py",
+            "Lib/botocore/docs/bcdoc.py",
+            "Lib/botocore/tests/__init__.py",
+        ):
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# test\n", encoding="utf-8")
+
+        names = {item.fullname for item in module.find_python_modules(str(self.root))}
+        self.assertIn("botocore.docs", names)
+        self.assertIn("botocore.docs.bcdoc", names)
+        self.assertNotIn("docs", names)
+        self.assertNotIn("botocore.tests", names)
+
     def test_native_wheels_are_never_source_inputs(self) -> None:
         files = [
             {
@@ -842,6 +877,71 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertEqual(len(integration.license_files), 1)
         copied_license = source_root / integration.license_files[0]
         self.assertEqual(copied_license.read_text(encoding="utf-8"), "upstream license\n")
+
+    def test_temporary_pypi_release_cache_discards_only_selected_release(self) -> None:
+        context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=self.root / "source",
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=self.root / "downloads",
+            work_cache_root=self.root / "work",
+            asset_overlay_root=self.root / "assets",
+            log=lambda _message: None,
+        )
+        integration = libs.LibraryIntegration(
+            name="demo",
+            source_provider="pypi",
+            project_name="demo-project",
+        )
+        selected_roots = []
+        sibling_roots = []
+        for cache_root in (context.download_cache_root, context.work_cache_root):
+            selected = cache_root / "pypi" / "demo-project" / "1.2.3"
+            selected.mkdir(parents=True)
+            (selected / "payload.bin").write_bytes(b"selected")
+            selected_roots.append(selected)
+            sibling = cache_root / "pypi" / "demo-project" / "1.2.4"
+            sibling.mkdir(parents=True)
+            (sibling / "payload.bin").write_bytes(b"sibling")
+            sibling_roots.append(sibling)
+
+        with libs.temporary_pypi_release_cache(context, integration, "1.2.3"):
+            self.assertTrue(all(path.exists() for path in selected_roots))
+
+        self.assertTrue(all(not path.exists() for path in selected_roots))
+        self.assertTrue(all(path.exists() for path in sibling_roots))
+
+    def test_temporary_pypi_release_cache_discards_after_failure(self) -> None:
+        context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=self.root / "source",
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=self.root / "downloads",
+            work_cache_root=self.root / "work",
+            asset_overlay_root=self.root / "assets",
+            log=lambda _message: None,
+        )
+        integration = libs.LibraryIntegration(
+            name="demo",
+            source_provider="pypi",
+            project_name="demo-project",
+        )
+        selected_roots = []
+        for cache_root in (context.download_cache_root, context.work_cache_root):
+            selected = cache_root / "pypi" / "demo-project" / "1.2.3"
+            selected.mkdir(parents=True)
+            (selected / "payload.bin").write_bytes(b"selected")
+            selected_roots.append(selected)
+
+        with self.assertRaisesRegex(RuntimeError, "version failed"):
+            with libs.temporary_pypi_release_cache(context, integration, "1.2.3"):
+                raise RuntimeError("version failed")
+
+        self.assertTrue(all(not path.exists() for path in selected_roots))
 
     def test_declared_license_source_is_versioned_and_hash_verified(self) -> None:
         payload = b"fallback license\n"
@@ -1229,6 +1329,7 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertEqual(catalog["soupsieve"]["dependencies"], ["bs4"])
         self.assertEqual(catalog["webruntime"]["dependencies"], ["dialite"])
         self.assertEqual(catalog["bleach"]["release_version"], "6.4.0")
+
         self.assertEqual(catalog["bleach"]["dependencies"], ["tinycss2"])
         self.assertEqual(
             catalog["bleach"]["dependency_constraints"],
@@ -1249,6 +1350,95 @@ struct _inittab _PyImport_Inittab[] = {
             dash_module.LIBRARY_INTEGRATION.dependency_constraints,
             {"janus": ">=1.0.0"},
         )
+
+    def test_aws_sdk_catalog_declares_resource_behavior_smokes(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        catalog = {
+            item["name"]: item
+            for item in config["third_party_library_catalog"]["libraries"]
+        }
+        full = config["profiles"]["full"]["third_party_libraries"]
+        self.assertEqual(
+            [name for name in full if name in {"boto3", "botocore", "s3transfer"}],
+            ["boto3", "botocore", "s3transfer"],
+        )
+        self.assertEqual(catalog["boto3"]["license_expression"], "Apache-2.0")
+        self.assertEqual(catalog["botocore"]["license_expression"], "Apache-2.0")
+        self.assertEqual(catalog["s3transfer"]["license_expression"], "Apache-2.0")
+        self.assertEqual(
+            [test["name"] for test in catalog["boto3"]["smoke_tests"]],
+            ["s3-client-model"],
+        )
+        self.assertEqual(
+            [test["name"] for test in catalog["botocore"]["smoke_tests"]],
+            ["embedded-s3-service-model"],
+        )
+        self.assertEqual(
+            [test["name"] for test in catalog["s3transfer"]["smoke_tests"]],
+            ["transfer-config"],
+        )
+
+    def test_resource_scanner_loads_generic_catalog_integrations(self) -> None:
+        config_path = self.root / "config.json"
+        catalog = {
+            "libraries": [
+                {
+                    "name": "demo",
+                    "overlay_entries": ["Lib/demo"],
+                    "source_provider": "pypi",
+                }
+            ]
+        }
+        config_path.write_text(
+            json.dumps({
+                "default_profile": "full",
+                "third_party_library_catalog": catalog,
+                "profiles": {"full": {"third_party_libraries": ["demo"]}},
+            }),
+            encoding="utf-8",
+        )
+        with mock.patch.object(scan_library_resources, "load_integrations", return_value=[]) as load:
+            result = scan_library_resources.main([
+                "--repo-root", str(self.root),
+                "--config", str(config_path),
+                "--profile", "full",
+                "--python-version", "3.13",
+                "--libraries", "demo",
+                "--work-root", str(self.root / "work"),
+                "--json", str(self.root / "report.json"),
+                "--markdown", str(self.root / "report.md"),
+            ])
+        self.assertEqual(result, 0)
+        self.assertEqual(load.call_args.kwargs["library_catalog"], catalog)
+
+    def test_resource_scanner_recognizes_pack_roots_and_custom_pypi_hooks(self) -> None:
+        resource = self.root / "service-2.json"
+        resource.write_text("{}", encoding="utf-8")
+        integration = SimpleNamespace(
+            name="botocore",
+            project_name="botocore",
+            materialized_paths=["Lib/botocore"],
+            prepare_source_hooks=[],
+        )
+        status, reason = scan_library_resources.classify_resource(
+            resource,
+            "Lib/botocore/data/s3/2006-03-01/service-2.json",
+            "botocore/data/s3/2006-03-01/service-2.json",
+            "",
+            integration,
+        )
+        self.assertEqual(status, "handled")
+        self.assertIn("StaticPythonPackV1", reason)
+
+        source_info = scan_library_resources.pypi_source_info(SimpleNamespace(
+            name="six",
+            project_name="six",
+            materialized_paths=["Lib/six"],
+            prepare_source_hooks=[lambda _context: None],
+        ))
+        self.assertIsNotNone(source_info)
+        assert source_info is not None
+        self.assertEqual(source_info.source_mapping, {"six": "Lib/six"})
 
     def test_default_integration_smoke_executes_real_import(self) -> None:
         integration = libs.LibraryIntegration(name="demo", top_level_import_names=["demo.api"])
