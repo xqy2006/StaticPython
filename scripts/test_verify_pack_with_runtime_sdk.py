@@ -76,7 +76,7 @@ def _pack_metadata(root: Path, runtime: dict, *, name: str = "demo") -> dict:
         "cpython_tag": runtime["cpython_tag"],
         "staticpython_commit": runtime["staticpython_commit"],
         "platform": runtime["platform"],
-        "toolchain": runtime["toolchain"],
+        "toolchain": json.loads(json.dumps(runtime["toolchain"])),
         "descriptor_symbol": f"StaticPython_Pack_{name}",
         "sources": ["src/pack.c"],
         "libraries": [],
@@ -151,6 +151,22 @@ class VerifyPackWithRuntimeSDKTests(unittest.TestCase):
         (runtime_root / "include" / "Python.h").write_text("/* Tamper */\n", encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "SHA-256"):
             verifier.validate_runtime_sdk(runtime_root)
+
+    def test_vscmd_servicing_drift_does_not_change_toolchain_abi(self) -> None:
+        _runtime_root, runtime = self._make_runtime()
+        pack_root, metadata = self._make_pack(runtime)
+        metadata["toolchain"]["vscmd_version"] = "17.14.37"
+        (pack_root / verifier.PACK_METADATA_PATH).write_text(
+            json.dumps(metadata), encoding="utf-8"
+        )
+        self.assertEqual(verifier.validate_pack(pack_root, runtime)["name"], "demo")
+
+        metadata["toolchain"]["vc_tools_version"] = "14.45.00000"
+        (pack_root / verifier.PACK_METADATA_PATH).write_text(
+            json.dumps(metadata), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(RuntimeError, "toolchain ABI"):
+            verifier.validate_pack(pack_root, runtime)
 
     def test_composition_and_namespace_parents_are_inferred(self) -> None:
         runtime = {
