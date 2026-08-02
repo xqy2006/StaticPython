@@ -8,6 +8,8 @@ on:
       - "Lib/**"
       - "scripts/*contract*.py"
       - "scripts/*library*history*.py"
+      - "scripts/verify_pack_with_runtime_sdk.py"
+      - "scripts/test_verify_pack_with_runtime_sdk.py"
       - "build.py"
       - "config.json"
       - "libs.py"
@@ -19,6 +21,8 @@ on:
       - "Lib/**"
       - "scripts/*contract*.py"
       - "scripts/*library*history*.py"
+      - "scripts/verify_pack_with_runtime_sdk.py"
+      - "scripts/test_verify_pack_with_runtime_sdk.py"
       - "build.py"
       - "config.json"
       - "libs.py"
@@ -68,6 +72,7 @@ jobs:
           python .\scripts\test_library_contract_build.py
           python .\scripts\test_prepare_library_contract_matrix.py
           python .\scripts\test_prepare_library_history_batches.py
+          python .\scripts\test_verify_pack_with_runtime_sdk.py
 
       - name: Resolve latest CPython 3.11 through 3.15 tags
         id: resolve
