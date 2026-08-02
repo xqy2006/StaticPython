@@ -417,11 +417,16 @@ def _patch_tkappinit_text(text: str) -> str:
     restrict_declaration = (
         "extern int StaticPython_TkinterZipfsRestrictAutoPath(Tcl_Interp *interp);"
     )
+    restrict_tk_declaration = (
+        "extern int StaticPython_TkinterZipfsRestrictTkPaths(Tcl_Interp *interp);"
+    )
     if declaration in text:
         if (
             restrict_declaration not in text
+            or restrict_tk_declaration not in text
             or text.count("StaticPython_TkinterZipfsMount(interp)") != 1
             or text.count("StaticPython_TkinterZipfsRestrictAutoPath(interp)") != 1
+            or text.count("StaticPython_TkinterZipfsRestrictTkPaths(interp)") != 1
         ):
             raise RuntimeError("tkappinit.c contains an invalid StaticPython ZipFS mount patch")
         return text
@@ -430,7 +435,15 @@ def _patch_tkappinit_text(text: str) -> str:
         raise RuntimeError("tkappinit.c tkinter.h include anchor did not match exactly once")
     text = text.replace(
         include_anchor,
-        include_anchor + "\n\n" + declaration + "\n" + restrict_declaration,
+        (
+            include_anchor
+            + "\n\n"
+            + declaration
+            + "\n"
+            + restrict_declaration
+            + "\n"
+            + restrict_tk_declaration
+        ),
         1,
     )
     pattern = re.compile(r"(?m)^(\s*)if \(Tcl_Init\s*\(interp\) == TCL_ERROR\)")
@@ -459,7 +472,24 @@ def _patch_tkappinit_text(text: str) -> str:
         f"\n\n{init_match.group(1)}if (StaticPython_TkinterZipfsRestrictAutoPath(interp) == TCL_ERROR)\n"
         f"{init_match.group(1)}    return TCL_ERROR;"
     )
-    return text[: init_match.end()] + restrict + text[init_match.end() :]
+    text = text[: init_match.end()] + restrict + text[init_match.end() :]
+
+    tk_pattern = re.compile(
+        r"(?m)^(\s*)if \((?:Tk_Init|Tkinter_TkInit)\s*\(interp\) == TCL_ERROR\) \{\r?\n"
+        r"\1    return TCL_ERROR;\r?\n"
+        r"\1\}"
+    )
+    tk_matches = list(tk_pattern.finditer(text))
+    if len(tk_matches) != 1:
+        raise RuntimeError(
+            f"tkappinit.c completed Tk_Init block expected once, found {len(tk_matches)}"
+        )
+    tk_match = tk_matches[0]
+    restrict_tk = (
+        f"\n\n{tk_match.group(1)}if (StaticPython_TkinterZipfsRestrictTkPaths(interp) == TCL_ERROR)\n"
+        f"{tk_match.group(1)}    return TCL_ERROR;"
+    )
+    return text[: tk_match.end()] + restrict_tk + text[tk_match.end() :]
 
 
 def patch_tkinter_sources(context) -> None:
@@ -764,8 +794,10 @@ interp = tkinter.Tcl()
 assert interp.eval("info patchlevel") == "9.0.4"
 mount = interp.getvar("staticpython_tkinter_zipfs")
 assert mount == "//zipfs:/staticpython/tcltk-9.0.4"
-assert interp.getvar("tcl_library") == mount + "/tcl9.0"
-assert interp.getvar("tk_library") == mount + "/tk9.0"
+tcl_library = interp.getvar("tcl_library")
+tk_library = interp.getvar("tk_library")
+assert tcl_library == mount + "/tcl9.0", (tcl_library, mount)
+assert tk_library == mount + "/tk9.0", (tk_library, mount)
 auto_path = interp.tk.splitlist(interp.getvar("auto_path"))
 assert auto_path and all(path.startswith(mount + "/") for path in auto_path), auto_path
 assert interp.eval("::tcl::tm::path list") == ""
@@ -785,7 +817,10 @@ root = tkinter.Tk()
 try:
     root.withdraw()
     mount = root.tk.getvar("staticpython_tkinter_zipfs")
-    assert root.tk.getvar("tk_library") == mount + "/tk9.0"
+    tcl_library = root.tk.getvar("tcl_library")
+    tk_library = root.tk.getvar("tk_library")
+    assert tcl_library == mount + "/tcl9.0", (tcl_library, mount)
+    assert tk_library == mount + "/tk9.0", (tk_library, mount)
     auto_path = root.tk.splitlist(root.tk.getvar("auto_path"))
     assert auto_path and all(path.startswith(mount + "/") for path in auto_path), auto_path
     assert root.tk.eval("::tcl::tm::path list") == ""

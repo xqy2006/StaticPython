@@ -44,6 +44,9 @@ installation paths therefore cannot supply scripts. The build fails if those
 upstream anchors drift. Dedicated behavior tests deliberately poison all of
 these environment variables with an external directory and require the
 effective Tcl/Tk search paths to remain entirely inside the mounted ZipFS.
+After `Tk_Init`, a second native hook restores `tcl_library`, `tk_library`, and
+`auto_path` to the exact embedded Tcl, Tk, and ttk directories so Tk's own
+initialization cannot leave broader search locations behind.
 
 `Lib/tkinter` remains excluded from the base runtime SDK. Selecting this pack
 writes `PCbuild/staticpython_optional_frozen_trees.txt`, which enables freezing

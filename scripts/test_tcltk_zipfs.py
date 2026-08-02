@@ -131,7 +131,9 @@ class TclTkZipfsTests(unittest.TestCase):
         self.assertIn("#define TCL_THREADS 1", source)
         self.assertIn("staticpython_tkinter_zipfs_mounted", source)
         self.assertIn("StaticPython_TkinterZipfsRestrictAutoPath", source)
+        self.assertIn("StaticPython_TkinterZipfsRestrictTkPaths", source)
         self.assertIn('Tcl_SetVar(interp, "auto_path", staticpython_tcl_library', source)
+        self.assertIn('Tcl_SetVar(interp, "auto_path", staticpython_tcltk_auto_path', source)
         self.assertIn('Tcl_SetVar(interp, "tcl_pkgPath", ""', source)
         self.assertIn("Tcl_EvalFile(interp, staticpython_tcl_tm_file)", source)
         self.assertIn('Tcl_SetVar(interp, "::tcl::tm::paths", ""', source)
@@ -216,6 +218,9 @@ Tcl_AppInit(Tcl_Interp *interp)
 {
     if (Tcl_Init (interp) == TCL_ERROR)
         return TCL_ERROR;
+    if (Tk_Init(interp) == TCL_ERROR) {
+        return TCL_ERROR;
+    }
     return TCL_OK;
 }
 '''
@@ -227,6 +232,35 @@ Tcl_AppInit(Tcl_Interp *interp)
         self.assertLess(
             patched.index("Tcl_Init (interp)"),
             patched.index("StaticPython_TkinterZipfsRestrictAutoPath(interp)"),
+        )
+        self.assertLess(
+            patched.index("StaticPython_TkinterZipfsRestrictAutoPath(interp)"),
+            patched.index("Tk_Init(interp)"),
+        )
+        self.assertLess(
+            patched.index("Tk_Init(interp)"),
+            patched.index("StaticPython_TkinterZipfsRestrictTkPaths(interp)"),
+        )
+        self.assertEqual(tkinter_setup._patch_tkappinit_text(patched), patched)
+
+    def test_tcl_appinit_supports_cpython_315_tk_init_wrapper(self) -> None:
+        source = '''#include "tkinter.h"
+
+int
+Tcl_AppInit(Tcl_Interp *interp)
+{
+    if (Tcl_Init (interp) == TCL_ERROR)
+        return TCL_ERROR;
+    if (Tkinter_TkInit(interp) == TCL_ERROR) {
+        return TCL_ERROR;
+    }
+    return TCL_OK;
+}
+'''
+        patched = tkinter_setup._patch_tkappinit_text(source)
+        self.assertLess(
+            patched.index("Tkinter_TkInit(interp)"),
+            patched.index("StaticPython_TkinterZipfsRestrictTkPaths(interp)"),
         )
         self.assertEqual(tkinter_setup._patch_tkappinit_text(patched), patched)
 
