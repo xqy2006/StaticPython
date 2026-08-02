@@ -543,43 +543,44 @@ jobs:
                       )
 
                       for index, raw_version in enumerate(release_versions, start=1):
-                          try:
-                              for item in selected_integrations:
-                                  if (
-                                      item.source_provider == "pypi"
-                                      and item.name.casefold() == integration.name.casefold()
-                                  ):
-                                      item.release_version = raw_version
-                              cleanup_integrations(source_root, selected_integrations)
-                              libs.run_prepare_source_hooks(selected_integrations, hook_context)
-                              build.copy_overlay_entries(
-                                  source_root,
-                                  build.ASSET_ROOT,
-                                  {"overlay_entries": []},
-                                  selected_integrations,
-                                  version_info,
-                              )
-                              libs.run_pre_patch_hooks(selected_integrations, hook_context)
-                              libs.run_post_patch_hooks(selected_integrations, hook_context)
-                              assert_materialized_paths_exist(source_root, integration)
-                              library_summary["passed_versions"].append(raw_version)
-                              if index % 25 == 0 or index == len(release_versions):
-                                  print(
-                                      f"[library-patch-matrix] {integration.name}: "
-                                      f"{index}/{len(release_versions)} version(s) checked"
+                          with libs.temporary_pypi_release_cache(hook_context, integration, raw_version):
+                              try:
+                                  for item in selected_integrations:
+                                      if (
+                                          item.source_provider == "pypi"
+                                          and item.name.casefold() == integration.name.casefold()
+                                      ):
+                                          item.release_version = raw_version
+                                  cleanup_integrations(source_root, selected_integrations)
+                                  libs.run_prepare_source_hooks(selected_integrations, hook_context)
+                                  build.copy_overlay_entries(
+                                      source_root,
+                                      build.ASSET_ROOT,
+                                      {"overlay_entries": []},
+                                      selected_integrations,
+                                      version_info,
                                   )
-                          except Exception as exc:
-                              failure = {
-                                  "version": raw_version,
-                                  "error": f"{type(exc).__name__}: {exc}",
-                                  "traceback": traceback.format_exc(),
-                              }
-                              library_summary["failed_versions"].append(failure)
-                              summary["failure_count"] += 1
-                              print(
-                                  f"[library-patch-matrix] {integration.name} {raw_version} failed: "
-                                  f"{type(exc).__name__}: {exc}"
-                              )
+                                  libs.run_pre_patch_hooks(selected_integrations, hook_context)
+                                  libs.run_post_patch_hooks(selected_integrations, hook_context)
+                                  assert_materialized_paths_exist(source_root, integration)
+                                  library_summary["passed_versions"].append(raw_version)
+                                  if index % 25 == 0 or index == len(release_versions):
+                                      print(
+                                          f"[library-patch-matrix] {integration.name}: "
+                                          f"{index}/{len(release_versions)} version(s) checked"
+                                      )
+                              except Exception as exc:
+                                  failure = {
+                                      "version": raw_version,
+                                      "error": f"{type(exc).__name__}: {exc}",
+                                      "traceback": traceback.format_exc(),
+                                  }
+                                  library_summary["failed_versions"].append(failure)
+                                  summary["failure_count"] += 1
+                                  print(
+                                      f"[library-patch-matrix] {integration.name} {raw_version} failed: "
+                                      f"{type(exc).__name__}: {exc}"
+                                  )
                           write_summary()
                   except Exception as exc:
                       failure = {

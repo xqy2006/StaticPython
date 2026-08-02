@@ -822,6 +822,71 @@ struct _inittab _PyImport_Inittab[] = {
         copied_license = source_root / integration.license_files[0]
         self.assertEqual(copied_license.read_text(encoding="utf-8"), "upstream license\n")
 
+    def test_temporary_pypi_release_cache_discards_only_selected_release(self) -> None:
+        context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=self.root / "source",
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=self.root / "downloads",
+            work_cache_root=self.root / "work",
+            asset_overlay_root=self.root / "assets",
+            log=lambda _message: None,
+        )
+        integration = libs.LibraryIntegration(
+            name="demo",
+            source_provider="pypi",
+            project_name="demo-project",
+        )
+        selected_roots = []
+        sibling_roots = []
+        for cache_root in (context.download_cache_root, context.work_cache_root):
+            selected = cache_root / "pypi" / "demo-project" / "1.2.3"
+            selected.mkdir(parents=True)
+            (selected / "payload.bin").write_bytes(b"selected")
+            selected_roots.append(selected)
+            sibling = cache_root / "pypi" / "demo-project" / "1.2.4"
+            sibling.mkdir(parents=True)
+            (sibling / "payload.bin").write_bytes(b"sibling")
+            sibling_roots.append(sibling)
+
+        with libs.temporary_pypi_release_cache(context, integration, "1.2.3"):
+            self.assertTrue(all(path.exists() for path in selected_roots))
+
+        self.assertTrue(all(not path.exists() for path in selected_roots))
+        self.assertTrue(all(path.exists() for path in sibling_roots))
+
+    def test_temporary_pypi_release_cache_discards_after_failure(self) -> None:
+        context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=self.root / "source",
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=self.root / "downloads",
+            work_cache_root=self.root / "work",
+            asset_overlay_root=self.root / "assets",
+            log=lambda _message: None,
+        )
+        integration = libs.LibraryIntegration(
+            name="demo",
+            source_provider="pypi",
+            project_name="demo-project",
+        )
+        selected_roots = []
+        for cache_root in (context.download_cache_root, context.work_cache_root):
+            selected = cache_root / "pypi" / "demo-project" / "1.2.3"
+            selected.mkdir(parents=True)
+            (selected / "payload.bin").write_bytes(b"selected")
+            selected_roots.append(selected)
+
+        with self.assertRaisesRegex(RuntimeError, "version failed"):
+            with libs.temporary_pypi_release_cache(context, integration, "1.2.3"):
+                raise RuntimeError("version failed")
+
+        self.assertTrue(all(not path.exists() for path in selected_roots))
+
     def test_declared_license_source_is_versioned_and_hash_verified(self) -> None:
         payload = b"fallback license\n"
         digest = hashlib.sha256(payload).hexdigest()
