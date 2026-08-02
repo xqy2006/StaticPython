@@ -9,12 +9,16 @@ from libs import (
     _normalized_project_name,
     _resolve_source_entry,
     _select_pypi_file,
-    replace_text_once,
     transform_source_text,
 )
 
 
-STRICT_PATCH_MIN_VERSION = Version("1.6.0")
+EARLIEST_PATCHED_VERSION = Version("0.9.0")
+LEGACY_COMPACT_ALIAS_VERSION = Version("0.9.2")
+MODERN_ALIAS_MIN_VERSION = Version("0.9.3")
+LEGACY_LOOP_CHECK_MIN_VERSION = Version("1.1.0")
+LEGACY_LOOP_CHECK_MAX_VERSION = Version("1.3.0")
+TASK_SWAP_PATCH_MIN_VERSION = Version("1.6.0")
 
 
 def _replace_strictly_once(text: str, old: str, new: str, *, label: str) -> str:
@@ -110,7 +114,29 @@ def _patch_nest_asyncio_runtime(text: str, release_version: str | None) -> str:
         raise RuntimeError(
             "nest_asyncio patch routing requires a resolved release version"
         )
-    strict = Version(release_version) >= STRICT_PATCH_MIN_VERSION
+    version = Version(release_version)
+    if version < EARLIEST_PATCHED_VERSION:
+        raise RuntimeError(
+            f"nest_asyncio {release_version} predates the earliest verified patch rule "
+            f"{EARLIEST_PATCHED_VERSION}"
+        )
+
+    legacy_wide_alias_anchor = (
+        "    if sys.version_info[:2] == (3, 6):\n"
+        "        # use pure python tasks and futures\n"
+        "        asyncio.Task = asyncio.tasks._CTask = asyncio.tasks.Task = \\\n"
+        "                asyncio.tasks._PyTask\n"
+        "        asyncio.Future = asyncio.futures._CFuture = asyncio.futures.Future = \\\n"
+        "                asyncio.futures._PyFuture\n"
+    )
+    legacy_compact_alias_anchor = (
+        "    if sys.version_info[:2] == (3, 6):\n"
+        "        # use pure python tasks and futures\n"
+        "        asyncio.Task = asyncio.tasks._CTask = asyncio.tasks.Task = \\\n"
+        "            asyncio.tasks._PyTask\n"
+        "        asyncio.Future = asyncio.futures._CFuture = asyncio.futures.Future = \\\n"
+        "            asyncio.futures._PyFuture\n"
+    )
 
     task_alias_anchor = (
         "    if sys.version_info >= (3, 6, 0):\n"
@@ -133,6 +159,61 @@ def _patch_nest_asyncio_runtime(text: str, release_version: str | None) -> str:
         + "        if hasattr(asyncio.tasks, '_c_all_tasks'):\n"
         + "            asyncio.tasks._py_all_tasks = asyncio.tasks._c_all_tasks\n"
     )
+
+    if version < LEGACY_COMPACT_ALIAS_VERSION:
+        text = _replace_strictly_once(
+            text,
+            legacy_wide_alias_anchor,
+            task_alias_patched,
+            label="nest_asyncio 0.9.0-0.9.1 task bookkeeping aliases",
+        )
+    elif version < MODERN_ALIAS_MIN_VERSION:
+        text = _replace_strictly_once(
+            text,
+            legacy_compact_alias_anchor,
+            task_alias_patched,
+            label="nest_asyncio 0.9.2 task bookkeeping aliases",
+        )
+    else:
+        text = _replace_strictly_once(
+            text,
+            task_alias_anchor,
+            task_alias_patched,
+            label="nest_asyncio 0.9.3+ task bookkeeping aliases",
+        )
+
+    if version == LEGACY_COMPACT_ALIAS_VERSION:
+        all_tasks_anchor = "    if future in asyncio.Task.all_tasks(self):\n"
+        all_tasks_patched = "    if future in asyncio.all_tasks(self):\n"
+        text = _replace_strictly_once(
+            text,
+            all_tasks_anchor,
+            all_tasks_patched,
+            label="nest_asyncio 0.9.2 asyncio.all_tasks compatibility",
+        )
+
+    if LEGACY_LOOP_CHECK_MIN_VERSION <= version < LEGACY_LOOP_CHECK_MAX_VERSION:
+        loop_check_anchor = (
+            "    cls = loop.__class__\n"
+            "    cls._run_forever_orig = cls.run_forever\n"
+            "    cls.run_forever = run_forever\n"
+        )
+        loop_check_patched = (
+            "    def _check_running(self):\n"
+            "        pass\n"
+            "\n"
+            + loop_check_anchor
+            + "    cls._check_running = _check_running\n"
+        )
+        text = _replace_strictly_once(
+            text,
+            loop_check_anchor,
+            loop_check_patched,
+            label="nest_asyncio 1.1.0-1.2.3 nested loop guard",
+        )
+
+    if version < TASK_SWAP_PATCH_MIN_VERSION:
+        return text
 
     task_helper_anchor = (
         "    curr_tasks = asyncio.tasks._current_tasks \\\n"
@@ -181,11 +262,6 @@ def _patch_nest_asyncio_runtime(text: str, release_version: str | None) -> str:
     )
 
     replacements = [
-        (
-            task_alias_anchor,
-            task_alias_patched,
-            "nest_asyncio asyncio 3.14+ task bookkeeping aliases",
-        ),
         (task_helper_anchor, task_helper_patched, "nest_asyncio task helper capture"),
         (
             current_task_anchor,
@@ -193,18 +269,8 @@ def _patch_nest_asyncio_runtime(text: str, release_version: str | None) -> str:
             "nest_asyncio current task preemption",
         ),
     ]
-    if strict:
-        for old, new, label in replacements:
-            text = _replace_strictly_once(text, old, new, label=label)
-        return text
-
     for old, new, label in replacements:
-        if old in text:
-            text = replace_text_once(text, old, new, label=label)
-    if "curr_tasks.pop(self, None)" in text and "task_swap(self, None)" not in text:
-        raise RuntimeError("nest_asyncio current task preemption anchor not found")
-    if "_c_register_task" in text and "_py_swap_current_task" not in text:
-        raise RuntimeError("nest_asyncio asyncio 3.14 task alias anchor not found")
+        text = _replace_strictly_once(text, old, new, label=label)
     return text
 
 

@@ -22,12 +22,34 @@ def load_setup_module():
     return module
 
 
-TASK_ALIAS_ANCHOR = (
+LEGACY_WIDE_ALIAS_ANCHOR = (
+    "    if sys.version_info[:2] == (3, 6):\n"
+    "        # use pure python tasks and futures\n"
+    "        asyncio.Task = asyncio.tasks._CTask = asyncio.tasks.Task = \\\n"
+    "                asyncio.tasks._PyTask\n"
+    "        asyncio.Future = asyncio.futures._CFuture = asyncio.futures.Future = \\\n"
+    "                asyncio.futures._PyFuture\n"
+)
+LEGACY_COMPACT_ALIAS_ANCHOR = (
+    "    if sys.version_info[:2] == (3, 6):\n"
+    "        # use pure python tasks and futures\n"
+    "        asyncio.Task = asyncio.tasks._CTask = asyncio.tasks.Task = \\\n"
+    "            asyncio.tasks._PyTask\n"
+    "        asyncio.Future = asyncio.futures._CFuture = asyncio.futures.Future = \\\n"
+    "            asyncio.futures._PyFuture\n"
+)
+MODERN_ALIAS_ANCHOR = (
     "    if sys.version_info >= (3, 6, 0):\n"
     "        asyncio.Task = asyncio.tasks._CTask = asyncio.tasks.Task = \\\n"
     "            asyncio.tasks._PyTask\n"
     "        asyncio.Future = asyncio.futures._CFuture = asyncio.futures.Future = \\\n"
     "            asyncio.futures._PyFuture\n"
+)
+ALL_TASKS_ANCHOR = "    if future in asyncio.Task.all_tasks(self):\n"
+LOOP_CHECK_ANCHOR = (
+    "    cls = loop.__class__\n"
+    "    cls._run_forever_orig = cls.run_forever\n"
+    "    cls.run_forever = run_forever\n"
 )
 TASK_HELPER_ANCHOR = (
     "    curr_tasks = asyncio.tasks._current_tasks \\\n"
@@ -48,7 +70,7 @@ CURRENT_TASK_ANCHOR = (
     "                        curr_tasks[self] = curr_task\n"
 )
 CANONICAL_SOURCE = "\n".join(
-    [TASK_ALIAS_ANCHOR, CURRENT_TASK_ANCHOR, TASK_HELPER_ANCHOR]
+    [MODERN_ALIAS_ANCHOR, CURRENT_TASK_ANCHOR, TASK_HELPER_ANCHOR]
 )
 
 
@@ -60,50 +82,143 @@ def expect_runtime_error(label: str, action) -> None:
     raise AssertionError(f"{label} did not fail closed")
 
 
+def assert_version_rule(module, source: str, version: str, *, task_swap: bool) -> str:
+    patched = module._patch_nest_asyncio_runtime(source, version)
+    required = [
+        "    if sys.version_info >= (3, 6, 0):",
+        "asyncio.tasks._py_register_task = asyncio.tasks._c_register_task",
+    ]
+    if task_swap:
+        required.extend(
+            [
+                "task_current = getattr(asyncio.tasks, '_py_current_task', None)",
+                "task_swap(self, None)",
+                "task_swap(self, curr_task)",
+            ]
+        )
+    for snippet in required:
+        if snippet not in patched:
+            raise AssertionError(
+                f"nest_asyncio {version} patched source is missing {snippet!r}"
+            )
+    if not task_swap and "task_swap(self, None)" in patched:
+        raise AssertionError(f"nest_asyncio {version} used the 1.6.0+ task-swap rule")
+    if module._patch_nest_asyncio_runtime(patched, version) != patched:
+        raise AssertionError(f"nest_asyncio {version} patch is not idempotent")
+    return patched
+
+
 def main() -> int:
     module = load_setup_module()
 
-    patched = module._patch_nest_asyncio_runtime(CANONICAL_SOURCE, "1.6.0")
-    required = (
-        "asyncio.tasks._py_register_task = asyncio.tasks._c_register_task",
-        "task_current = getattr(asyncio.tasks, '_py_current_task', None)",
-        "task_swap(self, None)",
-        "task_swap(self, curr_task)",
+    for version in ("0.9.0", "0.9.1"):
+        patched = assert_version_rule(
+            module, LEGACY_WIDE_ALIAS_ANCHOR, version, task_swap=False
+        )
+        if "sys.version_info[:2] == (3, 6)" in patched:
+            raise AssertionError(f"nest_asyncio {version} retained its Python 3.6-only guard")
+    compact_source = "\n".join([LEGACY_COMPACT_ALIAS_ANCHOR, ALL_TASKS_ANCHOR])
+    compact_patched = assert_version_rule(
+        module, compact_source, "0.9.2", task_swap=False
     )
-    for snippet in required:
-        if snippet not in patched:
-            raise AssertionError(f"patched source is missing {snippet!r}")
-    if module._patch_nest_asyncio_runtime(patched, "1.6.0") != patched:
-        raise AssertionError("strict nest_asyncio patch is not idempotent")
+    if "if future in asyncio.all_tasks(self):" not in compact_patched:
+        raise AssertionError("nest_asyncio 0.9.2 retained the removed Task.all_tasks API")
+    for version in ("0.9.3", "1.0.0", "1.5.9"):
+        assert_version_rule(module, MODERN_ALIAS_ANCHOR, version, task_swap=False)
+    loop_check_source = "\n".join([MODERN_ALIAS_ANCHOR, LOOP_CHECK_ANCHOR])
+    for version in ("1.1.0", "1.2.3"):
+        loop_patched = assert_version_rule(
+            module, loop_check_source, version, task_swap=False
+        )
+        if "cls._check_running = _check_running" not in loop_patched:
+            raise AssertionError(
+                f"nest_asyncio {version} did not disable the nested-loop guard"
+            )
+    assert_version_rule(module, CANONICAL_SOURCE, "1.6.0", task_swap=True)
 
     drifted_sources = {
-        "task alias": CANONICAL_SOURCE.replace(
+        "legacy wide task alias": LEGACY_WIDE_ALIAS_ANCHOR.replace(
             "asyncio.futures._PyFuture", "asyncio.futures._FutureDrift", 1
+        ),
+        "legacy compact task alias": LEGACY_COMPACT_ALIAS_ANCHOR.replace(
+            "asyncio.futures._PyFuture", "asyncio.futures._FutureDrift", 1
+        ),
+        "modern task alias": MODERN_ALIAS_ANCHOR.replace(
+            "asyncio.futures._PyFuture", "asyncio.futures._FutureDrift", 1
+        ),
+        "removed all_tasks API": compact_source.replace(
+            "Task.all_tasks", "Task.all_tasks_drift", 1
+        ),
+        "nested loop guard": loop_check_source.replace(
+            "cls.run_forever = run_forever", "cls.run_forever = run_forever_drift", 1
         ),
         "task helper": CANONICAL_SOURCE.replace(
             "cls._nest_patched = True", "cls._nest_patched = bool(1)", 1
         ),
         "current task": CANONICAL_SOURCE.replace("that checks in", "the checks in", 1),
-        "duplicate anchors": CANONICAL_SOURCE + CANONICAL_SOURCE,
+    }
+    drift_versions = {
+        "legacy wide task alias": "0.9.0",
+        "legacy compact task alias": "0.9.2",
+        "modern task alias": "1.5.9",
+        "removed all_tasks API": "0.9.2",
+        "nested loop guard": "1.2.3",
+        "task helper": "1.6.0",
+        "current task": "1.6.0",
     }
     for label, source in drifted_sources.items():
         expect_runtime_error(
             label,
-            lambda source=source: module._patch_nest_asyncio_runtime(source, "1.6.0"),
+            lambda source=source, version=drift_versions[label]: (
+                module._patch_nest_asyncio_runtime(source, version)
+            ),
         )
+
+    duplicate_sources = (
+        ("legacy wide duplicate", LEGACY_WIDE_ALIAS_ANCHOR * 2, "0.9.1"),
+        (
+            "legacy compact duplicate",
+            "\n".join([LEGACY_COMPACT_ALIAS_ANCHOR * 2, ALL_TASKS_ANCHOR]),
+            "0.9.2",
+        ),
+        (
+            "all_tasks duplicate",
+            "\n".join([LEGACY_COMPACT_ALIAS_ANCHOR, ALL_TASKS_ANCHOR * 2]),
+            "0.9.2",
+        ),
+        ("modern duplicate", MODERN_ALIAS_ANCHOR * 2, "1.5.9"),
+        (
+            "nested loop guard duplicate",
+            "\n".join([MODERN_ALIAS_ANCHOR, LOOP_CHECK_ANCHOR * 2]),
+            "1.1.0",
+        ),
+        ("1.6.0 duplicate", CANONICAL_SOURCE + CANONICAL_SOURCE, "1.6.0"),
+    )
+    for label, source, version in duplicate_sources:
+        expect_runtime_error(
+            label,
+            lambda source=source, version=version: (
+                module._patch_nest_asyncio_runtime(source, version)
+            ),
+        )
+
+    expect_runtime_error(
+        "version/source routing mismatch",
+        lambda: module._patch_nest_asyncio_runtime(
+            LEGACY_COMPACT_ALIAS_ANCHOR, "0.9.3"
+        ),
+    )
+    expect_runtime_error(
+        "unsupported historical version",
+        lambda: module._patch_nest_asyncio_runtime(LEGACY_WIDE_ALIAS_ANCHOR, "0.8.9"),
+    )
 
     expect_runtime_error(
         "unresolved version",
         lambda: module._patch_nest_asyncio_runtime(CANONICAL_SOURCE, None),
     )
 
-    legacy = module._patch_nest_asyncio_runtime(TASK_ALIAS_ANCHOR, "1.5.9")
-    if "asyncio.tasks._py_register_task" not in legacy:
-        raise AssertionError(
-            "legacy-compatible nest_asyncio alias patch was not applied"
-        )
-
-    print("nest_asyncio strict patch tests passed")
+    print("nest_asyncio version-routed strict patch tests passed")
     return 0
 
 
