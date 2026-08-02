@@ -13,7 +13,7 @@ import tarfile
 import tempfile
 import zlib
 import xml.etree.ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile, ZipInfo
@@ -2465,6 +2465,38 @@ def _is_runtime_resource_file(path: Path, relative: str) -> bool:
 
 
 def _runtime_resource_candidate_paths(integration) -> list[str]:
+    resource_rules = getattr(integration, "resource_rules", [])
+    if resource_rules:
+        candidates: list[str] = []
+        for index, rule in enumerate(resource_rules, start=1):
+            if not isinstance(rule, dict):
+                raise RuntimeError(
+                    f"{integration.name} resource rule #{index} must be an object"
+                )
+            unknown = sorted(set(rule) - {"action", "path"})
+            if unknown:
+                raise RuntimeError(
+                    f"{integration.name} resource rule #{index} has unsupported keys: "
+                    + ", ".join(unknown)
+                )
+            if rule.get("action") != "include":
+                raise RuntimeError(
+                    f"{integration.name} resource rule #{index} action must be 'include'"
+                )
+            relative = rule.get("path")
+            if not isinstance(relative, str) or not relative:
+                raise RuntimeError(
+                    f"{integration.name} resource rule #{index} requires a non-empty path"
+                )
+            normalized = relative.replace("\\", "/")
+            parts = PurePosixPath(normalized)
+            if parts.is_absolute() or any(part in {"", ".", ".."} for part in parts.parts):
+                raise RuntimeError(
+                    f"{integration.name} resource rule #{index} has an unsafe path: {relative!r}"
+                )
+            candidates.append(normalized)
+        return list(dict.fromkeys(candidates))
+
     candidates: list[str] = []
     for relative in getattr(integration, "materialized_paths", []):
         candidates.append(relative)

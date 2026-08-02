@@ -1367,6 +1367,16 @@
         "enabled": false
       }
     },
+    "tkinter-experimental": {
+      "description": "Experimental no-extraction tkinter pack using static Tcl/Tk 9 and an in-memory ZipFS. Kept outside full until dedicated SDK-linked verification is green.",
+      "core_libraries": "all",
+      "third_party_libraries": [
+        "tkinter"
+      ],
+      "verification": {
+        "enabled": false
+      }
+    },
     "full": {
       "description": "Build CPython plus every configured third-party library integration. Pure libraries come from third_party_library_catalog; native or patched libraries remain under Lib/<name>/setup.py.",
       "core_libraries": "all",

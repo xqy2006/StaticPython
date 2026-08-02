@@ -43,6 +43,10 @@ SKIP_MODULE_TREES = (
     'tkinter',
     'turtledemo',
 )
+OPTIONAL_FROZEN_TREES_FILE = os.path.join(
+    'PCbuild',
+    'staticpython_optional_frozen_trees.txt',
+)
 SKIP_DIRECTORY_NAMES = {
     'bench',
     'benchmark',
@@ -63,20 +67,43 @@ def _matches_module_tree(fullname, tree_name):
     return fullname == tree_name or fullname.startswith(tree_name + '.')
 
 
-def _should_descend_directory(namespace_parts, dirname):
+def _load_optional_frozen_trees(root_dir):
+    marker = os.path.join(root_dir, OPTIONAL_FROZEN_TREES_FILE)
+    if not os.path.exists(marker):
+        return ()
+    with open(marker, encoding='utf-8') as marker_file:
+        requested = tuple(
+            line.strip()
+            for line in marker_file
+            if line.strip() and not line.lstrip().startswith('#')
+        )
+    invalid = sorted({name for name in requested if name not in SKIP_MODULE_TREES})
+    if invalid:
+        raise RuntimeError(
+            'unknown optional frozen module tree(s): ' + ', '.join(invalid)
+        )
+    return tuple(dict.fromkeys(requested))
+
+
+def _active_skip_module_trees(root_dir):
+    enabled = set(_load_optional_frozen_trees(root_dir))
+    return tuple(name for name in SKIP_MODULE_TREES if name not in enabled)
+
+
+def _should_descend_directory(namespace_parts, dirname, skip_module_trees=SKIP_MODULE_TREES):
     child_parts = [*namespace_parts, dirname]
     child_name = '.'.join(child_parts)
     if dirname in SKIP_DIRECTORY_NAMES:
         return False
-    if any(_matches_module_tree(child_name, tree_name) for tree_name in SKIP_MODULE_TREES):
+    if any(_matches_module_tree(child_name, tree_name) for tree_name in skip_module_trees):
         return False
     return True
 
 
-def _should_freeze_module(fullname):
+def _should_freeze_module(fullname, skip_module_trees=SKIP_MODULE_TREES):
     if not fullname:
         return False
-    if any(_matches_module_tree(fullname, tree_name) for tree_name in SKIP_MODULE_TREES):
+    if any(_matches_module_tree(fullname, tree_name) for tree_name in skip_module_trees):
         return False
     return True
 
@@ -87,6 +114,7 @@ def find_python_modules(root_dir):
     """
     lib_dir = os.path.join(root_dir, 'Lib')
     frozen_dir = os.path.join(root_dir, 'Python', 'frozen_modules')
+    skip_module_trees = _active_skip_module_trees(root_dir)
 
     for root, dirs, files in os.walk(lib_dir):
         # Module path relative to Lib.
@@ -103,7 +131,8 @@ def find_python_modules(root_dir):
         # sample trees while preserving runtime modules like click.testing.
         dirs[:] = sorted(
             d for d in dirs
-            if _is_valid_module_segment(d) and _should_descend_directory(namespace_parts, d)
+            if _is_valid_module_segment(d)
+            and _should_descend_directory(namespace_parts, d, skip_module_trees)
         )
         package_dir_names = {
             d for d in dirs
@@ -161,9 +190,10 @@ def find_python_modules(root_dir):
 
 def load_auto_frozen():
     filenames = []
+    skip_module_trees = _active_skip_module_trees(ROOT_DIR)
 
     for module in find_python_modules(ROOT_DIR):
-        if not _should_freeze_module(module.fullname):
+        if not _should_freeze_module(module.fullname, skip_module_trees):
             continue
         if module.is_package:
             filenames.append(f'{module.fullname} : <{module.fullname}> = {module.py_path}')
@@ -579,10 +609,11 @@ def generate_frozen_files(root_dir):
 
     freeze_tool = resolve_freeze_module_exe(root_dir)
 
+    skip_module_trees = _active_skip_module_trees(root_dir)
     modules_to_freeze = [
         module
         for module in find_python_modules(root_dir)
-        if _should_freeze_module(module.fullname)
+        if _should_freeze_module(module.fullname, skip_module_trees)
     ]
     total = len(modules_to_freeze)
     if not total:
