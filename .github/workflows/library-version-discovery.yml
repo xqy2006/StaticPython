@@ -354,9 +354,12 @@ jobs:
           $candidates = @($env:CONTRACT_BATCH_JSON | ConvertFrom-Json)
           $failures = [System.Collections.Generic.List[string]]::new()
           $batchBuildRootPath = [IO.Path]::GetFullPath($env:CONTRACT_BATCH_BUILD_ROOT)
+          $candidateOrdinal = 0
           foreach ($candidate in $candidates) {
-            $buildRoot = Join-Path $env:CONTRACT_BATCH_BUILD_ROOT $candidate.slug
-            $resultRoot = Join-Path $env:CONTRACT_BATCH_RESULT_ROOT $candidate.slug
+            $candidateOrdinal += 1
+            $candidateDirectory = "candidate-{0:D3}" -f $candidateOrdinal
+            $buildRoot = Join-Path $env:CONTRACT_BATCH_BUILD_ROOT $candidateDirectory
+            $resultRoot = Join-Path $env:CONTRACT_BATCH_RESULT_ROOT $candidateDirectory
             $identity = "$($candidate.library) $($candidate.version) / CPython $($candidate.python_version)"
             $buildRootPath = $null
             $safeBuildRoot = $false

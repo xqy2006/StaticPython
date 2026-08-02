@@ -296,6 +296,7 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
         self.assertIn("CONTRACT_BATCH_JSON", daily)
         self.assertIn("Build and verify candidate batch", daily)
         self.assertIn("StaticPython verification report is missing", daily)
+        self.assertIn('$candidateDirectory = "candidate-{0:D3}"', daily)
         self.assertIn("[IO.Path]::GetRelativePath", daily)
         self.assertIn("Remove-Item -LiteralPath $buildRootPath -Recurse -Force", daily)
         self.assertIn("Discover current source version contract", weekly)
