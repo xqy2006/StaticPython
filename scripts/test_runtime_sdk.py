@@ -71,6 +71,36 @@ class RuntimeSDKTests(unittest.TestCase):
         self.assertEqual(profile["core_libraries"], "all")
         self.assertEqual(profile["third_party_libraries"], [])
 
+    def test_verifier_applies_profile_version_overrides(self) -> None:
+        profile = {
+            "core_libraries": ["core-demo"],
+            "third_party_libraries": ["third-demo"],
+            "core_library_version_overrides": {"core-demo": "1.2.3"},
+            "third_party_library_version_overrides": {"third-demo": "4.5.6"},
+        }
+        with mock.patch.object(
+            staticpython_verify,
+            "load_integrations",
+            side_effect=(["core"], ["third"]),
+        ) as load_integrations:
+            core, third_party = staticpython_verify.load_profile_integrations(
+                self.root,
+                {},
+                profile,
+                libs.Version("3.12.13"),
+            )
+
+        self.assertEqual(core, ["core"])
+        self.assertEqual(third_party, ["third"])
+        self.assertEqual(
+            load_integrations.call_args_list[0].kwargs["version_overrides"],
+            {"core-demo": "1.2.3"},
+        )
+        self.assertEqual(
+            load_integrations.call_args_list[1].kwargs["version_overrides"],
+            {"third-demo": "4.5.6"},
+        )
+
     def test_runtime_sdk_links_pythoncore_registry_and_security_apis(self) -> None:
         manifest = build.load_manifest()
         dependencies = {
