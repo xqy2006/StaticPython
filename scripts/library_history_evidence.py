@@ -50,7 +50,10 @@ def file_sha256(path: Path) -> str:
 
 
 def load_object(path: Path, description: str) -> dict:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"could not read {description}: {path}") from exc
     if not isinstance(payload, dict):
         raise RuntimeError(f"{description} must be a JSON object: {path}")
     return payload
@@ -576,6 +579,7 @@ def validate_batch_evidence(
 
 def validate_shard_evidence(
     evidence: dict,
+    contract: dict,
     manifest: dict,
     shard: dict,
 ) -> str:
@@ -668,6 +672,77 @@ def validate_shard_evidence(
         if status not in {"passed", "failed"}:
             raise RuntimeError(
                 f"shard evidence batch {batch_id} has invalid status: {status!r}"
+            )
+        results = record.get("results")
+        if not isinstance(results, list):
+            raise RuntimeError(
+                f"shard evidence batch {batch_id} results must be an array"
+            )
+        expected_results = {
+            (
+                expected["library"].casefold(),
+                expected["version"],
+                expected["python_version"],
+                expected["source_sha256"],
+            )
+            for expected in expected_combinations(contract, batch)
+        }
+        result_keys: set[tuple[str, object, object, str]] = set()
+        result_statuses: list[str] = []
+        for result in results:
+            if not isinstance(result, dict):
+                raise RuntimeError(
+                    f"shard evidence batch {batch_id} result must be an object"
+                )
+            result_key = (
+                str(result.get("library", "")).casefold(),
+                result.get("version"),
+                result.get("python_version"),
+                str(result.get("source_sha256", "")).lower(),
+            )
+            if result_key in result_keys:
+                raise RuntimeError(
+                    f"shard evidence batch {batch_id} repeats a result: {result_key!r}"
+                )
+            result_keys.add(result_key)
+            result_status = result.get("status")
+            if result_status not in {"passed", "failed"}:
+                raise RuntimeError(
+                    f"shard evidence batch {batch_id} result has invalid status"
+                )
+            result_statuses.append(result_status)
+            if result_status == "passed":
+                for field in (
+                    "pack_sha256",
+                    "runtime_sdk_sha256",
+                    "verifier_report_sha256",
+                    "combination_evidence_sha256",
+                ):
+                    value = result.get(field)
+                    if not isinstance(value, str) or not SHA256_PATTERN.fullmatch(
+                        value
+                    ):
+                        raise RuntimeError(
+                            f"shard evidence batch {batch_id} result has no valid {field}"
+                        )
+                if result["runtime_sdk_sha256"].lower() != runtime_sdk_sha.lower():
+                    raise RuntimeError(
+                        f"shard evidence batch {batch_id} result runtime SDK mismatch"
+                    )
+            elif not isinstance(result.get("failure"), dict):
+                raise RuntimeError(
+                    f"shard evidence batch {batch_id} failed result has no failure"
+                )
+        if result_keys != expected_results:
+            raise RuntimeError(
+                f"shard evidence batch {batch_id} result coverage mismatch"
+            )
+        expected_status = (
+            "passed" if all(value == "passed" for value in result_statuses) else "failed"
+        )
+        if status != expected_status:
+            raise RuntimeError(
+                f"shard evidence batch {batch_id} aggregate status mismatch"
             )
         if status == "passed":
             passed_batch_count += 1
@@ -769,6 +844,7 @@ def finalize_shard(
                 "runtime_sdk_sha256": evidence["runtime_sdk_sha256"],
                 "status": evidence["status"],
                 "combination_count": batch["combination_count"],
+                "results": evidence["results"],
             }
         )
         if evidence["status"] == "passed":
@@ -846,7 +922,212 @@ def _load_previous_support_catalog(root: Path) -> tuple[dict, dict | None]:
             raise RuntimeError(
                 f"previous active support {field} does not match its index"
             )
+    active_directory = active.get("directory")
+    if active_directory is not None:
+        directory_path = _safe_relative(
+            root, active_directory, "previous active support directory"
+        )
+        if not directory_path.is_dir():
+            raise RuntimeError("previous active support directory is missing")
+        try:
+            support_path.relative_to(directory_path)
+        except ValueError as exc:
+            raise RuntimeError(
+                "previous active support document is outside its active directory"
+            ) from exc
+        contract_path = _safe_relative(
+            root, active.get("contract"), "previous active contract path"
+        )
+        manifest_path = _safe_relative(
+            root, active.get("manifest"), "previous active manifest path"
+        )
+        evidence_path = _safe_relative(
+            root, active.get("evidence"), "previous active promotion evidence path"
+        )
+        shards_path = _safe_relative(
+            root, active.get("shards"), "previous active shards path"
+        )
+        for path, description in (
+            (contract_path, "contract"),
+            (manifest_path, "manifest"),
+            (evidence_path, "promotion evidence"),
+        ):
+            try:
+                path.relative_to(directory_path)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"previous active {description} is outside its active directory"
+                ) from exc
+            if not path.is_file():
+                raise RuntimeError(f"previous active {description} is missing")
+        try:
+            shards_path.relative_to(directory_path)
+        except ValueError as exc:
+            raise RuntimeError(
+                "previous active shards are outside its active directory"
+            ) from exc
+        if not shards_path.is_dir():
+            raise RuntimeError("previous active shards directory is missing")
+
+        previous_contract = load_object(contract_path, "previous active contract")
+        previous_manifest = load_object(manifest_path, "previous active manifest")
+        previous_manifest_sha = validate_manifest(
+            previous_manifest, previous_contract
+        )
+        if (
+            previous_contract.get("contract_sha256") != active.get("contract_sha256")
+            or previous_manifest_sha != active.get("manifest_sha256")
+        ):
+            raise RuntimeError(
+                "previous active contract or manifest hash does not match its index"
+            )
+        if (
+            support.get("expected_combination_count")
+            != support.get("verified_combination_count")
+            or support.get("expected_batch_count")
+            != support.get("verified_batch_count")
+            or support.get("expected_shard_count")
+            != support.get("verified_shard_count")
+            or support.get("verified_combination_count")
+            != active.get("verified_combination_count")
+        ):
+            raise RuntimeError("previous active support coverage is incomplete")
+        contract_source_relative = active.get("contract_source")
+        if contract_source_relative is not None:
+            contract_source_path = _safe_relative(
+                root,
+                contract_source_relative,
+                "previous active contract source path",
+            )
+            try:
+                contract_source_path.relative_to(directory_path)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "previous active contract source is outside its active directory"
+                ) from exc
+            if not contract_source_path.is_file():
+                raise RuntimeError("previous active contract source is missing")
+            if file_sha256(contract_source_path) != support.get(
+                "contract_source_sha256"
+            ):
+                raise RuntimeError("previous active contract source SHA-256 mismatch")
+            load_object(contract_source_path, "previous active contract source")
+        promotion_evidence = load_object(
+            evidence_path, "previous active promotion evidence"
+        )
+        if (
+            promotion_evidence.get("schema_version") != SCHEMA_VERSION
+            or promotion_evidence.get("kind") != PROMOTION_EVIDENCE_KIND
+        ):
+            raise RuntimeError(
+                "previous active promotion evidence has an unsupported schema or kind"
+            )
+        promotion_evidence_sha = _recorded_hash(
+            promotion_evidence,
+            "evidence_sha256",
+            "previous active promotion evidence",
+        )
+        if active.get("evidence_sha256") != promotion_evidence_sha:
+            raise RuntimeError(
+                "previous active promotion evidence SHA-256 does not match its index"
+            )
+        if (
+            promotion_evidence.get("contract_sha256")
+            != active.get("contract_sha256")
+            or promotion_evidence.get("manifest_sha256")
+            != active.get("manifest_sha256")
+            or promotion_evidence.get("decision", {}).get("status") != "promoted"
+            or promotion_evidence.get("decision", {}).get("gate") != "passed"
+            or promotion_evidence.get("decision", {}).get("blockers")
+        ):
+            raise RuntimeError("previous active promotion evidence is not promotable")
+        shard_records = support.get("shards")
+        if not isinstance(shard_records, list):
+            raise RuntimeError("previous active support has no shard records")
+        expected_shards = {
+            shard["shard_index"]: shard
+            for shard in previous_manifest["run_shards"]
+        }
+        seen_shards: set[int] = set()
+        expected_shard_files: set[str] = set()
+        for shard_record in shard_records:
+            if not isinstance(shard_record, dict) or not isinstance(
+                shard_record.get("shard_index"), int
+            ):
+                raise RuntimeError("previous active support has an invalid shard record")
+            shard_index = shard_record["shard_index"]
+            if shard_index in seen_shards or shard_index not in expected_shards:
+                raise RuntimeError(
+                    "previous active support has duplicate or unexpected shard records"
+                )
+            seen_shards.add(shard_index)
+            if shard_record.get("status") != "passed":
+                raise RuntimeError("previous active support contains a failed shard")
+            shard_name = (
+                f"shard-{shard_index:04d}.evidence.v1.json"
+            )
+            expected_shard_files.add(shard_name.casefold())
+            shard_file = shards_path / shard_name
+            if not shard_file.is_file():
+                raise RuntimeError(f"previous active shard evidence is missing: {shard_name}")
+            shard_evidence = load_object(
+                shard_file, "previous active shard evidence"
+            )
+            shard_evidence_sha = _recorded_hash(
+                shard_evidence,
+                "evidence_sha256",
+                "previous active shard evidence",
+            )
+            if shard_evidence_sha != shard_record.get("evidence_sha256"):
+                raise RuntimeError(
+                    f"previous active shard evidence SHA-256 mismatch: {shard_name}"
+                )
+            validate_shard_evidence(
+                shard_evidence,
+                previous_contract,
+                previous_manifest,
+                expected_shards[shard_index],
+            )
+        if seen_shards != set(expected_shards):
+            raise RuntimeError("previous active support shard coverage is incomplete")
+        actual_shard_files = {
+            path.name.casefold()
+            for path in shards_path.iterdir()
+            if path.is_file()
+        }
+        if actual_shard_files != expected_shard_files:
+            raise RuntimeError("previous active shards directory coverage mismatch")
     return index, support
+
+
+def _copy_previous_active_payload(
+    previous_root: Path,
+    output_root: Path,
+    active: dict,
+) -> None:
+    active_directory = active.get("directory")
+    if isinstance(active_directory, str) and active_directory:
+        source = _safe_relative(
+            previous_root, active_directory, "previous active support directory"
+        )
+        destination = _safe_relative(
+            output_root, active_directory, "retained active support directory"
+        )
+        if destination.exists():
+            raise RuntimeError(
+                "retained active support directory collides with the new candidate"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, destination)
+        return
+    source = _safe_relative(
+        previous_root, active.get("support"), "previous active support path"
+    )
+    destination = _safe_relative(
+        output_root, active.get("support"), "retained active support path"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
 
 
 def promote_support_catalog(
@@ -878,10 +1159,9 @@ def promote_support_catalog(
         if value not in (None, "")
     }
     previous_index: dict | None = None
-    previous_support: dict | None = None
     previous_active: dict | None = None
     if previous_catalog_root is not None:
-        previous_index, previous_support = _load_previous_support_catalog(
+        previous_index, _previous_support = _load_previous_support_catalog(
             previous_catalog_root
         )
         active = previous_index.get("active")
@@ -936,7 +1216,7 @@ def promote_support_catalog(
         shard_source_paths[shard_index] = evidence_path
         accepted = False
         try:
-            validate_shard_evidence(evidence, manifest, shard)
+            validate_shard_evidence(evidence, contract, manifest, shard)
         except Exception as exc:
             blockers.append(
                 {
@@ -1065,7 +1345,6 @@ def promote_support_catalog(
     }
     support["support_sha256"] = canonical_sha256(support)
 
-    candidate_directory = f"candidates/{manifest['contract_sha256']}/{manifest_sha}"
     promotion_evidence = {
         "schema_version": SCHEMA_VERSION,
         "kind": PROMOTION_EVIDENCE_KIND,
@@ -1082,28 +1361,10 @@ def promote_support_catalog(
     }
     promotion_evidence["evidence_sha256"] = canonical_sha256(promotion_evidence)
 
-    active = previous_active
-    active_support = previous_support
-    proposed_active = None
-    if decision_status == "promoted":
-        active_support = support
-        active = {
-            "contract_sha256": manifest["contract_sha256"],
-            "manifest_sha256": manifest_sha,
-            "support": "active/library-history-support.v1.json",
-            "support_sha256": support["support_sha256"],
-            "verified_combination_count": manifest["combination_count"],
-            "provenance": provenance,
-        }
-    elif decision_status == "eligible":
-        proposed_active = {
-            "contract_sha256": manifest["contract_sha256"],
-            "manifest_sha256": manifest_sha,
-            "support_sha256": support["support_sha256"],
-            "verified_combination_count": manifest["combination_count"],
-            "provenance": provenance,
-        }
-
+    candidate_directory = (
+        f"candidates/{manifest['contract_sha256'][:16]}/{manifest_sha[:16]}/"
+        f"{promotion_evidence['evidence_sha256'][:16]}"
+    )
     candidate = {
         "contract_sha256": manifest["contract_sha256"],
         "manifest_sha256": manifest_sha,
@@ -1117,10 +1378,47 @@ def promote_support_catalog(
         ),
         "manifest": f"{candidate_directory}/library-history-manifest.json",
         "support": f"{candidate_directory}/library-history-support.v1.json",
+        "support_sha256": support["support_sha256"],
         "evidence": f"{candidate_directory}/promotion-evidence.v1.json",
+        "evidence_sha256": promotion_evidence["evidence_sha256"],
+        "shards": f"{candidate_directory}/shards",
         "status": decision_status,
         "provenance": provenance,
     }
+    active = previous_active
+    proposed_active = None
+    if decision_status == "promoted":
+        active = {
+            "contract_sha256": manifest["contract_sha256"],
+            "manifest_sha256": manifest_sha,
+            "directory": candidate["directory"],
+            "contract": candidate["contract"],
+            "contract_source": candidate["contract_source"],
+            "manifest": candidate["manifest"],
+            "support": candidate["support"],
+            "support_sha256": support["support_sha256"],
+            "evidence": candidate["evidence"],
+            "evidence_sha256": candidate["evidence_sha256"],
+            "shards": candidate["shards"],
+            "verified_combination_count": manifest["combination_count"],
+            "provenance": provenance,
+        }
+    elif decision_status == "eligible":
+        proposed_active = {
+            "contract_sha256": manifest["contract_sha256"],
+            "manifest_sha256": manifest_sha,
+            "directory": candidate["directory"],
+            "contract": candidate["contract"],
+            "contract_source": candidate["contract_source"],
+            "manifest": candidate["manifest"],
+            "support": candidate["support"],
+            "support_sha256": support["support_sha256"],
+            "evidence": candidate["evidence"],
+            "evidence_sha256": candidate["evidence_sha256"],
+            "shards": candidate["shards"],
+            "verified_combination_count": manifest["combination_count"],
+            "provenance": provenance,
+        }
     index = {
         "schema_version": SCHEMA_VERSION,
         "kind": SUPPORT_INDEX_KIND,
@@ -1139,8 +1437,18 @@ def promote_support_catalog(
 
     if output_root.exists():
         shutil.rmtree(output_root)
+    if (
+        previous_active is not None
+        and previous_catalog_root is not None
+        and decision_status != "promoted"
+    ):
+        _copy_previous_active_payload(
+            previous_catalog_root,
+            output_root,
+            previous_active,
+        )
     candidate_root = output_root / candidate_directory
-    candidate_root.mkdir(parents=True, exist_ok=True)
+    candidate_root.mkdir(parents=True, exist_ok=False)
     shutil.copy2(contract_path, candidate_root / "library-version-contract.json")
     shutil.copy2(manifest_path, candidate_root / "library-history-manifest.json")
     if contract_source_path is not None:
@@ -1153,10 +1461,6 @@ def promote_support_catalog(
         shutil.copy2(
             shard_source_paths[evidence["shard_index"]],
             shard_output / f"shard-{evidence['shard_index']:04d}.evidence.v1.json",
-        )
-    if active_support is not None:
-        write_object(
-            output_root / "active" / "library-history-support.v1.json", active_support
         )
     write_object(output_root / "index.v1.json", index)
     (output_root / "promotion-summary.md").write_text(

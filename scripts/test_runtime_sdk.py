@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import hashlib
 import importlib.util
-import shutil
 import sys
 import tempfile
 import unittest

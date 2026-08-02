@@ -256,10 +256,15 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
             index["active"]["manifest_sha256"], self.manifest["manifest_sha256"]
         )
         active = json.loads(
-            (output / "active" / "library-history-support.v1.json").read_text()
+            (output / Path(index["active"]["support"])).read_text()
         )
         self.assertEqual(active["status"], "verified")
         self.assertEqual(active["verified_combination_count"], 2)
+        self.assertEqual(
+            index["active"]["directory"], index["candidate"]["directory"]
+        )
+        for field in ("contract", "manifest", "support", "evidence", "shards"):
+            self.assertTrue((output / Path(index["active"][field])).exists())
 
     def test_missing_shard_freezes_and_retains_last_known_good(self) -> None:
         complete_shards = self.finalize_all_shards()
@@ -293,16 +298,44 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
             index["active"]["manifest_sha256"], self.manifest["manifest_sha256"]
         )
         candidate_support = json.loads(
-            (
-                frozen_root
-                / "candidates"
-                / self.contract["contract_sha256"]
-                / self.manifest["manifest_sha256"]
-                / "library-history-support.v1.json"
-            ).read_text()
+            (frozen_root / Path(index["candidate"]["support"])).read_text()
         )
         self.assertEqual(candidate_support["status"], "failed")
         self.assertLess(candidate_support["verified_combination_count"], 2)
+        self.assertNotEqual(
+            index["active"]["directory"], index["candidate"]["directory"]
+        )
+        retained_support = json.loads(
+            (frozen_root / Path(index["active"]["support"])).read_text()
+        )
+        self.assertEqual(retained_support["status"], "verified")
+        for field in ("contract", "manifest", "support", "evidence", "shards"):
+            self.assertTrue((frozen_root / Path(index["active"][field])).exists())
+
+    def test_tampered_last_known_good_directory_is_rejected(self) -> None:
+        previous = self.root / "previous-catalog"
+        previous_index = evidence_module.promote_support_catalog(
+            self.contract_path,
+            self.manifest_path,
+            self.finalize_all_shards(),
+            previous,
+            mode="promote",
+        )
+        shard_path = next(
+            (previous / Path(previous_index["active"]["shards"])).iterdir()
+        )
+        shard_path.write_text("tampered\n", encoding="utf-8")
+        empty_shards = self.root / "no-current-shards"
+        empty_shards.mkdir()
+        with self.assertRaisesRegex(RuntimeError, "shard evidence"):
+            evidence_module.promote_support_catalog(
+                self.contract_path,
+                self.manifest_path,
+                empty_shards,
+                self.root / "rejected-catalog",
+                previous_catalog_root=previous,
+                mode="promote",
+            )
 
     def test_preview_records_proposal_without_active_support(self) -> None:
         index = evidence_module.promote_support_catalog(
@@ -436,6 +469,9 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
         self.assertGreaterEqual(len(shard_paths), 2)
         drifted = json.loads(shard_paths[1].read_text(encoding="utf-8"))
         drifted["batches"][0]["runtime_sdk_sha256"] = "d" * 64
+        for result in drifted["batches"][0]["results"]:
+            if result["status"] == "passed":
+                result["runtime_sdk_sha256"] = "d" * 64
         drifted["evidence_sha256"] = evidence_module.canonical_sha256(
             {key: value for key, value in drifted.items() if key != "evidence_sha256"}
         )
