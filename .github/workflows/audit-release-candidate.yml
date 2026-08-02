@@ -1,11 +1,14 @@
 name: Audit existing StaticPython release candidate
 
 on:
+  push:
+    branches: [feature/runtime-pack-sdk]
+    paths: [.github/workflows/audit-release-candidate.yml]
   workflow_dispatch:
     inputs:
       run_id:
         description: Completed release workflow run whose immutable artifacts should be re-audited
-        required: true
+        required: false
         type: string
 
 permissions:
@@ -28,8 +31,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $candidate = gh run view "${{ inputs.run_id }}" --repo "${{ github.repository }}" --json headSha,status | ConvertFrom-Json
+          $runId = "${{ inputs.run_id }}".Trim()
+          if ([string]::IsNullOrWhiteSpace($runId)) {
+            $candidate = gh run list --repo "${{ github.repository }}" --workflow release.yml --event workflow_dispatch --limit 20 --json databaseId,headSha,status,createdAt |
+              ConvertFrom-Json |
+              Where-Object status -eq "completed" |
+              Sort-Object createdAt -Descending |
+              Select-Object -First 1
+            if (-not $candidate) { throw "no completed manually dispatched release candidate was found" }
+            $runId = [string]$candidate.databaseId
+          } else {
+            $candidate = gh run view $runId --repo "${{ github.repository }}" --json databaseId,headSha,status | ConvertFrom-Json
+          }
           if ($candidate.status -ne "completed") { throw "candidate run is not complete" }
+          "run_id=$runId" >> $env:GITHUB_OUTPUT
           "commit=$($candidate.headSha)" >> $env:GITHUB_OUTPUT
       - name: Download immutable candidate assets
         env:
@@ -37,8 +52,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force .\dist\assets | Out-Null
-          gh run download "${{ inputs.run_id }}" --repo "${{ github.repository }}" --pattern "runtime-sdk-*" --dir .\dist\assets
-          gh run download "${{ inputs.run_id }}" --repo "${{ github.repository }}" --pattern "library-packs-*" --dir .\dist\assets
+          gh run download "${{ steps.candidate.outputs.run_id }}" --repo "${{ github.repository }}" --pattern "runtime-sdk-*" --dir .\dist\assets
+          gh run download "${{ steps.candidate.outputs.run_id }}" --repo "${{ github.repository }}" --pattern "library-packs-*" --dir .\dist\assets
       - name: Re-audit metadata and assemble index
         shell: pwsh
         run: |
