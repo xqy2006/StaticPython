@@ -522,6 +522,10 @@ LIBRARY_INTEGRATION = pypi_library(
     name="wxpython",
     project_name="wxPython",
     release_version=WXPYTHON_VERSION,
+    # The first experimental pack is deliberately scoped to the generated
+    # source layout validated by this integration. Older stable releases use
+    # legacy/empty wx_vc*.sln files and are a separate history-backfill task.
+    minimum_release_version=WXPYTHON_VERSION,
     license_expression="wxWindows",
     source_mapping={
         "wx": "Lib/wx",
