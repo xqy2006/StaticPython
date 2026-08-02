@@ -517,6 +517,7 @@ struct _inittab _PyImport_Inittab[] = {
 
         integration = module.LIBRARY_INTEGRATION
         self.assertEqual(integration.release_version, "4.2.5")
+        self.assertEqual(integration.license_expression, "wxWindows")
         self.assertEqual(
             integration.suppressed_system_libraries_release_x64,
             ["gdiplus.lib"],

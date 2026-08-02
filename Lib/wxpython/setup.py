@@ -523,6 +523,7 @@ LIBRARY_INTEGRATION = pypi_library(
     name="wxpython",
     project_name="wxPython",
     release_version=WXPYTHON_VERSION,
+    license_expression="wxWindows",
     source_mapping={
         "wx": "Lib/wx",
         "sip": "wxpython_builtin/sip",
