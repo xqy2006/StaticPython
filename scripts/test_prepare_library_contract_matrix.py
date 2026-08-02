@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -72,7 +73,9 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
     def test_builds_locked_matrix_record(self) -> None:
         result = matrix_builder.prepare_matrix(contract(), delta())
         self.assertEqual(len(result["include"]), 1)
-        record = result["include"][0]
+        batch = result["include"][0]
+        self.assertEqual(batch["candidate_count"], 1)
+        record = json.loads(batch["candidates_json"])[0]
         self.assertEqual(record["project_name"], "Demo-Project")
         self.assertEqual(record["source_sha256"], "a" * 64)
         self.assertNotIn("/", record["slug"])
@@ -105,13 +108,46 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
             smoke_python_series="3.13",
         )
         self.assertEqual(len(result["include"]), 1)
-        self.assertEqual(result["include"][0]["version"], "1.0")
-        self.assertEqual(result["include"][0]["python_version"], "3.13.14")
-        self.assertEqual(result["include"][0]["validation_reason"], "pull-request-smoke")
+        record = json.loads(result["include"][0]["candidates_json"])[0]
+        self.assertEqual(record["version"], "1.0")
+        self.assertEqual(record["python_version"], "3.13.14")
+        self.assertEqual(record["validation_reason"], "pull-request-smoke")
 
-    def test_matrix_limit_fails_instead_of_silently_skipping(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "matrix limit"):
+    def test_matrix_limit_must_be_positive(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "matrix limit must be positive"):
             matrix_builder.prepare_matrix(contract(), delta(), limit=0)
+
+    def test_large_delta_is_deterministically_batched_without_skipping(self) -> None:
+        payload = delta()
+        payload["new_candidates"] = []
+        for index in range(491):
+            payload["new_candidates"].append(
+                {
+                    "library": "demo",
+                    "version": f"1.{index}",
+                    "python_version": "3.13.14",
+                    "status": "candidate",
+                    "source": {
+                        "filename": f"demo-1.{index}.tar.gz",
+                        "url": f"https://files.pythonhosted.org/demo-1.{index}.tar.gz",
+                        "sha256": f"{index + 1:064x}",
+                    },
+                }
+            )
+
+        first = matrix_builder.prepare_matrix(contract(), payload)
+        second = matrix_builder.prepare_matrix(contract(), payload)
+        self.assertEqual(first, second)
+        self.assertEqual(len(first["include"]), 256)
+        self.assertEqual(max(batch["candidate_count"] for batch in first["include"]), 2)
+        candidates = [
+            candidate
+            for batch in first["include"]
+            for candidate in json.loads(batch["candidates_json"])
+        ]
+        self.assertEqual(len(candidates), 491)
+        self.assertEqual(len({candidate["slug"] for candidate in candidates}), 491)
+        json.dumps(first, ensure_ascii=False)
 
 
 if __name__ == "__main__":

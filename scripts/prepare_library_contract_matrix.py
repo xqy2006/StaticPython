@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -67,6 +68,8 @@ def prepare_matrix(
     smoke_library: str | None = None,
     smoke_python_series: str | None = None,
 ) -> dict:
+    if limit < 1:
+        raise RuntimeError("matrix limit must be positive")
     if delta.get("current_contract_sha256") != contract.get("contract_sha256"):
         raise RuntimeError("delta does not describe the current contract")
     drifted = delta.get("drifted_candidates")
@@ -103,12 +106,6 @@ def prepare_matrix(
         }
         if smoke_identity not in existing_identities:
             candidate_records.append((smoke, "pull-request-smoke"))
-    if len(candidate_records) > limit:
-        raise RuntimeError(
-            f"incremental contract contains {len(candidate_records)} build jobs, exceeding the "
-            f"GitHub Actions matrix limit of {limit}; shard explicitly instead of skipping combinations"
-        )
-
     libraries = contract.get("libraries")
     if not isinstance(libraries, dict):
         raise RuntimeError("contract libraries must be an object")
@@ -155,11 +152,40 @@ def prepare_matrix(
                 "validation_reason": validation_reason,
             }
         )
-    return {"include": include}
+    if not include:
+        return {"include": []}
+
+    batch_count = min(len(include), limit)
+    batches: list[list[dict]] = [[] for _ in range(batch_count)]
+    for index, candidate in enumerate(include):
+        batches[index % batch_count].append(candidate)
+
+    matrix_include: list[dict] = []
+    for index, candidates in enumerate(batches, start=1):
+        candidates_json = json.dumps(
+            candidates,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(candidates_json.encode("utf-8")).hexdigest()[:12]
+        matrix_include.append(
+            {
+                "slug": f"batch-{index:03d}-{digest}",
+                "candidate_count": len(candidates),
+                "candidates_json": candidates_json,
+            }
+        )
+    return {"include": matrix_include}
 
 
 def build_summary(contract: dict, delta: dict, matrix: dict) -> str:
     counts = contract.get("status_counts", {})
+    candidates = [
+        candidate
+        for batch in matrix.get("include", [])
+        for candidate in json.loads(batch.get("candidates_json", "[]"))
+    ]
     lines = [
         "## StaticPython library version contract",
         "",
@@ -168,8 +194,9 @@ def build_summary(contract: dict, delta: dict, matrix: dict) -> str:
         f"- Candidate combinations recorded: `{counts.get('candidate', 0)}`",
         f"- Configured non-PyPI combinations: `{counts.get('configured', 0)}`",
         f"- Evidence-backed unbuildable combinations: `{counts.get('unbuildable', 0)}`",
-        f"- New candidate build jobs: `{sum(1 for item in matrix.get('include', []) if item.get('validation_reason') == 'new-candidate')}`",
-        f"- Pull-request smoke build jobs: `{sum(1 for item in matrix.get('include', []) if item.get('validation_reason') == 'pull-request-smoke')}`",
+        f"- Matrix batch jobs: `{len(matrix.get('include', []))}`",
+        f"- New candidate builds: `{sum(1 for item in candidates if item.get('validation_reason') == 'new-candidate')}`",
+        f"- Pull-request smoke builds: `{sum(1 for item in candidates if item.get('validation_reason') == 'pull-request-smoke')}`",
         f"- New unbuildable records: `{len(delta.get('new_unbuildable', []))}`",
         f"- Source drift records: `{len(delta.get('drifted_candidates', []))}`",
         f"- Candidate regressions: `{len(delta.get('regressions', []))}`",
@@ -215,7 +242,14 @@ def main() -> int:
         encoding="utf-8",
         newline="\n",
     )
-    print(f"[library-contract] prepared {len(matrix['include'])} incremental build job(s)")
+    candidate_count = sum(
+        batch.get("candidate_count", 0)
+        for batch in matrix["include"]
+    )
+    print(
+        f"[library-contract] prepared {candidate_count} candidate build(s) "
+        f"in {len(matrix['include'])} matrix batch job(s)"
+    )
     return 0
 
 
