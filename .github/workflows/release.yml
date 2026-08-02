@@ -1,271 +1,74 @@
-name: Build immutable StaticPython prerelease
+name: Recover verified StaticPython prerelease
 
 on:
-  push:
-    branches: [master]
-  pull_request:
   workflow_dispatch:
     inputs:
       publish_prerelease:
-        description: Publish immutable prerelease assets after every gate passes
+        description: Publish the audited recovery artifact
         required: true
         type: boolean
         default: false
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
-  group: staticpython-release-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: staticpython-prerelease-publication
+  cancel-in-progress: false
 
 env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: "utf-8"
-  STATICPYTHON_BUILD_WORKERS: "2"
-  STATICPYTHON_PACK_BUILD_WORKERS: "2"
+  SOURCE_RUN_ID: "30732018799"
+  SOURCE_SHA: "fbe500baa30232f4dbd95f7200dcb80e109eae83"
 
 jobs:
-  unit-tests:
+  publish:
+    if: ${{ inputs.publish_prerelease }}
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install test dependencies
-        run: python -m pip install packaging
-      - name: Runtime resource tests
-        run: python .\scripts\test_runtime_resources.py
-      - name: Runtime SDK and pack tests
-        run: python .\scripts\test_runtime_sdk.py
-      - name: Release publication tests
-        run: python .\scripts\test_publish_release_assets.py
-
-  resolve-cpython-matrix:
-    runs-on: windows-2022
-    outputs:
-      versions: ${{ steps.resolve.outputs.versions }}
-    steps:
-      - name: Resolve latest CPython 3.11 through 3.15 tags
-        id: resolve
+      - name: Validate source run gates
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $tags = @(git ls-remote --tags --refs https://github.com/python/cpython.git "v3.*" |
-            ForEach-Object {
-              if ($_ -match "refs/tags/v((3)\.(11|12|13|14|15)\.([0-9]+)(?:(a|b|rc)([0-9]+))?)$") {
-                $phaseRank = switch ($matches[5]) { "a" { 1 } "b" { 2 } "rc" { 3 } default { 4 } }
-                [PSCustomObject]@{
-                  Version = $matches[1]
-                  Series = "3.$($matches[3])"
-                  Major = [int]$matches[2]
-                  Minor = [int]$matches[3]
-                  Micro = [int]$matches[4]
-                  PhaseRank = $phaseRank
-                  PhaseSerial = if ($matches[6]) { [int]$matches[6] } else { 0 }
-                }
-              }
-            })
-          if (-not $tags) { throw "Could not resolve CPython tags" }
-          $versions = foreach ($series in @("3.11", "3.12", "3.13", "3.14", "3.15")) {
-            $latest = $tags | Where-Object Series -eq $series |
-              Sort-Object Major, Minor, Micro, PhaseRank, PhaseSerial | Select-Object -Last 1
-            if (-not $latest) { throw "Could not resolve CPython $series" }
-            $latest.Version
+          $run = gh run view $env:SOURCE_RUN_ID --repo $env:GITHUB_REPOSITORY --json status,headSha,jobs | ConvertFrom-Json
+          if ($run.status -ne "completed") { throw "Source run is not complete" }
+          if ($run.headSha -ne $env:SOURCE_SHA) { throw "Source run commit does not match the audited recovery commit" }
+          $runtimeJobs = @($run.jobs | Where-Object { $_.name -like "runtime-sdk (*" })
+          $packJobs = @($run.jobs | Where-Object { $_.name -like "library-packs (*" })
+          $indexJobs = @($run.jobs | Where-Object { $_.name -eq "assemble-index" })
+          if ($runtimeJobs.Count -ne 5 -or @($runtimeJobs | Where-Object conclusion -ne "success").Count -ne 0) {
+            throw "Source run does not have five successful runtime SDK jobs"
           }
-          "versions=$(ConvertTo-Json -InputObject @($versions) -Compress)" >> $env:GITHUB_OUTPUT
-
-  resolve-pack-versions:
-    needs: [unit-tests, resolve-cpython-matrix]
-    runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        cpython_version: ${{ fromJSON(needs.resolve-cpython-matrix.outputs.versions) }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install resolver dependencies
-        run: python -m pip install packaging
-      - name: Resolve one global pack version set
-        shell: pwsh
-        run: |
-          python .\scripts\resolve_pack_versions.py `
-            --target-python-version "${{ matrix.cpython_version }}" `
-            --output ".tmp\pack-version-lock-${{ matrix.cpython_version }}.json"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pack-version-lock-${{ matrix.cpython_version }}
-          path: .tmp/pack-version-lock-${{ matrix.cpython_version }}.json
-          if-no-files-found: error
-          retention-days: 14
-
-  runtime-sdk:
-    needs: [unit-tests, resolve-cpython-matrix]
-    runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        cpython_version: ${{ fromJSON(needs.resolve-cpython-matrix.outputs.versions) }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install build dependencies
-        shell: pwsh
-        run: |
-          python -m pip install packaging
-          choco install strawberryperl -y --no-progress
-      - uses: microsoft/setup-msbuild@v2
-        with:
-          msbuild-architecture: x64
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: amd64
-      - name: Build audited runtime SDK
-        shell: pwsh
-        run: |
-          $dist = "$env:GITHUB_WORKSPACE\dist\runtime\${{ matrix.cpython_version }}"
-          New-Item -ItemType Directory -Force $dist | Out-Null
-          python .\build.py `
-            --cpython-version "${{ matrix.cpython_version }}" `
-            --download-root "$env:RUNNER_TEMP\runtime-${{ matrix.cpython_version }}" `
-            --profile runtime-sdk `
-            --build-workers "$env:STATICPYTHON_BUILD_WORKERS" `
-            --output-runtime-sdk-dir $dist
-      - name: Upload immutable runtime candidate
-        uses: actions/upload-artifact@v4
-        with:
-          name: runtime-sdk-${{ matrix.cpython_version }}
-          path: dist/runtime/${{ matrix.cpython_version }}/*.zip
-          if-no-files-found: error
-          retention-days: 14
-
-  library-packs:
-    needs: [unit-tests, resolve-cpython-matrix, resolve-pack-versions]
-    runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      max-parallel: 10
-      matrix:
-        cpython_version: ${{ fromJSON(needs.resolve-cpython-matrix.outputs.versions) }}
-        pack_family: [a-f, g-l, m-r, s-z]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: actions/download-artifact@v4
-        with:
-          name: pack-version-lock-${{ matrix.cpython_version }}
-          path: .tmp/version-lock
-      - name: Install build dependencies
-        shell: pwsh
-        run: |
-          python -m pip install packaging
-          choco install strawberryperl -y --no-progress
-      - uses: microsoft/setup-msbuild@v2
-        with:
-          msbuild-architecture: x64
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: amd64
-      - name: Build and verify modular pack shard
-        shell: pwsh
-        run: |
-          $family = "${{ matrix.pack_family }}"
-          $dist = "$env:GITHUB_WORKSPACE\dist\packs\${{ matrix.cpython_version }}\$family"
-          $shardConfig = "$env:RUNNER_TEMP\pack-shard-$family.json"
-          $packNames = "$env:RUNNER_TEMP\pack-shard-$family.txt"
-          $versionLock = "$env:GITHUB_WORKSPACE\.tmp\version-lock\pack-version-lock-${{ matrix.cpython_version }}.json"
-          New-Item -ItemType Directory -Force $dist | Out-Null
-          python .\scripts\build_pack_shard_config.py `
-            --family $family `
-            --version-lock $versionLock `
-            --target-python-version "${{ matrix.cpython_version }}" `
-            --output-config $shardConfig `
-            --output-pack-names $packNames
-          $buildArgs = @(
-            ".\build.py",
-            "--cpython-version", "${{ matrix.cpython_version }}",
-            "--download-root", "$env:RUNNER_TEMP\packs-${{ matrix.cpython_version }}-$family",
-            "--config", $shardConfig,
-            "--profile", "pack-shard",
-            "--build-workers", "$env:STATICPYTHON_PACK_BUILD_WORKERS",
-            "--output-pack-dir", $dist
-          )
-          Get-Content $packNames | ForEach-Object {
-            $buildArgs += @("--output-pack-name", $_)
+          if ($packJobs.Count -ne 20 -or @($packJobs | Where-Object conclusion -ne "success").Count -ne 0) {
+            throw "Source run does not have twenty successful library-pack jobs"
           }
-          python @buildArgs
-      - name: Upload verified pack candidates
-        uses: actions/upload-artifact@v4
-        with:
-          name: library-packs-${{ matrix.cpython_version }}-${{ matrix.pack_family }}
-          path: dist/packs/${{ matrix.cpython_version }}/${{ matrix.pack_family }}/*.zip
-          if-no-files-found: error
-          retention-days: 14
-
-  assemble-index:
-    needs: [runtime-sdk, library-packs]
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install index dependencies
-        run: python -m pip install packaging
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: runtime-sdk-*
-          path: dist/assets
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: library-packs-*
-          path: dist/assets
-          merge-multiple: true
-      - name: Build and validate immutable index
+          if ($indexJobs.Count -ne 1 -or $indexJobs[0].conclusion -ne "success") {
+            throw "Source run does not have a successful immutable index gate"
+          }
+      - name: Download verified release artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          python .\scripts\build_release_index.py `
-            --asset-root .\dist\assets `
-            --output .\dist\runtime-index.v1.json `
-            --repository "${{ github.repository }}" `
-            --staticpython-commit "${{ github.sha }}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: staticpython-release-${{ github.sha }}
-          path: |
-            dist/assets/*.zip
-            dist/runtime-index.v1.json
-          if-no-files-found: error
-          retention-days: 30
-
-  publish-prerelease:
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_prerelease) }}
-    needs: assemble-index
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: staticpython-release-${{ github.sha }}
-          path: dist
+          gh run download $env:SOURCE_RUN_ID `
+            --repo $env:GITHUB_REPOSITORY `
+            --name "staticpython-release-$env:SOURCE_SHA" `
+            --dir .\dist
       - name: Publish immutable prerelease families
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-
           python .\scripts\publish_release_assets.py
           --asset-root .\dist
-          --index .\dist\runtime-index.v1.json
           --repository "${{ github.repository }}"
-          --source-commit "${{ github.sha }}"
-
+          --source-commit "$env:SOURCE_SHA"
       - name: Notify PySuture verification workflow
         env:
           DISPATCH_TOKEN: ${{ secrets.PYSUTURE_DISPATCH_TOKEN }}
@@ -282,8 +85,6 @@ jobs:
           }
           $body = @{
             event_type = "staticpython-release"
-            client_payload = @{
-              staticpython_commit = "${{ github.sha }}"
-            }
+            client_payload = @{ staticpython_commit = $env:SOURCE_SHA }
           } | ConvertTo-Json -Depth 4
           Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/xqy2006/PySuture/dispatches" -Headers $headers -Body $body -ContentType "application/json"
