@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import fnmatch
+import hashlib
 import importlib.util
 import json
 import os
@@ -101,6 +102,16 @@ class LibraryIntegration:
     staged_static_libraries_release_x64: list[dict] = field(default_factory=list)
     python_link_dependencies_release_x64: list[str] = field(default_factory=list)
     python_link_wholearchive_release_x64: list[str] = field(default_factory=list)
+    top_level_import_names: list[str] = field(default_factory=list)
+    dependency_constraints: dict[str, str] = field(default_factory=dict)
+    conflicts: list[str] = field(default_factory=list)
+    patch_rules: list[dict] = field(default_factory=list)
+    source_resolver: str | None = None
+    resource_rules: list[dict] = field(default_factory=list)
+    license_expression: str | None = None
+    license_files: list[str] = field(default_factory=list)
+    license_sources: list[dict] = field(default_factory=list)
+    smoke_tests: list[dict] = field(default_factory=list)
     source_ignore_patterns: list[str] = field(default_factory=list)
     prepare_source_hooks: list[Hook] = field(default_factory=list)
     pre_patch_hooks: list[Hook] = field(default_factory=list)
@@ -486,17 +497,16 @@ def _supports_target_python(requires_python: str | None, target_version: Version
 
 def _sorted_release_versions(releases: dict[str, list[dict]]) -> list[str]:
     stable: list[tuple[Version, str]] = []
-    prerelease: list[tuple[Version, str]] = []
     for raw_version in releases:
         try:
             version = Version(raw_version)
         except InvalidVersion:
             continue
-        bucket = prerelease if version.is_prerelease or version.is_devrelease else stable
-        bucket.append((version, raw_version))
+        if version.is_prerelease or version.is_devrelease:
+            continue
+        stable.append((version, raw_version))
     stable.sort(reverse=True)
-    prerelease.sort(reverse=True)
-    return [raw_version for _, raw_version in [*stable, *prerelease]]
+    return [raw_version for _, raw_version in stable]
 
 
 def _sdist_filename_rank(filename: str) -> tuple[int, str]:
@@ -629,8 +639,9 @@ def _compatible_pypi_files(
         for file_info in compatible
         if file_info.get("packagetype") == "bdist_wheel" and _is_pure_universal_wheel(file_info)
     ]
-    if source_distributions:
-        compatible = [*source_distributions, *pure_universal_wheels]
+    # Native wheels are never valid static-build inputs.  A native-only
+    # release must provide an explicit, verifiable upstream source mapping.
+    compatible = [*source_distributions, *pure_universal_wheels]
     return sorted(compatible, key=lambda file_info: _pypi_file_sort_key(file_info, target_version))
 
 
@@ -1191,6 +1202,248 @@ def _materialize_source_mapping(
         context.log(f"materialized {selector} -> {target_rel} in {time.monotonic() - started:.1f}s")
 
 
+def _infer_license_expression(info: dict) -> str | None:
+    expression = info.get("license_expression")
+    if isinstance(expression, str) and expression.strip():
+        return expression.strip()
+    raw_license = info.get("license")
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(raw_license or "").casefold()).strip()
+    known = {
+        "mit": "MIT",
+        "mit license": "MIT",
+        "apache 2 0 and mit": "Apache-2.0 AND MIT",
+        "mit or apache 2 0": "MIT OR Apache-2.0",
+        "mpl 2 0 and mit": "MPL-2.0 AND MIT",
+        "bsd 2 clause": "BSD-2-Clause",
+        "bsd 2 clause license": "BSD-2-Clause",
+        "bsd 3 clause": "BSD-3-Clause",
+        "bsd 3 clause license": "BSD-3-Clause",
+        "3 clause bsd license": "BSD-3-Clause",
+        "apache": "Apache-2.0",
+        "apache 2": "Apache-2.0",
+        "apache 2 0": "Apache-2.0",
+        "apache license 2 0": "Apache-2.0",
+        "apache license version 2 0": "Apache-2.0",
+        "apache software license": "Apache-2.0",
+        "isc": "ISC",
+        "isc license": "ISC",
+        "mozilla public license 2 0": "MPL-2.0",
+        "python software foundation license": "PSF-2.0",
+        "unlicense": "Unlicense",
+    }
+    if normalized in known:
+        return known[normalized]
+    classifier_map = {
+        "License :: OSI Approved :: MIT License": "MIT",
+        "License :: OSI Approved :: Apache Software License": "Apache-2.0",
+        "License :: OSI Approved :: BSD License": "BSD-3-Clause",
+        "License :: OSI Approved :: ISC License (ISCL)": "ISC",
+        "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)": "MPL-2.0",
+        "License :: OSI Approved :: Python Software Foundation License": "PSF-2.0",
+        "License :: OSI Approved :: The Unlicense (Unlicense)": "Unlicense",
+        "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)": "LGPL-3.0-only",
+    }
+    expressions = {
+        classifier_map[classifier]
+        for classifier in info.get("classifiers", [])
+        if classifier in classifier_map
+    }
+    if len(expressions) == 1:
+        return next(iter(expressions))
+    return None
+
+
+def _materialize_distribution_licenses(
+    context: LibraryHookContext,
+    integration: LibraryIntegration,
+    extracted_root: Path,
+) -> None:
+    _materialize_license_candidates(
+        context,
+        integration,
+        _distribution_license_candidates(extracted_root),
+    )
+
+
+def _distribution_license_candidates(root: Path, *, maximum_depth: int = 3) -> list[Path]:
+    prefixes = ("license", "copying", "notice", "copyright", "authors")
+    candidates: list[Path] = []
+    if not root.is_dir():
+        return candidates
+    for path in root.rglob("*"):
+        if not path.is_file() or not path.name.casefold().startswith(prefixes):
+            continue
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            continue
+        if len(relative.parts) > maximum_depth or path.stat().st_size > 2 * 1024 * 1024:
+            continue
+        candidates.append(path)
+    return candidates
+
+
+def _materialize_license_candidates(
+    context: LibraryHookContext,
+    integration: LibraryIntegration,
+    candidates: list[Path],
+) -> None:
+    # Source roots include runner-specific absolute paths.  Deduplicate and
+    # order by basename plus content hash so collision names remain reproducible
+    # for the same locked sources regardless of the build directory.
+    candidate_records: dict[tuple[str, str], tuple[Path, str]] = {}
+    for source in candidates:
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        candidate_records.setdefault((source.name.casefold(), digest), (source, digest))
+    unique_candidates = sorted(
+        candidate_records.values(),
+        key=lambda record: (record[0].name.casefold(), record[1]),
+    )
+    if not unique_candidates:
+        return
+    target_root = context.source_root / "licenses" / re.sub(r"[^0-9A-Za-z_.-]+", "-", integration.name)
+    if target_root.exists():
+        shutil.rmtree(target_root)
+    target_root.mkdir(parents=True, exist_ok=True)
+    used_names: set[str] = set()
+    integration.license_files.clear()
+    for source, digest in unique_candidates:
+        target_name = source.name
+        if target_name.casefold() in used_names:
+            target_name = f"{digest[:12]}-{target_name}"
+        used_names.add(target_name.casefold())
+        target = target_root / target_name
+        shutil.copy2(source, target)
+        integration.license_files.append(target.relative_to(context.source_root).as_posix())
+    context.log(f"materialized {len(integration.license_files)} license/notice file(s) for {integration.name}")
+
+
+def _materialize_declared_license_sources(
+    context: LibraryHookContext,
+    integration: LibraryIntegration,
+) -> None:
+    if not integration.release_version:
+        raise RuntimeError(
+            f"{integration.name} declares license sources but does not have a resolved release version"
+        )
+    target_root = context.source_root / "licenses" / re.sub(
+        r"[^0-9A-Za-z_.-]+",
+        "-",
+        integration.name,
+    )
+    target_root.mkdir(parents=True, exist_ok=True)
+    for index, rule in enumerate(integration.license_sources, start=1):
+        if not isinstance(rule, dict):
+            raise RuntimeError(f"{integration.name} license source #{index} must be an object")
+        unknown_keys = sorted(set(rule) - {"filename", "url", "sha256"})
+        if unknown_keys:
+            raise RuntimeError(
+                f"{integration.name} license source #{index} has unsupported keys: "
+                + ", ".join(unknown_keys)
+            )
+        filename = rule.get("filename")
+        url_template = rule.get("url")
+        expected_sha256 = str(rule.get("sha256") or "").casefold()
+        if not isinstance(filename, str) or not filename:
+            raise RuntimeError(f"{integration.name} license source #{index} is missing filename")
+        normalized_filename = filename.replace("\\", "/")
+        parsed_filename = PurePosixPath(normalized_filename)
+        if (
+            parsed_filename.is_absolute()
+            or len(parsed_filename.parts) != 1
+            or parsed_filename.name in {"", ".", ".."}
+        ):
+            raise RuntimeError(
+                f"{integration.name} license source #{index} filename must be a basename"
+            )
+        if not isinstance(url_template, str) or not url_template.startswith("https://"):
+            raise RuntimeError(
+                f"{integration.name} license source #{index} must use an HTTPS URL"
+            )
+        if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+            raise RuntimeError(
+                f"{integration.name} license source #{index} must declare a SHA-256 digest"
+            )
+        try:
+            url = url_template.format(
+                release_version=integration.release_version,
+                project_name=integration.project_name or integration.name,
+            )
+        except (KeyError, ValueError) as exc:
+            raise RuntimeError(
+                f"{integration.name} license source #{index} has an invalid URL template"
+            ) from exc
+
+        cache_path = (
+            context.download_cache_root
+            / "license-sources"
+            / _normalized_project_name(integration.name)
+            / integration.release_version
+            / f"{expected_sha256}-{parsed_filename.name}"
+        )
+        if cache_path.exists():
+            payload = cache_path.read_bytes()
+        else:
+            context.log(f"downloading {integration.name} license source from {url}")
+            payload = _read_url_bytes(url)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_bytes(payload)
+        observed_sha256 = hashlib.sha256(payload).hexdigest()
+        if observed_sha256 != expected_sha256:
+            raise RuntimeError(
+                f"{integration.name} license source #{index} hash mismatch: "
+                f"expected {expected_sha256}, observed {observed_sha256}"
+            )
+
+        target = target_root / parsed_filename.name
+        if target.exists() and target.read_bytes() != payload:
+            target = target_root / f"{observed_sha256[:12]}-{parsed_filename.name}"
+        target.write_bytes(payload)
+        relative = target.relative_to(context.source_root).as_posix()
+        if relative not in integration.license_files:
+            integration.license_files.append(relative)
+    context.log(
+        f"materialized {len(integration.license_files)} declared license source(s) for {integration.name}"
+    )
+
+
+def _finalize_integration_license_metadata(
+    context: LibraryHookContext,
+    integration: LibraryIntegration,
+) -> None:
+    if integration.license_expression is None and integration.source_provider == "pypi":
+        project_name = integration.project_name or integration.name
+        release_payload = _load_pypi_release_payload(project_name, integration.release_version)
+        integration.license_expression = _infer_license_expression(release_payload.get("info", {}))
+
+    if not integration.license_files:
+        candidates: list[Path] = []
+        for relative in integration.materialized_paths:
+            path = context.source_root / relative
+            root = path if path.is_dir() else path.parent
+            candidates.extend(_distribution_license_candidates(root, maximum_depth=4))
+
+        if integration.source_provider == "pypi" and integration.release_version:
+            project_name = integration.project_name or integration.name
+            cached_distribution_root = (
+                context.work_cache_root
+                / "pypi"
+                / _normalized_project_name(project_name)
+                / integration.release_version
+            )
+            # Custom source hooks use slightly different extraction layouts. The
+            # version-scoped cache root is stable across all of them and keeps the
+            # scan bounded to the exact distribution selected for this pack.
+            candidates.extend(
+                _distribution_license_candidates(cached_distribution_root, maximum_depth=6)
+            )
+
+        _materialize_license_candidates(context, integration, candidates)
+
+    if not integration.license_files and integration.license_sources:
+        _materialize_declared_license_sources(context, integration)
+
+
 def _version_format_args(context: LibraryHookContext) -> dict[str, int | str]:
     major, minor, micro = context.version_info
     return {
@@ -1262,6 +1515,11 @@ def _build_pypi_source_hook(
                     lambda selector: _resolve_source_entry(extracted_root, selector),
                     source_ignore_patterns,
                 )
+                integration.release_version = resolved_release_version
+                _materialize_distribution_licenses(context, integration, extracted_root)
+                if integration.license_expression is None:
+                    release_payload = _load_pypi_release_payload(project_name, resolved_release_version)
+                    integration.license_expression = _infer_license_expression(release_payload.get("info", {}))
                 return
             except RuntimeError as exc:
                 failure = f"{archive_path.name}: {exc}"
@@ -1283,6 +1541,7 @@ def _build_pypi_source_hook(
 
 
 def _build_github_source_hook(
+    integration: LibraryIntegration,
     repo: str,
     ref: str,
     ref_kind: str,
@@ -1330,6 +1589,7 @@ def _build_github_source_hook(
             lambda selector: _resolve_source_entry(extracted_root, selector),
             source_ignore_patterns,
         )
+        _materialize_distribution_licenses(context, integration, extracted_root)
 
     prepare_source.__name__ = f"prepare_{normalized_repo}_source"
     return prepare_source
@@ -1354,6 +1614,16 @@ def pypi_library(
     staged_static_libraries_release_x64: list[dict] | None = None,
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
+    top_level_import_names: list[str] | None = None,
+    dependency_constraints: dict[str, str] | None = None,
+    conflicts: list[str] | None = None,
+    patch_rules: list[dict] | None = None,
+    source_resolver: str | None = "pypi-sdist",
+    resource_rules: list[dict] | None = None,
+    license_expression: str | None = None,
+    license_files: list[str] | None = None,
+    license_sources: list[dict] | None = None,
+    smoke_tests: list[dict] | None = None,
     materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
@@ -1397,6 +1667,16 @@ def pypi_library(
         staged_static_libraries_release_x64=list(staged_static_libraries_release_x64 or []),
         python_link_dependencies_release_x64=list(python_link_dependencies_release_x64 or []),
         python_link_wholearchive_release_x64=list(python_link_wholearchive_release_x64 or []),
+        top_level_import_names=list(top_level_import_names or python_packages or [name]),
+        dependency_constraints=dict(dependency_constraints or {}),
+        conflicts=list(conflicts or []),
+        patch_rules=list(patch_rules or []),
+        source_resolver=source_resolver or "pypi-sdist",
+        resource_rules=list(resource_rules or []),
+        license_expression=license_expression,
+        license_files=list(license_files or []),
+        license_sources=list(license_sources or []),
+        smoke_tests=list(smoke_tests or []),
         source_ignore_patterns=list(source_ignore_patterns or []),
         prepare_source_hooks=[],
         pre_patch_hooks=list(pre_patch_hooks or []),
@@ -1431,6 +1711,16 @@ def github_library(
     staged_static_libraries_release_x64: list[dict] | None = None,
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
+    top_level_import_names: list[str] | None = None,
+    dependency_constraints: dict[str, str] | None = None,
+    conflicts: list[str] | None = None,
+    patch_rules: list[dict] | None = None,
+    source_resolver: str | None = "github-source",
+    resource_rules: list[dict] | None = None,
+    license_expression: str | None = None,
+    license_files: list[str] | None = None,
+    license_sources: list[dict] | None = None,
+    smoke_tests: list[dict] | None = None,
     materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
@@ -1447,7 +1737,7 @@ def github_library(
         raise RuntimeError(f"{name} must declare at least one source entry or source mapping")
     normalized_overlay_entries = [_normalized_relpath(entry) for entry in overlay_entries or []]
 
-    return LibraryIntegration(
+    integration = LibraryIntegration(
         name=name,
         source_provider="github",
         project_name=repo,
@@ -1474,15 +1764,35 @@ def github_library(
         staged_static_libraries_release_x64=list(staged_static_libraries_release_x64 or []),
         python_link_dependencies_release_x64=list(python_link_dependencies_release_x64 or []),
         python_link_wholearchive_release_x64=list(python_link_wholearchive_release_x64 or []),
+        top_level_import_names=list(top_level_import_names or python_packages or [name]),
+        dependency_constraints=dict(dependency_constraints or {}),
+        conflicts=list(conflicts or []),
+        patch_rules=list(patch_rules or []),
+        source_resolver=source_resolver or "github-source",
+        resource_rules=list(resource_rules or []),
+        license_expression=license_expression,
+        license_files=list(license_files or []),
+        license_sources=list(license_sources or []),
+        smoke_tests=list(smoke_tests or []),
         source_ignore_patterns=list(source_ignore_patterns or []),
-        prepare_source_hooks=[
-            _build_github_source_hook(repo, ref, ref_kind, resolved_mapping, source_ignore_patterns, archive_url_template),
-            *(prepare_source_hooks or []),
-        ],
+        prepare_source_hooks=[],
         pre_patch_hooks=list(pre_patch_hooks or []),
         post_patch_hooks=list(post_patch_hooks or []),
         pre_build_hooks=list(pre_build_hooks or []),
     )
+    integration.prepare_source_hooks = [
+        _build_github_source_hook(
+            integration,
+            repo,
+            ref,
+            ref_kind,
+            resolved_mapping,
+            source_ignore_patterns,
+            archive_url_template,
+        ),
+        *(prepare_source_hooks or []),
+    ]
+    return integration
 
 
 def _derive_source_mapping_from_overlay_entries(overlay_entries: list[str]) -> tuple[dict[str, str], list[str]]:
@@ -1510,6 +1820,16 @@ def simple_library(
     source_ignore_patterns: list[str] | None = None,
     overlay_entries: list[str] | None = None,
     python_packages: list[str] | None = None,
+    top_level_import_names: list[str] | None = None,
+    dependency_constraints: dict[str, str] | None = None,
+    conflicts: list[str] | None = None,
+    patch_rules: list[dict] | None = None,
+    source_resolver: str | None = None,
+    resource_rules: list[dict] | None = None,
+    license_expression: str | None = None,
+    license_files: list[str] | None = None,
+    license_sources: list[dict] | None = None,
+    smoke_tests: list[dict] | None = None,
     materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
     prepare_source_hooks: list[Hook] | None = None,
@@ -1537,6 +1857,16 @@ def simple_library(
         "source_ignore_patterns": source_ignore_patterns,
         "overlay_entries": passthrough_overlay_entries,
         "python_packages": python_packages,
+        "top_level_import_names": top_level_import_names,
+        "dependency_constraints": dependency_constraints,
+        "conflicts": conflicts,
+        "patch_rules": patch_rules,
+        "source_resolver": source_resolver,
+        "resource_rules": resource_rules,
+        "license_expression": license_expression,
+        "license_files": license_files,
+        "license_sources": license_sources,
+        "smoke_tests": smoke_tests,
         "materialized_paths": materialized_paths,
         "cleanup_paths": cleanup_paths,
         "prepare_source_hooks": prepare_source_hooks,
@@ -1608,6 +1938,16 @@ def _integration_from_catalog_entry(entry: dict) -> LibraryIntegration:
         "source_ignore_patterns",
         "overlay_entries",
         "python_packages",
+        "top_level_import_names",
+        "dependency_constraints",
+        "conflicts",
+        "patch_rules",
+        "source_resolver",
+        "resource_rules",
+        "license_expression",
+        "license_files",
+        "license_sources",
+        "smoke_tests",
         "materialized_paths",
         "source_provider",
         "github_repo",
@@ -1707,16 +2047,19 @@ def _resolve_dependency_name(requirement_name: str, alias_to_name: dict[str, str
     return None
 
 
-def _pypi_requires_dist(
+def _pypi_dependency_requirements(
     integration: LibraryIntegration,
     target_version: Version,
-) -> list[str]:
+) -> list[tuple[str, str]]:
     project_name = integration.project_name or integration.name
     effective_release_version = _effective_pypi_release_version(
         project_name,
         target_version,
         integration.release_version,
     )
+    if effective_release_version is None:
+        return []
+    integration.release_version = effective_release_version
     payload = _load_pypi_release_payload(project_name, effective_release_version)
     info = payload.get("info", {})
     raw_requirements = info.get("requires_dist") or []
@@ -1724,7 +2067,7 @@ def _pypi_requires_dist(
         return []
 
     environment = _marker_environment(target_version)
-    resolved: list[str] = []
+    resolved: list[tuple[str, str]] = []
     for raw in raw_requirements:
         try:
             requirement = Requirement(raw)
@@ -1732,19 +2075,35 @@ def _pypi_requires_dist(
             continue
         if requirement.marker is not None and not requirement.marker.evaluate(environment):
             continue
-        resolved.append(requirement.name)
-    return _unique(resolved)
+        resolved.append((requirement.name, str(requirement.specifier)))
+    return list(dict.fromkeys(resolved))
 
 
-def _integration_dependency_names(
+def _integration_dependency_requirements(
     integration: LibraryIntegration,
     target_version: Version | None,
-) -> list[str]:
-    dependencies = list(integration.dependencies)
+) -> list[tuple[str, str]]:
+    declared_constraints: dict[str, list[str]] = {}
+    constraint_names: dict[str, str] = {}
+    for name, specifier in integration.dependency_constraints.items():
+        key = _normalized_project_name(name)
+        constraint_names.setdefault(key, name)
+        if specifier:
+            values = declared_constraints.setdefault(key, [])
+            if specifier not in values:
+                values.append(specifier)
+    requirements = [
+        (name, ",".join(declared_constraints.get(_normalized_project_name(name), [])))
+        for name in integration.dependencies
+    ]
+    known_dependency_keys = {_normalized_project_name(name) for name in integration.dependencies}
+    for key, name in constraint_names.items():
+        if key not in known_dependency_keys:
+            requirements.append((name, ",".join(declared_constraints.get(key, []))))
     if integration.auto_resolve_dependencies:
         if target_version is not None and integration.source_provider == "pypi":
-            dependencies.extend(_pypi_requires_dist(integration, target_version))
-    return _unique(dependencies)
+            requirements.extend(_pypi_dependency_requirements(integration, target_version))
+    return list(dict.fromkeys(requirements))
 
 
 def _order_integrations_by_dependency(
@@ -1752,26 +2111,113 @@ def _order_integrations_by_dependency(
     by_name: dict[str, LibraryIntegration],
     dependency_graph: dict[str, list[str]],
 ) -> list[LibraryIntegration]:
-    ordered: list[LibraryIntegration] = []
-    visiting: set[str] = set()
-    visited: set[str] = set()
+    catalog_order = {name: index for index, name in enumerate(by_name)}
+    reachable: set[str] = set()
 
-    def visit(name: str) -> None:
-        if name in visited:
+    def collect(name: str) -> None:
+        if name in reachable:
             return
-        if name in visiting:
-            cycle = " -> ".join([*visiting, name])
-            raise RuntimeError(f"dependency cycle detected: {cycle}")
-        visiting.add(name)
+        reachable.add(name)
         for dependency in dependency_graph.get(name, []):
-            visit(dependency)
-        visiting.remove(name)
-        visited.add(name)
-        ordered.append(by_name[name])
+            collect(dependency)
 
     for selected_name in selected_names:
-        visit(selected_name)
-    return ordered
+        collect(selected_name)
+
+    # Python package metadata may contain legitimate dependency cycles.  For
+    # example, Beautiful Soup depends on Soup Sieve while Soup Sieve imports
+    # Beautiful Soup at module initialization.  Pack descriptors are all
+    # registered before Python starts, so order strongly connected components
+    # dependency-first and keep members of a cycle in stable catalog order.
+    next_index = 0
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    components: list[list[str]] = []
+
+    def strong_connect(name: str) -> None:
+        nonlocal next_index
+        indices[name] = next_index
+        lowlinks[name] = next_index
+        next_index += 1
+        stack.append(name)
+        on_stack.add(name)
+
+        for dependency in dependency_graph.get(name, []):
+            if dependency not in reachable:
+                continue
+            if dependency not in indices:
+                strong_connect(dependency)
+                lowlinks[name] = min(lowlinks[name], lowlinks[dependency])
+            elif dependency in on_stack:
+                lowlinks[name] = min(lowlinks[name], indices[dependency])
+
+        if lowlinks[name] != indices[name]:
+            return
+        component: list[str] = []
+        while True:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == name:
+                break
+        component.sort(key=catalog_order.__getitem__)
+        components.append(component)
+
+    for name in sorted(reachable, key=catalog_order.__getitem__):
+        if name not in indices:
+            strong_connect(name)
+
+    component_by_name = {
+        name: component_index
+        for component_index, component in enumerate(components)
+        for name in component
+    }
+    ordered_components: list[int] = []
+    visited_components: set[int] = set()
+
+    def visit_component(component_index: int) -> None:
+        if component_index in visited_components:
+            return
+        visited_components.add(component_index)
+        dependency_components: list[int] = []
+        for name in components[component_index]:
+            for dependency in dependency_graph.get(name, []):
+                dependency_component = component_by_name[dependency]
+                if dependency_component != component_index:
+                    dependency_components.append(dependency_component)
+        for dependency_component in dict.fromkeys(dependency_components):
+            visit_component(dependency_component)
+        ordered_components.append(component_index)
+
+    for selected_name in selected_names:
+        visit_component(component_by_name[selected_name])
+
+    return [
+        by_name[name]
+        for component_index in ordered_components
+        for name in components[component_index]
+    ]
+
+
+def _select_compatible_pypi_release_version(
+    integration: LibraryIntegration,
+    target_version: Version,
+    constraint: SpecifierSet,
+) -> str:
+    project_name = integration.project_name or integration.name
+    for raw_version, _file_info in _iter_pypi_distribution_candidates(project_name, target_version, None):
+        try:
+            candidate = Version(raw_version)
+        except InvalidVersion:
+            continue
+        if candidate in constraint:
+            return raw_version
+    raise RuntimeError(
+        f"no buildable stable source release of {integration.name!r} satisfies {constraint} "
+        f"for target Python {target_version}"
+    )
 
 
 def _resolve_selected_integrations(
@@ -1792,24 +2238,137 @@ def _resolve_selected_integrations(
         if missing:
             raise RuntimeError("unknown libraries in config: " + ", ".join(missing))
 
-    dependency_graph: dict[str, list[str]] = {}
-    resolved_selected: set[str] = set()
-    stack = list(dict.fromkeys(selected_names))
-    while stack:
-        name = stack.pop()
-        if name in resolved_selected:
-            continue
-        integration = by_name[name]
-        dependencies: list[str] = []
-        for dependency_name in _integration_dependency_names(integration, target_version):
-            dependency_key = _resolve_dependency_name(dependency_name, alias_to_name)
-            if dependency_key is None or dependency_key not in by_name:
+    declared_dependencies = {
+        name: list(integration.dependencies)
+        for name, integration in by_name.items()
+    }
+    declared_constraints = {
+        name: dict(integration.dependency_constraints)
+        for name, integration in by_name.items()
+    }
+    release_version_pinned = {
+        name: integration.release_version is not None
+        for name, integration in by_name.items()
+    }
+
+    for _round in range(len(integrations) + 2):
+        for name, integration in by_name.items():
+            integration.dependencies = list(declared_dependencies[name])
+            integration.dependency_constraints = dict(declared_constraints[name])
+
+        dependency_graph: dict[str, list[str]] = {}
+        resolved_selected: set[str] = set()
+        stack = list(dict.fromkeys(selected_names))
+        while stack:
+            name = stack.pop()
+            if name in resolved_selected:
                 continue
-            dependencies.append(dependency_key)
-            if dependency_key not in resolved_selected:
-                stack.append(dependency_key)
-        dependency_graph[name] = dependencies
-        resolved_selected.add(name)
+            integration = by_name[name]
+            dependencies: list[str] = []
+            dependency_constraints: dict[str, list[str]] = {}
+            for dependency_name, raw_specifier in _integration_dependency_requirements(integration, target_version):
+                dependency_key = _resolve_dependency_name(dependency_name, alias_to_name)
+                if dependency_key is None or dependency_key not in by_name:
+                    continue
+                dependencies.append(dependency_key)
+                if raw_specifier:
+                    values = dependency_constraints.setdefault(by_name[dependency_key].name, [])
+                    if raw_specifier not in values:
+                        values.append(raw_specifier)
+                if dependency_key not in resolved_selected:
+                    stack.append(dependency_key)
+            dependency_graph[name] = list(dict.fromkeys(dependencies))
+            integration.dependencies = [by_name[key].name for key in dependency_graph[name]]
+            integration.dependency_constraints = {
+                dependency_name: ",".join(specifiers)
+                for dependency_name, specifiers in dependency_constraints.items()
+            }
+            resolved_selected.add(name)
+
+        constraints_by_dependency: dict[str, list[tuple[str, str]]] = {}
+        for name in sorted(resolved_selected):
+            integration = by_name[name]
+            for dependency_name, raw_specifier in integration.dependency_constraints.items():
+                dependency_key = _resolve_dependency_name(dependency_name, alias_to_name)
+                if dependency_key is None or dependency_key not in resolved_selected or not raw_specifier:
+                    continue
+                constraints_by_dependency.setdefault(dependency_key, []).append(
+                    (integration.name, raw_specifier)
+                )
+
+        changed = False
+        for dependency_key, requirements in sorted(constraints_by_dependency.items()):
+            dependency = by_name[dependency_key]
+            specifiers = [raw_specifier for _owner, raw_specifier in requirements]
+            if dependency.minimum_release_version:
+                specifiers.append(f">={dependency.minimum_release_version}")
+            constraint_text = ",".join(specifiers)
+            try:
+                constraint = SpecifierSet(constraint_text)
+                current_version = (
+                    Version(dependency.release_version)
+                    if dependency.release_version is not None
+                    else None
+                )
+            except (InvalidSpecifier, InvalidVersion) as exc:
+                raise RuntimeError(
+                    f"invalid combined dependency constraint for {dependency.name!r}: {constraint_text!r}"
+                ) from exc
+            if current_version is not None and current_version in constraint:
+                continue
+            owners = ", ".join(owner for owner, _specifier in requirements)
+            if release_version_pinned[dependency_key]:
+                raise RuntimeError(
+                    f"{owners} require {dependency.name}{constraint}, "
+                    f"but pinned version {dependency.release_version} is selected"
+                )
+            if target_version is None or dependency.source_provider != "pypi":
+                raise RuntimeError(
+                    f"cannot resolve {dependency.name}{constraint} for dependencies of {owners}"
+                )
+            selected_version = _select_compatible_pypi_release_version(
+                dependency,
+                target_version,
+                constraint,
+            )
+            if dependency.release_version != selected_version:
+                dependency.release_version = selected_version
+                changed = True
+        if not changed:
+            break
+    else:
+        raise RuntimeError("dependency version resolution did not converge")
+
+    for name in sorted(resolved_selected):
+        integration = by_name[name]
+        for conflict in integration.conflicts:
+            conflict_key = _resolve_dependency_name(conflict, alias_to_name)
+            if conflict_key in resolved_selected:
+                raise RuntimeError(
+                    f"library conflict: {integration.name!r} cannot be selected with {by_name[conflict_key].name!r}"
+                )
+        for dependency_name, raw_specifier in integration.dependency_constraints.items():
+            dependency_key = _resolve_dependency_name(dependency_name, alias_to_name)
+            if dependency_key is None or dependency_key not in resolved_selected:
+                continue
+            dependency = by_name[dependency_key]
+            if dependency.release_version is None:
+                raise RuntimeError(
+                    f"cannot validate {integration.name!r} dependency constraint for {dependency.name!r}: "
+                    "the dependency version is not pinned"
+                )
+            try:
+                constraint = SpecifierSet(raw_specifier)
+                dependency_version = Version(dependency.release_version)
+            except (InvalidSpecifier, InvalidVersion) as exc:
+                raise RuntimeError(
+                    f"invalid dependency constraint {dependency_name!r}: {raw_specifier!r}"
+                ) from exc
+            if dependency_version not in constraint:
+                raise RuntimeError(
+                    f"{integration.name!r} requires {dependency.name}{raw_specifier}, "
+                    f"but {dependency.release_version} is selected"
+                )
 
     ordered = _order_integrations_by_dependency(
         [name for name in selected_names if name in resolved_selected],
@@ -1864,11 +2423,9 @@ def _apply_version_overrides(
         by_name[dependency_key].release_version = release_version
 
 
-def load_integrations(
+def load_integration_definitions(
     library_root: Path,
-    selected_libraries: str | list[str] | None = "all",
     *,
-    target_version: Version | None = None,
     version_overrides: dict[str, str] | None = None,
     library_catalog: object | None = None,
 ) -> list[LibraryIntegration]:
@@ -1893,6 +2450,22 @@ def load_integrations(
         by_name[integration.name.casefold()] = integration
     integrations = list(by_name.values())
     _apply_version_overrides(integrations, version_overrides)
+    return integrations
+
+
+def load_integrations(
+    library_root: Path,
+    selected_libraries: str | list[str] | None = "all",
+    *,
+    target_version: Version | None = None,
+    version_overrides: dict[str, str] | None = None,
+    library_catalog: object | None = None,
+) -> list[LibraryIntegration]:
+    integrations = load_integration_definitions(
+        library_root,
+        version_overrides=version_overrides,
+        library_catalog=library_catalog,
+    )
     return _resolve_selected_integrations(
         integrations,
         "all" if selected_libraries is None else selected_libraries,
@@ -1972,11 +2545,87 @@ def _run_hooks(integrations: list[LibraryIntegration], context: LibraryHookConte
             hook(context)
 
 
+def _rule_matches(rule: dict, integration: LibraryIntegration, context: LibraryHookContext) -> bool:
+    python_specifier = rule.get("python")
+    if python_specifier:
+        try:
+            if Version(context.version_full) not in SpecifierSet(str(python_specifier)):
+                return False
+        except (InvalidSpecifier, InvalidVersion) as exc:
+            raise RuntimeError(
+                f"{integration.name} has invalid patch rule Python selector {python_specifier!r}"
+            ) from exc
+    package_specifier = rule.get("package")
+    if package_specifier:
+        if integration.release_version is None:
+            raise RuntimeError(
+                f"{integration.name} patch rule requires a pinned package version"
+            )
+        try:
+            if Version(integration.release_version) not in SpecifierSet(str(package_specifier)):
+                return False
+        except (InvalidSpecifier, InvalidVersion) as exc:
+            raise RuntimeError(
+                f"{integration.name} has invalid patch rule package selector {package_specifier!r}"
+            ) from exc
+    return True
+
+
+def _apply_versioned_patch_rules(integration: LibraryIntegration, context: LibraryHookContext) -> None:
+    for rule_index, rule in enumerate(integration.patch_rules, start=1):
+        if not isinstance(rule, dict):
+            raise RuntimeError(f"{integration.name} patch rule #{rule_index} must be an object")
+        if not _rule_matches(rule, integration, context):
+            continue
+        relative_path = rule.get("path")
+        replacements = rule.get("replacements")
+        if not isinstance(relative_path, str) or not relative_path:
+            raise RuntimeError(f"{integration.name} patch rule #{rule_index} is missing path")
+        if not isinstance(replacements, list) or not replacements:
+            raise RuntimeError(f"{integration.name} patch rule #{rule_index} is missing replacements")
+        path = source_path(context, relative_path)
+        if not path.exists():
+            raise RuntimeError(f"{integration.name} patch target does not exist: {path}")
+        original = read_text_file(path)
+        updated = original
+        for replacement_index, replacement in enumerate(replacements, start=1):
+            if not isinstance(replacement, dict):
+                raise RuntimeError(
+                    f"{integration.name} patch rule #{rule_index} replacement #{replacement_index} must be an object"
+                )
+            old = replacement.get("old")
+            new = replacement.get("new")
+            expected = replacement.get("count", 1)
+            if not isinstance(old, str) or not isinstance(new, str) or not isinstance(expected, int) or expected < 1:
+                raise RuntimeError(
+                    f"{integration.name} patch rule #{rule_index} replacement #{replacement_index} is invalid"
+                )
+            actual = updated.count(old)
+            if actual == expected:
+                updated = updated.replace(old, new, expected)
+                continue
+            if actual == 0 and updated.count(new) >= expected:
+                continue
+            raise RuntimeError(
+                f"{integration.name} patch anchor mismatch in {relative_path}: "
+                f"expected {expected}, found {actual} for {old!r}"
+            )
+        if updated != original:
+            path.write_text(updated, encoding="utf-8", newline="\n")
+            context.log(f"applied {integration.name} strict patch rule #{rule_index} to {relative_path}")
+
+
 def run_prepare_source_hooks(integrations: list[LibraryIntegration], context: LibraryHookContext) -> None:
-    _run_hooks(integrations, context, "prepare_source_hooks", "source")
+    for integration in integrations:
+        for hook in integration.prepare_source_hooks:
+            context.log(f"running {integration.name} source hook {hook.__name__}")
+            hook(context)
+        _finalize_integration_license_metadata(context, integration)
 
 
 def run_pre_patch_hooks(integrations: list[LibraryIntegration], context: LibraryHookContext) -> None:
+    for integration in integrations:
+        _apply_versioned_patch_rules(integration, context)
     _run_hooks(integrations, context, "pre_patch_hooks", "pre-patch")
 
 

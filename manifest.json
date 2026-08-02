@@ -1,7 +1,10 @@
 {
   "overlay_entries": [
+    "Include/staticpython_pack.h",
     "Lib/_staticpython_runtime.py",
     "Lib/_pyrepl/__main__.py",
+    "PCbuild/staticpython_runtime.vcxproj",
+    "Python/staticpython_pack_runtime.c",
     "Tools/build/freeze_modules.py"
   ],
   "third_party_python_packages": [],
@@ -157,6 +160,7 @@
     "wbemuuid.lib",
     "ole32.lib",
     "Crypt32.lib",
+    "Advapi32.lib",
     "legacy_stdio_definitions.lib",
     "bcrypt.lib",
     "version.lib",

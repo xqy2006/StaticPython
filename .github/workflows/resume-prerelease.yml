@@ -1,0 +1,92 @@
+name: Resume immutable StaticPython prerelease
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Actions run whose verified release artifact should be published
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: staticpython-prerelease-publication
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  publish:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate source run gates
+        id: source
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        shell: pwsh
+        run: |
+          $run = gh run view $env:SOURCE_RUN_ID --repo $env:GITHUB_REPOSITORY --json status,headSha,jobs | ConvertFrom-Json
+          if ($run.status -ne "completed") { throw "Source run is not complete" }
+          $runtimeJobs = @($run.jobs | Where-Object { $_.name -like "runtime-sdk (*" })
+          $packJobs = @($run.jobs | Where-Object { $_.name -like "library-packs (*" })
+          $indexJobs = @($run.jobs | Where-Object { $_.name -eq "assemble-index" })
+          if ($runtimeJobs.Count -ne 5 -or @($runtimeJobs | Where-Object conclusion -ne "success").Count -ne 0) {
+            throw "Source run does not have five successful runtime SDK jobs"
+          }
+          if ($packJobs.Count -ne 20 -or @($packJobs | Where-Object conclusion -ne "success").Count -ne 0) {
+            throw "Source run does not have twenty successful library-pack jobs"
+          }
+          if ($indexJobs.Count -ne 1 -or $indexJobs[0].conclusion -ne "success") {
+            throw "Source run does not have a successful immutable index gate"
+          }
+          if ($run.headSha -notmatch '^[0-9a-f]{40}$') { throw "Source run has no exact Git commit" }
+          "sha=$($run.headSha)" >> $env:GITHUB_OUTPUT
+      - name: Download verified release artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        shell: pwsh
+        run: |
+          gh run download $env:SOURCE_RUN_ID `
+            --repo $env:GITHUB_REPOSITORY `
+            --name "staticpython-release-$env:SOURCE_SHA" `
+            --dir .\dist
+      - name: Publish or resume immutable prerelease families
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python .\scripts\publish_release_assets.py
+          --asset-root .\dist
+          --repository "${{ github.repository }}"
+          --source-commit "${{ steps.source.outputs.sha }}"
+      - name: Notify PySuture verification workflow
+        env:
+          DISPATCH_TOKEN: ${{ secrets.PYSUTURE_DISPATCH_TOKEN }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:DISPATCH_TOKEN)) {
+            Write-Host "PYSUTURE_DISPATCH_TOKEN is not configured; scheduled polling remains active"
+            exit 0
+          }
+          $headers = @{
+            Authorization = "Bearer $env:DISPATCH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $body = @{
+            event_type = "staticpython-release"
+            client_payload = @{ staticpython_commit = $env:SOURCE_SHA }
+          } | ConvertTo-Json -Depth 4
+          Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/xqy2006/PySuture/dispatches" -Headers $headers -Body $body -ContentType "application/json"

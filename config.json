@@ -92,8 +92,22 @@
       },
       {
         "name": "bleach",
+        "release_version": "6.4.0",
+        "dependencies": [
+          "tinycss2"
+        ],
+        "dependency_constraints": {
+          "tinycss2": ">=1.1.0"
+        },
         "overlay_entries": [
           "Lib/bleach"
+        ],
+        "smoke_tests": [
+          {
+            "name": "css-sanitizer",
+            "kind": "inline",
+            "code": "from bleach.css_sanitizer import CSSSanitizer; assert CSSSanitizer().sanitize_css('color: red') == 'color: red;'"
+          }
         ],
         "source_provider": "pypi"
       },
@@ -199,6 +213,7 @@
       },
       {
         "name": "dateutil",
+        "license_expression": "Apache-2.0 OR BSD-3-Clause",
         "overlay_entries": [
           "Lib/dateutil"
         ],
@@ -220,6 +235,7 @@
       },
       {
         "name": "dialite",
+        "license_expression": "BSD-2-Clause",
         "overlay_entries": [
           "Lib/dialite"
         ],
@@ -321,6 +337,7 @@
       },
       {
         "name": "fsspec",
+        "license_expression": "BSD-3-Clause",
         "overlay_entries": [
           "Lib/fsspec"
         ],
@@ -370,6 +387,13 @@
       },
       {
         "name": "humanize",
+        "license_sources": [
+          {
+            "filename": "LICENCE",
+            "url": "https://raw.githubusercontent.com/python-humanize/humanize/{release_version}/LICENCE",
+            "sha256": "8ba6c18112a431400ad3c743f70670079b302545d98884fc2f28a91c383a0380"
+          }
+        ],
         "overlay_entries": [
           "Lib/humanize"
         ],
@@ -426,6 +450,22 @@
           "Lib/itsdangerous"
         ],
         "source_provider": "pypi"
+      },
+      {
+        "name": "janus",
+        "release_version": "2.0.0",
+        "overlay_entries": [
+          "Lib/janus"
+        ],
+        "source_provider": "pypi",
+        "license_expression": "Apache-2.0",
+        "smoke_tests": [
+          {
+            "name": "sync-async-queue-bridge",
+            "kind": "inline",
+            "code": "import asyncio\nimport janus\n\nasync def check():\n    queue = janus.Queue()\n    await queue.async_q.put('ok')\n    assert queue.sync_q.get_nowait() == 'ok'\n    queue.close()\n    await queue.wait_closed()\n\nasyncio.run(check())"
+          }
+        ]
       },
       {
         "name": "jedi",
@@ -487,6 +527,13 @@
       },
       {
         "name": "loguru",
+        "license_sources": [
+          {
+            "filename": "LICENSE",
+            "url": "https://raw.githubusercontent.com/Delgan/loguru/{release_version}/LICENSE",
+            "sha256": "b35d026cc7aca9d5859a02eb87ddf7a386a24c986838651bd1f283f94e003327"
+          }
+        ],
         "overlay_entries": [
           "Lib/loguru"
         ],
@@ -545,6 +592,7 @@
       },
       {
         "name": "mypy_extensions",
+        "license_expression": "MIT",
         "project_name": "mypy-extensions",
         "overlay_entries": [
           "Lib/mypy_extensions.py"
@@ -676,6 +724,7 @@
       },
       {
         "name": "pscript",
+        "license_expression": "BSD-2-Clause",
         "overlay_entries": [
           "Lib/pscript"
         ],
@@ -750,6 +799,7 @@
       },
       {
         "name": "pyglet",
+        "license_expression": "BSD-3-Clause",
         "minimum_release_version": "1.5.0",
         "overlay_entries": [
           "Lib/pyglet"
@@ -1015,6 +1065,9 @@
       },
       {
         "name": "soupsieve",
+        "dependencies": [
+          "bs4"
+        ],
         "overlay_entries": [
           "Lib/soupsieve"
         ],
@@ -1101,6 +1154,13 @@
       },
       {
         "name": "tqdm",
+        "license_sources": [
+          {
+            "filename": "LICENCE",
+            "url": "https://raw.githubusercontent.com/tqdm/tqdm/v{release_version}/LICENCE",
+            "sha256": "fcff87c3a47ce8028a8512aa182d4fcf0ad1c90544ee75cf9b343684cac194de"
+          }
+        ],
         "overlay_entries": [
           "Lib/tqdm"
         ],
@@ -1146,6 +1206,13 @@
       {
         "name": "ua_parser_builtins",
         "project_name": "ua-parser-builtins",
+        "license_sources": [
+          {
+            "filename": "LICENSE",
+            "url": "https://raw.githubusercontent.com/ua-parser/uap-python/6dd8c39ec4816a105ca16cf765e2249148b3ea65/LICENSE",
+            "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+          }
+        ],
         "overlay_entries": [
           "Lib/ua_parser_builtins"
         ],
@@ -1183,6 +1250,9 @@
       },
       {
         "name": "webruntime",
+        "dependencies": [
+          "dialite"
+        ],
         "overlay_entries": [
           "Lib/webruntime"
         ],
@@ -1197,6 +1267,13 @@
       },
       {
         "name": "webencodings",
+        "license_sources": [
+          {
+            "filename": "LICENSE",
+            "url": "https://raw.githubusercontent.com/gsnedders/python-webencodings/v{release_version}/LICENSE",
+            "sha256": "f23bae6ada76095610a77137fb92aec7342723900211c5826d54b4c57907ca56"
+          }
+        ],
         "overlay_entries": [
           "Lib/webencodings"
         ],
@@ -1273,6 +1350,15 @@
     ]
   },
   "profiles": {
+    "runtime-sdk": {
+      "description": "Static CPython runtime SDK for PySuture. Builds no generic python.exe and contains no optional third-party libraries.",
+      "build_type": "runtime-sdk",
+      "core_libraries": "all",
+      "third_party_libraries": [],
+      "verification": {
+        "enabled": false
+      }
+    },
     "stdlib": {
       "description": "Build only CPython and statically linked standard-library extension modules.",
       "core_libraries": "all",
@@ -1360,6 +1446,7 @@
         "ipython_pygments_lexers",
         "isort",
         "itsdangerous",
+        "janus",
         "jedi",
         "jinja2",
         "jmespath",

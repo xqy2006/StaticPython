@@ -1,0 +1,93 @@
+name: Weekly full-profile conflict regression
+
+on:
+  schedule:
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staticpython-full-conflict-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  STATICPYTHON_FULL_BUILD_WORKERS: "1"
+
+jobs:
+  resolve-cpython-matrix:
+    runs-on: windows-2022
+    outputs:
+      versions: ${{ steps.resolve.outputs.versions }}
+    steps:
+      - name: Resolve latest CPython 3.11 through 3.15 tags
+        id: resolve
+        shell: pwsh
+        run: |
+          $tags = @(git ls-remote --tags --refs https://github.com/python/cpython.git "v3.*" |
+            ForEach-Object {
+              if ($_ -match "refs/tags/v((3)\.(11|12|13|14|15)\.([0-9]+)(?:(a|b|rc)([0-9]+))?)$") {
+                $phaseRank = switch ($matches[5]) { "a" { 1 } "b" { 2 } "rc" { 3 } default { 4 } }
+                [PSCustomObject]@{
+                  Version = $matches[1]
+                  Series = "3.$($matches[3])"
+                  Major = [int]$matches[2]
+                  Minor = [int]$matches[3]
+                  Micro = [int]$matches[4]
+                  PhaseRank = $phaseRank
+                  PhaseSerial = if ($matches[6]) { [int]$matches[6] } else { 0 }
+                }
+              }
+            })
+          if (-not $tags) { throw "Could not resolve CPython tags" }
+          $versions = foreach ($series in @("3.11", "3.12", "3.13", "3.14", "3.15")) {
+            $latest = $tags | Where-Object Series -eq $series |
+              Sort-Object Major, Minor, Micro, PhaseRank, PhaseSerial | Select-Object -Last 1
+            if (-not $latest) { throw "Could not resolve CPython $series" }
+            $latest.Version
+          }
+          "versions=$(ConvertTo-Json -InputObject @($versions) -Compress)" >> $env:GITHUB_OUTPUT
+
+  full-conflict-regression:
+    needs: resolve-cpython-matrix
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        cpython_version: ${{ fromJSON(needs.resolve-cpython-matrix.outputs.versions) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install packaging
+          choco install strawberryperl -y --no-progress
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+      - name: Link all current integrations and run behavior checks
+        shell: pwsh
+        run: |
+          python .\build.py `
+            --cpython-version "${{ matrix.cpython_version }}" `
+            --download-root "$env:RUNNER_TEMP\full-${{ matrix.cpython_version }}" `
+            --profile full `
+            --build-workers "$env:STATICPYTHON_FULL_BUILD_WORKERS"
+      - name: Upload verification record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-conflict-${{ matrix.cpython_version }}-report
+          path: ${{ runner.temp }}/full-${{ matrix.cpython_version }}/cpython-${{ matrix.cpython_version }}/PCbuild/staticpython-verify-report.json
+          if-no-files-found: warn
+          retention-days: 14

@@ -13,13 +13,14 @@ def _patch_prompt_toolkit_init(text: str) -> str:
         return text
     if "importlib_metadata.PackageNotFoundError" in text:
         return text
+    fallback_version = LIBRARY_INTEGRATION.release_version or "3.0.52"
     updated, count = re.subn(
         r'(?m)^__version__\s*=\s*(metadata|importlib_metadata)\.version\([\'"]prompt_toolkit[\'"]\)\s*$',
         (
             "try:\n"
             '    __version__ = metadata.version("prompt_toolkit")\n'
             "except metadata.PackageNotFoundError:\n"
-            '    __version__ = "3.0.52"'
+            f'    __version__ = "{fallback_version}"'
         ),
         text,
         count=1,
@@ -32,13 +33,30 @@ def _patch_prompt_toolkit_init(text: str) -> str:
             "try:\n"
             '    __version__ = metadata.version("prompt_toolkit")\n'
             "except Exception:\n"
-            '    __version__ = "3.0.52"'
+            f'    __version__ = "{fallback_version}"'
         ),
         text,
         count=1,
     )
     if count == 1:
         return updated
+    version_loader_anchor = (
+        '    version = metadata.version("prompt_toolkit")\n'
+        "    assert re.fullmatch(pep440_pattern, version)\n"
+    )
+    if version_loader_anchor in text:
+        return replace_text_once(
+            text,
+            version_loader_anchor,
+            (
+                "    try:\n"
+                '        version = metadata.version("prompt_toolkit")\n'
+                "    except metadata.PackageNotFoundError:\n"
+                f'        version = "{fallback_version}"\n'
+                "    assert re.fullmatch(pep440_pattern, version)\n"
+            ),
+            label="prompt_toolkit 3.0.53 lazy version metadata",
+        )
     if "version(" in text and "prompt_toolkit" in text:
         raise RuntimeError("prompt_toolkit version metadata anchor not found")
     return text

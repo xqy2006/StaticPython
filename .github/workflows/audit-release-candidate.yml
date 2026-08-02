@@ -1,0 +1,90 @@
+name: Audit existing StaticPython release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Completed release workflow run whose immutable artifacts should be re-audited
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  audit:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install audit dependencies
+        run: python -m pip install packaging
+      - name: Resolve candidate provenance
+        id: candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $runId = "${{ inputs.run_id }}".Trim()
+          if ([string]::IsNullOrWhiteSpace($runId)) {
+            $candidate = gh run list --repo "${{ github.repository }}" --workflow release.yml --event workflow_dispatch --limit 20 --json databaseId,headSha,status,createdAt |
+              ConvertFrom-Json |
+              Where-Object status -eq "completed" |
+              Sort-Object createdAt -Descending |
+              Select-Object -First 1
+            if (-not $candidate) { throw "no completed manually dispatched release candidate was found" }
+            $runId = [string]$candidate.databaseId
+          } else {
+            $candidate = gh run view $runId --repo "${{ github.repository }}" --json databaseId,headSha,status | ConvertFrom-Json
+          }
+          if ($candidate.status -ne "completed") { throw "candidate run is not complete" }
+          "run_id=$runId" >> $env:GITHUB_OUTPUT
+          "commit=$($candidate.headSha)" >> $env:GITHUB_OUTPUT
+      - name: Download immutable candidate assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .\dist\assets | Out-Null
+          gh run download "${{ steps.candidate.outputs.run_id }}" --repo "${{ github.repository }}" --pattern "runtime-sdk-*" --dir .\dist\assets
+          gh run download "${{ steps.candidate.outputs.run_id }}" --repo "${{ github.repository }}" --pattern "library-packs-*" --dir .\dist\assets
+      - name: Re-audit metadata and assemble index
+        shell: pwsh
+        run: |
+          @'
+          import json
+          from pathlib import Path
+          from scripts.build_release_index import discover_assets
+
+          _runtimes, packs = discover_assets(Path("dist/assets"))
+          observed = set()
+          for path, metadata in packs:
+              license_metadata = metadata.get("license", {})
+              if license_metadata.get("status") == "complete":
+                  continue
+              key = (metadata.get("name"), metadata.get("version"))
+              if key in observed:
+                  continue
+              observed.add(key)
+              print(json.dumps({
+                  "asset": path.name,
+                  "name": metadata.get("name"),
+                  "version": metadata.get("version"),
+                  "expression": license_metadata.get("expression"),
+                  "status": license_metadata.get("status"),
+                  "files": license_metadata.get("files", []),
+              }, ensure_ascii=False, sort_keys=True))
+          '@ | python -
+          python .\scripts\build_release_index.py `
+            --asset-root .\dist\assets `
+            --output .\dist\runtime-index.v1.json `
+            --repository "${{ github.repository }}" `
+            --staticpython-commit "${{ steps.candidate.outputs.commit }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audited-runtime-index-${{ steps.candidate.outputs.commit }}
+          path: dist/runtime-index.v1.json
+          if-no-files-found: error

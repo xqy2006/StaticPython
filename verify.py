@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from packaging.version import Version
@@ -167,6 +168,7 @@ def _to_text(value: str | bytes | None) -> str:
 def run_capture(cmd: list[str], *, cwd: Path, timeout: float, env: dict[str, str] | None = None) -> dict:
     display = subprocess.list2cmdline([str(part) for part in cmd])
     log(f"RUN {display}")
+    started_at = time.monotonic()
     try:
         completed = subprocess.run(
             cmd,
@@ -187,6 +189,7 @@ def run_capture(cmd: list[str], *, cwd: Path, timeout: float, env: dict[str, str
             "stderr": _to_text(exc.stderr),
             "error": f"timed out after {timeout} seconds",
             "display": display,
+            "duration_seconds": round(time.monotonic() - started_at, 3),
         }
     return {
         "ok": completed.returncode == 0,
@@ -195,6 +198,7 @@ def run_capture(cmd: list[str], *, cwd: Path, timeout: float, env: dict[str, str
         "stdout": completed.stdout,
         "stderr": completed.stderr,
         "display": display,
+        "duration_seconds": round(time.monotonic() - started_at, 3),
     }
 
 
@@ -287,10 +291,144 @@ def verify_profile_script(
     )
 
 
+def integration_smoke_steps(integration) -> list[dict]:
+    if integration.smoke_tests:
+        steps = integration.smoke_tests
+    else:
+        steps = [
+            {
+                "name": f"import-{module}",
+                "kind": "import",
+                "module": module,
+            }
+            for module in (integration.top_level_import_names or integration.python_packages)
+        ]
+    if not isinstance(steps, list) or any(not isinstance(step, dict) for step in steps):
+        raise RuntimeError(f"{integration.name} smoke_tests must be a list of objects")
+    return [dict(step) for step in steps]
+
+
+def _integration_smoke_command(
+    python_cmd_prefix: list[str],
+    repo_root: Path,
+    integration_name: str,
+    step: dict,
+) -> tuple[str, str, list[str]]:
+    kind = str(step.get("kind", "import"))
+    name = str(step.get("name") or f"{kind}-{integration_name}")
+    args = [str(arg) for arg in step.get("args", [])]
+    if kind == "import":
+        module = step.get("module")
+        if not isinstance(module, str) or not module:
+            raise RuntimeError("import smoke test requires a non-empty module")
+        command = [
+            *python_cmd_prefix,
+            "-c",
+            f"import importlib; importlib.import_module({module!r})",
+        ]
+    elif kind == "module":
+        module = step.get("module")
+        if not isinstance(module, str) or not module:
+            raise RuntimeError("module smoke test requires a non-empty module")
+        command = [*python_cmd_prefix, "-m", module, *args]
+    elif kind == "script":
+        script = step.get("script")
+        if not isinstance(script, str) or not script:
+            raise RuntimeError("script smoke test requires a non-empty script")
+        script_path = Path(script)
+        if not script_path.is_absolute():
+            script_path = repo_root / script_path
+        if not script_path.is_file():
+            raise RuntimeError(f"smoke test script not found: {script_path}")
+        command = [*python_cmd_prefix, str(script_path), *args]
+    elif kind == "inline":
+        code = step.get("code")
+        if not isinstance(code, str) or not code:
+            raise RuntimeError("inline smoke test requires non-empty code")
+        command = [*python_cmd_prefix, "-c", code]
+    else:
+        raise RuntimeError(f"unsupported smoke test kind {kind!r}")
+    return name, kind, command
+
+
+def verify_integration_smoke_tests(
+    python_cmd_prefix: list[str],
+    target_env: dict[str, str] | None,
+    repo_root: Path,
+    integrations: list,
+    skipped_groups: set[str],
+) -> tuple[list[dict], list[dict]]:
+    failures: list[dict] = []
+    records: list[dict] = []
+    for integration in integrations:
+        for index, step in enumerate(integration_smoke_steps(integration), start=1):
+            skip_group = step.get("skip_group")
+            raw_kind = str(step.get("kind", "import"))
+            raw_name = str(step.get("name") or f"{raw_kind}-{index}")
+            record = {
+                "integration": integration.name,
+                "name": raw_name,
+                "kind": raw_kind,
+            }
+            if skip_group and skip_group in skipped_groups:
+                record["status"] = "skipped"
+                record["skip_group"] = str(skip_group)
+                records.append(record)
+                log(f"library-smoke::{integration.name}:{raw_name}: skipped ({skip_group})")
+                continue
+            try:
+                name, kind, command = _integration_smoke_command(
+                    python_cmd_prefix,
+                    repo_root,
+                    integration.name,
+                    step,
+                )
+                timeout = float(step.get("timeout", 240))
+            except (TypeError, ValueError, RuntimeError) as exc:
+                record.update({"status": "failed", "error_type": "SmokeTestConfigurationError"})
+                records.append(record)
+                failures.append({
+                    "step": "library-smoke",
+                    "name": f"{integration.name}:{raw_name}",
+                    "integration": integration.name,
+                    "error_type": "SmokeTestConfigurationError",
+                    "error": str(exc),
+                    "traceback": "",
+                    "stdout": "",
+                    "stderr": "",
+                    "command": "",
+                })
+                continue
+
+            result = run_capture(command, cwd=repo_root, timeout=timeout, env=target_env)
+            record.update({
+                "name": name,
+                "kind": kind,
+                "status": "passed" if result.get("ok") else "failed",
+                "returncode": result.get("returncode"),
+                "duration_seconds": result.get("duration_seconds"),
+                "command": result.get("display"),
+            })
+            records.append(record)
+            if result.get("ok"):
+                log(f"library-smoke::{integration.name}:{name}: passed")
+                continue
+            failure = make_process_failure(
+                "library-smoke",
+                result,
+                name=f"{integration.name}:{name}",
+            )
+            failure["integration"] = integration.name
+            failures.append(failure)
+    return failures, records
+
+
 def verification_coverage(integrations: list, verification_config: dict) -> dict:
     script = verification_config.get("script")
+    smoke_test_count = sum(len(integration_smoke_steps(integration)) for integration in integrations)
     return {
         "library_count": len(integrations),
+        "integration_smoke_test_count": smoke_test_count,
         "profile_script_enabled": bool(verification_config.get("enabled", False)),
         "profile_script_name": script.get("name") if isinstance(script, dict) else None,
     }
@@ -325,12 +463,19 @@ def emit_failure(failure: dict, index: int, total: int) -> None:
             log(f"    {line}")
 
 
-def write_report(path: Path, python_exe: Path, failures: list[dict], coverage: dict) -> None:
+def write_report(
+    path: Path,
+    python_exe: Path,
+    failures: list[dict],
+    coverage: dict,
+    integration_smoke_tests: list[dict] | None = None,
+) -> None:
     report = {
         "python_exe": str(python_exe),
         "failure_count": len(failures),
         "failures": failures,
         "verification_coverage": coverage,
+        "integration_smoke_tests": integration_smoke_tests or [],
     }
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"wrote verification report to {path}")
@@ -365,10 +510,17 @@ def _emit_failures(
     python_exe: Path,
     coverage: dict,
     report_json: Path | None,
+    integration_smoke_tests: list[dict] | None = None,
     summary_prefix: str = "verification failed with",
 ) -> None:
     if report_json:
-        write_report(report_json.resolve(), python_exe, failures, coverage)
+        write_report(
+            report_json.resolve(),
+            python_exe,
+            failures,
+            coverage,
+            integration_smoke_tests,
+        )
     log(f"{summary_prefix} {len(failures)} issue(s)")
     for index, failure in enumerate(failures, start=1):
         emit_failure(failure, index, len(failures))
@@ -460,9 +612,21 @@ def main() -> None:
         raise SystemExit(1)
 
     failures.extend(verify_profile_script(python_cmd_prefix, target_env, repo_root, verification_config, skipped_groups))
+    smoke_failures, smoke_records = verify_integration_smoke_tests(
+        python_cmd_prefix,
+        target_env,
+        repo_root,
+        integrations,
+        skipped_groups,
+    )
+    failures.extend(smoke_failures)
+    coverage["integration_smoke_test_results"] = {
+        status: sum(1 for record in smoke_records if record.get("status") == status)
+        for status in ("passed", "failed", "skipped")
+    }
 
     if args.report_json:
-        write_report(args.report_json.resolve(), python_exe, failures, coverage)
+        write_report(args.report_json.resolve(), python_exe, failures, coverage, smoke_records)
 
     if failures:
         _emit_failures(
@@ -470,6 +634,7 @@ def main() -> None:
             python_exe=python_exe,
             coverage=coverage,
             report_json=None,
+            integration_smoke_tests=smoke_records,
         )
         raise SystemExit(1)
 

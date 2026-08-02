@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
-from zipfile import BadZipFile, ZipFile
+from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile, ZipInfo
 
 from packaging.version import Version
 
@@ -29,6 +29,7 @@ from libs import (
     collect_python_link_wholearchive,
     collect_staged_static_libraries,
     collect_static_library_projects,
+    load_integration_definitions,
     load_integrations,
     run_pre_build_hooks,
     run_pre_patch_hooks,
@@ -47,6 +48,7 @@ WORK_CACHE_ROOT = REPO_ROOT / ".vendor-stage"
 MANIFEST_PATH = REPO_ROOT / "manifest.json"
 CONFIG_PATH = REPO_ROOT / "config.json"
 CPYTHON_ARCHIVE_URL_TEMPLATE = "https://github.com/python/cpython/archive/refs/tags/v{version}.zip"
+CPYTHON_SOURCE_PROVENANCE_RELATIVE_PATH = Path(".staticpython-cpython-source.json")
 DEFAULT_CPYTHON_VERSION = "3.13.2"
 WINDOWS_RESERVED_BASENAMES = {
     "CON",
@@ -72,6 +74,27 @@ STATIC_LIB_SDK_METADATA_RELATIVE_PATH = Path("metadata") / STATIC_LIB_SDK_METADA
 STATIC_LIB_SDK_PROFILE_METADATA_RELATIVE_PATH = Path("metadata") / "staticpython-profile.json"
 STATIC_LIB_SDK_README_RELATIVE_PATH = Path("README.txt")
 STATIC_LIB_SDK_LIBRARY_DIR_RELATIVE_PATH = Path("lib")
+RUNTIME_SDK_SCHEMA_VERSION = 1
+RUNTIME_SDK_METADATA_RELATIVE_PATH = Path("metadata") / "runtime-sdk.v1.json"
+RUNTIME_SDK_AUDIT_RELATIVE_PATH = Path("metadata") / "symbol-audit.json"
+RUNTIME_SDK_LIBRARY_DIR_RELATIVE_PATH = Path("lib")
+RUNTIME_SDK_INCLUDE_DIR_RELATIVE_PATH = Path("include")
+RUNTIME_SDK_FORBIDDEN_SYMBOLS = (
+    "Py_Main",
+    "Py_BytesMain",
+    "Py_RunMain",
+    "Py_SandboxMain",
+)
+STATICPYTHON_PACK_SCHEMA_VERSION = 1
+STATICPYTHON_PACK_METADATA_NAME = "pack.json"
+STATICPYTHON_PACK_SOURCE_DIR = Path("src")
+STATICPYTHON_PACK_LIBRARY_DIR = Path("lib")
+STATICPYTHON_PACK_RELEASE_FAMILIES = (
+    ("a-f", frozenset("abcdef")),
+    ("g-l", frozenset("ghijkl")),
+    ("m-r", frozenset("mnopqr")),
+    ("s-z", frozenset("stuvwxyz")),
+)
 RUNTIME_RESOURCE_MODULE_BASENAME = "_staticpython_runtime_resources"
 RUNTIME_RESOURCE_MODULE_RELATIVE_PATH = Path("Lib") / f"{RUNTIME_RESOURCE_MODULE_BASENAME}.py"
 RUNTIME_RESOURCE_STORE_MODULE = "_staticpython_resource_store"
@@ -173,13 +196,35 @@ def integration_names(integrations: list) -> list[str]:
     return [integration.name for integration in integrations]
 
 
-def integration_versions(integrations: list) -> dict[str, dict[str, str | None]]:
-    payload: dict[str, dict[str, str | None]] = {}
+def resolved_license_sources(integration) -> list[dict]:
+    records: list[dict] = []
+    for rule in integration.license_sources:
+        record = dict(rule)
+        record["url"] = str(rule["url"]).format(
+            release_version=integration.release_version,
+            project_name=integration.project_name or integration.name,
+        )
+        records.append(record)
+    return records
+
+
+def integration_versions(integrations: list) -> dict[str, dict]:
+    payload: dict[str, dict] = {}
     for integration in integrations:
         payload[integration.name] = {
             "source_provider": integration.source_provider,
+            "source_resolver": integration.source_resolver,
             "project_name": integration.project_name,
             "release_version": integration.release_version,
+            "top_level_import_names": integration.top_level_import_names or integration.python_packages,
+            "dependencies": integration.dependencies,
+            "dependency_constraints": integration.dependency_constraints,
+            "conflicts": integration.conflicts,
+            "resource_rules": integration.resource_rules,
+            "license_expression": integration.license_expression,
+            "license_files": integration.license_files,
+            "license_sources": resolved_license_sources(integration),
+            "smoke_tests": integration.smoke_tests,
         }
     return payload
 
@@ -210,6 +255,121 @@ def write_profile_metadata(
 
 def static_lib_sdk_asset_name(version_full: str, platform: str, profile: str) -> str:
     return f"python-{version_full}-static-libs-{profile}-{platform.lower()}.zip"
+
+
+def runtime_sdk_asset_name(version_full: str, platform: str) -> str:
+    return f"staticpython-runtime-sdk-{version_full}-{platform.lower()}.zip"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def git_commit_or_none(path: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def resolve_cpython_tag_commit(version: str) -> str:
+    tag_ref = f"refs/tags/v{version}"
+    result = subprocess.run(
+        ["git", "ls-remote", "https://github.com/python/cpython.git", tag_ref, f"{tag_ref}^{{}}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"could not resolve CPython v{version} commit: {result.stderr.strip()}")
+    direct = None
+    peeled = None
+    for line in result.stdout.splitlines():
+        sha, separator, ref = line.partition("\t")
+        if not separator or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+            continue
+        if ref == f"{tag_ref}^{{}}":
+            peeled = sha.lower()
+        elif ref == tag_ref:
+            direct = sha.lower()
+    commit = peeled or direct
+    if commit is None:
+        raise RuntimeError(f"could not find CPython tag v{version} in python/cpython")
+    return commit
+
+
+def write_cpython_source_provenance(
+    source_root: Path,
+    *,
+    version: str,
+    archive_url: str,
+    archive_path: Path,
+    commit: str | None,
+) -> None:
+    payload = {
+        "schema_version": 1,
+        "repository": "python/cpython",
+        "version": version,
+        "tag": f"v{version}" if commit is not None else None,
+        "commit": commit,
+        "archive_url": archive_url,
+        "archive_sha256": sha256_file(archive_path),
+    }
+    path = source_root / CPYTHON_SOURCE_PROVENANCE_RELATIVE_PATH
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+
+
+def cpython_source_provenance(source_root: Path, version_full: str) -> dict:
+    path = source_root / CPYTHON_SOURCE_PROVENANCE_RELATIVE_PATH
+    if path.is_file():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("version") != version_full:
+            raise RuntimeError(
+                f"CPython source provenance version {payload.get('version')!r} does not match {version_full}"
+            )
+        return payload
+    return {
+        "schema_version": 1,
+        "repository": "python/cpython",
+        "version": version_full,
+        "tag": None,
+        "commit": git_commit_or_none(source_root),
+        "archive_url": None,
+        "archive_sha256": None,
+    }
+
+
+def write_deterministic_zip(source_root: Path, destination: Path) -> None:
+    """Create a byte-stable ZIP from a staged directory."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        destination.unlink()
+    with ZipFile(destination, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
+        for path in sorted((item for item in source_root.rglob("*") if item.is_file()), key=lambda item: item.as_posix()):
+            relative = path.relative_to(source_root).as_posix()
+            info = ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = ZIP_DEFLATED
+            info.external_attr = 0o100644 << 16
+            info.create_system = 3
+            archive.writestr(info, path.read_bytes(), compress_type=ZIP_DEFLATED, compresslevel=9)
 
 
 def normalize_library_name(library_name: str) -> str:
@@ -981,6 +1141,844 @@ def export_static_library_sdk(
     return destination
 
 
+def _runtime_sdk_library_records(
+    source_root: Path,
+    platform: str,
+    version_info: tuple[int, int, int],
+    manifest: dict,
+    integrations: list,
+) -> list[dict]:
+    records = resolve_static_lib_sdk_records(source_root, platform, manifest, integrations)
+    by_name = {record["logical_name"]: record for record in records}
+    output_dir = get_pcbuild_output_dir(source_root, platform)
+    required = [
+        (f"python{version_info[0]}{version_info[1]}.lib", "cpython_core"),
+        ("staticpython_runtime.lib", "pack_runtime"),
+    ]
+    for logical_name, reason in required:
+        normalized = logical_name.lower()
+        if normalized in by_name:
+            if reason not in by_name[normalized]["reasons"]:
+                by_name[normalized]["reasons"].append(reason)
+            continue
+        source_path = output_dir / logical_name
+        if not source_path.exists():
+            raise RuntimeError(f"runtime SDK build did not produce required library: {source_path}")
+        record = {
+            "logical_name": normalized,
+            "archive_path": (RUNTIME_SDK_LIBRARY_DIR_RELATIVE_PATH / normalized).as_posix(),
+            "source_name": source_path.name,
+            "source_relative_path": display_path(source_path, source_root),
+            "reasons": [reason],
+            "source_path": source_path,
+        }
+        records.append(record)
+        by_name[normalized] = record
+    return records
+
+
+def audit_runtime_sdk(
+    source_root: Path,
+    version_info: tuple[int, int, int],
+    platform: str,
+) -> dict:
+    project_path = source_root / "PCbuild" / "pythoncore.vcxproj"
+    tree, root = load_msbuild_project(project_path)
+    compiled_sources = [
+        (node.get("Include") or "").replace("/", "\\")
+        for node in root.iter(msbuild_tag("ClCompile"))
+    ]
+    forbidden_sources = [
+        source for source in compiled_sources
+        if source.casefold() == "..\\modules\\main.c"
+    ]
+
+    frozen_path = source_root / "Python" / "frozen.c"
+    frozen_text = frozen_path.read_text(encoding="utf-8", errors="replace")
+    idle_entries = sorted(set(re.findall(r'"(idlelib(?:\.[^"]*)?)"', frozen_text)))
+
+    core_path = get_pcbuild_output_dir(source_root, platform) / f"python{version_info[0]}{version_info[1]}.lib"
+    if not core_path.exists():
+        raise RuntimeError(f"runtime SDK core library is missing: {core_path}")
+    dumpbin = resolve_tool_exe("dumpbin")
+    result = subprocess.run(
+        [dumpbin, "/NOLOGO", "/LINKERMEMBER:1", str(core_path)],
+        cwd=source_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"dumpbin failed while auditing {core_path}:\n{result.stdout[-4000:]}")
+    symbols = result.stdout
+    forbidden_symbols = [
+        symbol for symbol in RUNTIME_SDK_FORBIDDEN_SYMBOLS
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", symbols)
+    ]
+    main_objects = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", symbols)))
+    report = {
+        "schema_version": 1,
+        "status": "passed",
+        "core_library": display_path(core_path, source_root),
+        "pythoncore_compiled_sources": compiled_sources,
+        "forbidden_sources": forbidden_sources,
+        "forbidden_symbols": forbidden_symbols,
+        "main_object_records": main_objects,
+        "idlelib_frozen_entries": idle_entries,
+        "dumpbin_sha256": hashlib.sha256(symbols.encode("utf-8")).hexdigest(),
+    }
+    failures = [
+        ("Modules/main.c remains in pythoncore", forbidden_sources),
+        ("generic Python entry symbols remain in pythoncore", forbidden_symbols),
+        ("main.obj remains in pythoncore", main_objects),
+        ("idlelib remains in the frozen module registry", idle_entries),
+    ]
+    active_failures = [f"{label}: {values[:8]}" for label, values in failures if values]
+    if active_failures:
+        report["status"] = "failed"
+        raise RuntimeError("runtime SDK audit failed:\n" + "\n".join(active_failures))
+    return report
+
+
+def runtime_frozen_module_names(source_root: Path) -> list[str]:
+    """Return the modules actually linked into the runtime SDK frozen tables."""
+    frozen_path = source_root / "Python" / "frozen.c"
+    text = frozen_path.read_text(encoding="utf-8", errors="replace")
+    names: set[str] = set()
+    for table_name, sentinel in (
+        ("bootstrap_modules", "bootstrap sentinel"),
+        ("stdlib_modules", "stdlib sentinel"),
+    ):
+        pattern = re.compile(
+            rf"static const struct _frozen\s+{table_name}\[\]\s*=\s*\{{"
+            rf"(?P<body>.*?)\/\*\s*{re.escape(sentinel)}\s*\*\/",
+            re.DOTALL,
+        )
+        match = pattern.search(text)
+        if match is None:
+            raise RuntimeError(f"could not locate {table_name} in {frozen_path}")
+        for name in re.findall(r'^\s*\{"([^"]+)"\s*,', match.group("body"), re.MULTILINE):
+            if name:
+                names.add(name)
+    alias_pattern = re.compile(
+        r"const struct _module_alias\s+aliases\[\]\s*=\s*\{"
+        r"(?P<body>.*?)\/\*\s*aliases sentinel\s*\*\/",
+        re.DOTALL,
+    )
+    alias_match = alias_pattern.search(text)
+    if alias_match is not None:
+        names.update(
+            name
+            for name in re.findall(r'^\s*\{"([^"]+)"\s*,', alias_match.group("body"), re.MULTILINE)
+            if name
+        )
+    return sorted(names, key=str.casefold)
+
+
+def runtime_builtin_module_names(source_root: Path) -> list[str]:
+    """Return the exact names registered in the target CPython inittab."""
+    config_path = source_root / "PC" / "config.c"
+    text = config_path.read_text(encoding="utf-8", errors="replace")
+    table = re.search(
+        r"struct\s+_inittab\s+_PyImport_Inittab\s*\[\s*\]\s*=\s*\{",
+        text,
+    )
+    if table is None:
+        raise RuntimeError(f"could not locate _PyImport_Inittab in {config_path}")
+    tail = text[table.end():]
+    sentinel = re.search(
+        r"^\s*\{\s*(?:0|NULL)\s*,\s*(?:0|NULL)\s*\}\s*,?",
+        tail,
+        re.MULTILINE,
+    )
+    if sentinel is None:
+        raise RuntimeError(f"could not locate _PyImport_Inittab sentinel in {config_path}")
+    names = {
+        name
+        for name in re.findall(r'^\s*\{\s*"([^"]+)"\s*,', tail[:sentinel.start()], re.MULTILINE)
+        if name
+    }
+    if not names:
+        raise RuntimeError(f"_PyImport_Inittab contains no modules in {config_path}")
+    return sorted(names, key=str.casefold)
+
+
+def resolve_runtime_sdk_pyconfig_header(source_root: Path, platform: str) -> Path:
+    candidates = [
+        get_pcbuild_output_dir(source_root, platform) / "pyconfig.h",
+        source_root / "PC" / "pyconfig.h",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    rendered = "\n".join(f"- {candidate}" for candidate in candidates)
+    raise RuntimeError(
+        "runtime SDK build did not produce a usable pyconfig.h; checked:\n"
+        + rendered
+    )
+
+
+def export_runtime_sdk(
+    source_root: Path,
+    output_dir: Path,
+    version_info: tuple[int, int, int],
+    version_full: str,
+    platform: str,
+    profile_name: str,
+    manifest: dict,
+    integrations: list,
+) -> Path:
+    if profile_name != "runtime-sdk":
+        raise RuntimeError("runtime SDK export requires the runtime-sdk profile")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    records = _runtime_sdk_library_records(source_root, platform, version_info, manifest, integrations)
+    audit = audit_runtime_sdk(source_root, version_info, platform)
+    destination = output_dir / runtime_sdk_asset_name(version_full, platform)
+
+    with tempfile.TemporaryDirectory(prefix="staticpython-runtime-sdk-export-") as temp_dir:
+        staging_root = Path(temp_dir)
+        library_dir = staging_root / RUNTIME_SDK_LIBRARY_DIR_RELATIVE_PATH
+        include_dir = staging_root / RUNTIME_SDK_INCLUDE_DIR_RELATIVE_PATH
+        library_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_root / "Include", include_dir, dirs_exist_ok=True)
+        shutil.copy2(resolve_runtime_sdk_pyconfig_header(source_root, platform), include_dir / "pyconfig.h")
+        for record in records:
+            shutil.copy2(record["source_path"], library_dir / record["logical_name"])
+
+        licenses_dir = staging_root / "licenses"
+        licenses_dir.mkdir(parents=True, exist_ok=True)
+        license_sources = [
+            (source_root / "LICENSE", "CPython-LICENSE.txt"),
+            (REPO_ROOT / "LICENSE", "StaticPython-LICENSE.txt"),
+            (REPO_ROOT / "NOTICE", "StaticPython-NOTICE.txt"),
+            (REPO_ROOT / "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md"),
+        ]
+        for source, target_name in license_sources:
+            if source.exists():
+                shutil.copy2(source, licenses_dir / target_name)
+
+        audit_path = staging_root / RUNTIME_SDK_AUDIT_RELATIVE_PATH
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+
+        profile_path = profile_metadata_path(source_root)
+        if profile_path.exists():
+            profile_target = staging_root / "metadata" / "staticpython-profile.json"
+            profile_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(profile_path, profile_target)
+
+        link_dependencies = iter_python_link_dependencies(source_root, manifest, integrations)
+        system_libraries = [
+            normalize_library_name(name)
+            for name in link_dependencies
+            if is_windows_system_library(name) or is_windows_sdk_library(name)
+        ]
+        packaged_libraries = [record["logical_name"] for record in records]
+        core_library = f"python{version_info[0]}{version_info[1]}.lib"
+        ordered_libraries = [
+            "staticpython_runtime.lib",
+            *[
+                normalize_library_name(name)
+                for name in link_dependencies
+                if is_packaged_static_library(name)
+            ],
+            core_library,
+        ]
+        ordered_libraries = [name for name in dict.fromkeys(ordered_libraries) if name in packaged_libraries]
+
+        file_records = []
+        for path in sorted((item for item in staging_root.rglob("*") if item.is_file()), key=lambda item: item.as_posix()):
+            relative = path.relative_to(staging_root).as_posix()
+            file_records.append({
+                "path": relative,
+                "size": path.stat().st_size,
+                "sha256": sha256_file(path),
+            })
+        cpython_source = cpython_source_provenance(source_root, version_full)
+        builtin_registrations = iter_builtin_module_registrations(source_root, manifest, integrations)
+        builtin_module_names = runtime_builtin_module_names(source_root)
+        frozen_module_names = runtime_frozen_module_names(source_root)
+        stdlib_top_level_import_names = sorted(
+            {
+                name.split(".", 1)[0]
+                for name in [
+                    *frozen_module_names,
+                    *builtin_module_names,
+                    *(registration["name"] for registration in builtin_registrations),
+                ]
+                if name
+            },
+            key=str.casefold,
+        )
+        metadata = {
+            "schema_version": RUNTIME_SDK_SCHEMA_VERSION,
+            "kind": "staticpython-runtime-sdk",
+            "runtime_abi": f"staticpython-pack-v1-cp{version_info[0]}{version_info[1]}",
+            "cpython_version": version_full,
+            "cpython_abi": f"cp{version_info[0]}{version_info[1]}",
+            "platform": platform.lower(),
+            "profile_name": profile_name,
+            "staticpython_commit": git_commit_or_none(REPO_ROOT),
+            "cpython_commit": cpython_source.get("commit"),
+            "cpython_tag": cpython_source.get("tag"),
+            "cpython_source": cpython_source,
+            "toolchain": {
+                "visual_studio_version": os.environ.get("VisualStudioVersion"),
+                "vscmd_version": os.environ.get("VSCMD_VER"),
+                "vc_tools_version": os.environ.get("VCToolsVersion"),
+                "windows_sdk_version": os.environ.get("WindowsSDKVersion"),
+                "platform_toolset": "v143",
+                "runtime_library": "MultiThreaded",
+            },
+            "base_pack_symbol": "StaticPython_BaseResourcePackV1",
+            "pack_registration_function": "StaticPython_RegisterPacks",
+            "include_directory": RUNTIME_SDK_INCLUDE_DIR_RELATIVE_PATH.as_posix(),
+            "library_directory": RUNTIME_SDK_LIBRARY_DIR_RELATIVE_PATH.as_posix(),
+            "core_library": core_library,
+            "runtime_library": "staticpython_runtime.lib",
+            "link_libraries": ordered_libraries,
+            "system_libraries": list(dict.fromkeys(system_libraries)),
+            "builtin_module_registrations": builtin_registrations,
+            "builtin_module_names": builtin_module_names,
+            "frozen_module_names": frozen_module_names,
+            "stdlib_top_level_import_names": stdlib_top_level_import_names,
+            "libraries": [
+                {
+                    "logical_name": record["logical_name"],
+                    "archive_path": record["archive_path"],
+                    "reasons": record["reasons"],
+                }
+                for record in records
+            ],
+            "verification": {
+                "status": audit["status"],
+                "symbol_audit": RUNTIME_SDK_AUDIT_RELATIVE_PATH.as_posix(),
+                "generic_executable_published": False,
+            },
+            "files": file_records,
+        }
+        metadata_path = staging_root / RUNTIME_SDK_METADATA_RELATIVE_PATH
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+        (staging_root / "README.txt").write_text(
+            "StaticPython runtime SDK for PySuture\n\n"
+            f"CPython: {version_full} ({metadata['cpython_abi']})\n"
+            f"Runtime ABI: {metadata['runtime_abi']}\n"
+            "This SDK contains no generic python.exe, REPL, IDLE, or script runner.\n"
+            "Call StaticPython_RegisterPacks before Py_InitializeFromConfig.\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        write_deterministic_zip(staging_root, destination)
+
+    log(f"copied runtime SDK to {destination}")
+    return destination
+
+
+def _pack_slug(value: str) -> str:
+    slug = re.sub(r"[^0-9A-Za-z_.-]+", "-", value).strip("-.").lower()
+    if not slug:
+        raise RuntimeError(f"could not derive a safe pack name from {value!r}")
+    return slug
+
+
+def staticpython_pack_release_family(name: str) -> str:
+    first = name[:1].casefold()
+    for family, initials in STATICPYTHON_PACK_RELEASE_FAMILIES:
+        if first in initials:
+            return family
+    return "other"
+
+
+def _c_identifier(value: str) -> str:
+    identifier = re.sub(r"[^0-9A-Za-z_]", "_", value)
+    if not identifier or identifier[0].isdigit():
+        identifier = "_" + identifier
+    return identifier
+
+
+def staticpython_pack_asset_name(
+    name: str,
+    version: str,
+    version_info: tuple[int, int, int],
+    platform: str,
+) -> str:
+    return (
+        f"staticpython-pack-{_pack_slug(name)}-{_pack_slug(version)}-"
+        f"cp{version_info[0]}{version_info[1]}-{platform.lower()}.zip"
+    )
+
+
+def _integration_frozen_modules(source_root: Path, integration) -> list[dict]:
+    builtin_names = {
+        registration.get("name")
+        for registration in integration.builtin_module_registrations
+        if isinstance(registration, dict) and isinstance(registration.get("name"), str)
+    }
+    prefixes = [
+        name
+        for name in integration.python_packages
+        if isinstance(name, str) and name and name not in builtin_names
+    ]
+    frozen_dir = source_root / "Python" / "frozen_modules"
+    records: list[dict] = []
+    for header in sorted(frozen_dir.glob("*.h"), key=lambda path: path.name.casefold()):
+        module_name = header.stem
+        if not any(module_name == prefix or module_name.startswith(prefix + ".") for prefix in prefixes):
+            continue
+        symbol, size = parse_frozen_header_info(header)
+        module_path = source_root / "Lib" / Path(*module_name.split("."))
+        records.append({
+            "name": module_name,
+            "symbol": symbol,
+            "size": size,
+            "is_package": (module_path / "__init__.py").exists(),
+            "header": header,
+        })
+    if prefixes and not records:
+        raise RuntimeError(
+            f"no frozen modules were found for {integration.name}: {', '.join(prefixes)}"
+        )
+    return records
+
+
+def _integration_native_libraries(source_root: Path, platform: str, integration) -> tuple[list[dict], list[str], list[str]]:
+    logical_names: list[str] = []
+    wholearchive = [normalize_library_name(name) for name in integration.python_link_wholearchive_release_x64]
+    combined = [
+        *integration.python_link_dependencies_release_x64,
+        *[f"{Path(project).stem}.lib" for project in integration.static_library_projects_release_x64],
+        *[
+            entry["target_name"]
+            for entry in integration.staged_static_libraries_release_x64
+            if isinstance(entry, dict) and isinstance(entry.get("target_name"), str)
+        ],
+    ]
+    system_libraries: list[str] = []
+    for name in combined:
+        normalized = normalize_library_name(name)
+        if is_windows_system_library(normalized) or is_windows_sdk_library(normalized):
+            system_libraries.append(normalized)
+        elif is_packaged_static_library(normalized):
+            logical_names.append(normalized)
+    logical_names = list(dict.fromkeys(logical_names))
+    index = index_library_files(source_root, platform)
+    records: list[dict] = []
+    missing: list[str] = []
+    for logical_name in logical_names:
+        candidates = index.get(logical_name, [])
+        if not candidates:
+            missing.append(logical_name)
+            continue
+        records.append({
+            "logical_name": logical_name,
+            "source_path": candidates[0],
+            "archive_path": (STATICPYTHON_PACK_LIBRARY_DIR / logical_name).as_posix(),
+        })
+    if missing:
+        raise RuntimeError(
+            f"could not locate native libraries for pack {integration.name}: {', '.join(missing)}"
+        )
+    return records, list(dict.fromkeys(wholearchive)), list(dict.fromkeys(system_libraries))
+
+
+def _integration_source_hash(source_root: Path, integration) -> tuple[str, list[dict]]:
+    hasher = hashlib.sha256()
+    records: list[dict] = []
+    paths: list[Path] = []
+    for relative in integration.materialized_paths:
+        target = source_root / relative
+        if target.is_file():
+            paths.append(target)
+        elif target.is_dir():
+            paths.extend(path for path in target.rglob("*") if path.is_file())
+    for path in sorted(set(paths), key=lambda item: item.as_posix().casefold()):
+        relative = path.relative_to(source_root).as_posix()
+        digest = sha256_file(path)
+        hasher.update(relative.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(digest.encode("ascii"))
+        hasher.update(b"\n")
+        records.append({"path": relative, "sha256": digest, "size": path.stat().st_size})
+    return hasher.hexdigest(), records
+
+
+def _integration_license_files(source_root: Path, integration) -> tuple[list[Path], str]:
+    candidates: list[Path] = []
+    if integration.license_files:
+        for relative in integration.license_files:
+            path = source_root / relative
+            if not path.is_file():
+                raise RuntimeError(f"declared license file for {integration.name} is missing: {path}")
+            candidates.append(path)
+    else:
+        license_prefixes = ("license", "copying", "notice", "copyright")
+        for relative in integration.materialized_paths:
+            root = source_root / relative
+            if root.is_file():
+                root = root.parent
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*"):
+                if path.is_file() and path.name.casefold().startswith(license_prefixes) and path.stat().st_size <= 2 * 1024 * 1024:
+                    candidates.append(path)
+    unique = sorted(set(candidates), key=lambda item: item.as_posix().casefold())
+    expression = integration.license_expression
+    complete = bool(unique and expression and not expression.casefold().startswith("licenseref-unresolved"))
+    return unique, "complete" if complete else "missing"
+
+
+def _write_pack_descriptor_source(
+    staging_root: Path,
+    integration,
+    version_info: tuple[int, int, int],
+    frozen_records: list[dict],
+    resource_records: list[dict],
+    native_records: list[dict],
+    system_libraries: list[str],
+) -> str:
+    source_dir = staging_root / STATICPYTHON_PACK_SOURCE_DIR
+    frozen_dir = source_dir / "frozen"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    frozen_dir.mkdir(parents=True, exist_ok=True)
+    for record in frozen_records:
+        shutil.copy2(record["header"], frozen_dir / record["header"].name)
+
+    include_lines = [f'#include "frozen/{record["header"].name}"' for record in frozen_records]
+    frozen_lines = [
+        "    STATICPYTHON_FROZEN_ENTRY("
+        f"{_c_bytes_literal(record['name'])}, {record['symbol']}, {record['size']}, "
+        f"{1 if record['is_package'] else 0}),"
+        for record in frozen_records
+    ]
+    builtin_lines = []
+    builtin_externs = []
+    for registration in integration.builtin_module_registrations:
+        builtin_externs.append(f"extern PyObject *{registration['pyinit']}(void);")
+        builtin_lines.append(
+            f"    {{{_c_bytes_literal(registration['name'])}, {registration['pyinit']}}},"
+        )
+
+    resource_lines = []
+    for record in resource_records:
+        resource_lines.append(
+            "    {"
+            f"{_c_bytes_literal(record['path'])}, NULL, NULL, {record['symbol']}, "
+            f"{record['compressed_size']}, {record['size']}, STATICPYTHON_RESOURCE_ZLIB"
+            "},"
+        )
+    dependency_lines = [f"    {_c_bytes_literal(name)}," for name in integration.dependencies]
+    library_lines = [f"    {_c_bytes_literal(record['logical_name'])}," for record in native_records]
+    system_lines = [f"    {_c_bytes_literal(name)}," for name in system_libraries]
+    symbol = f"StaticPython_Pack_{_c_identifier(integration.name)}"
+
+    def array_or_dummy(lines: list[str], dummy: str) -> str:
+        return "\n".join(lines or [f"    {dummy},"])
+
+    descriptor = source_dir / "pack.c"
+    descriptor.write_text(
+        "/* Auto-generated by StaticPython. SPDX-License-Identifier: Apache-2.0 */\n"
+        "#include \"Python.h\"\n"
+        "#include \"staticpython_pack.h\"\n\n"
+        + ("\n".join(include_lines) + "\n\n" if include_lines else "")
+        + ("\n".join(builtin_externs) + "\n\n" if builtin_externs else "")
+        + "#if PY_VERSION_HEX < 0x030D0000\n"
+        + "#  define STATICPYTHON_FROZEN_ENTRY(name, code, size, package) {name, code, size, package, NULL}\n"
+        + "#else\n"
+        + "#  define STATICPYTHON_FROZEN_ENTRY(name, code, size, package) {name, code, size, package}\n"
+        + "#endif\n\n"
+        + "#define STATICPYTHON_STRINGIFY_INNER(value) #value\n"
+        + "#define STATICPYTHON_STRINGIFY(value) STATICPYTHON_STRINGIFY_INNER(value)\n"
+        + "#define STATICPYTHON_CPYTHON_ABI \\\n"
+        + "    \"cp\" STATICPYTHON_STRINGIFY(PY_MAJOR_VERSION) STATICPYTHON_STRINGIFY(PY_MINOR_VERSION)\n\n"
+        + "static const StaticPythonFrozenModuleV1 staticpython_frozen_modules[] = {\n"
+        + array_or_dummy(frozen_lines, "{0}")
+        + "\n};\n\n"
+        + "static const StaticPythonBuiltinModuleV1 staticpython_builtin_modules[] = {\n"
+        + array_or_dummy(builtin_lines, "{0}")
+        + "\n};\n\n"
+        + "static const StaticPythonResourceV1 staticpython_resources[] = {\n"
+        + array_or_dummy(resource_lines, "{0}")
+        + "\n};\n\n"
+        + "static const char *const staticpython_dependencies[] = {\n"
+        + array_or_dummy(dependency_lines, "NULL")
+        + "\n};\n\n"
+        + "static const char *const staticpython_link_libraries[] = {\n"
+        + array_or_dummy(library_lines, "NULL")
+        + "\n};\n\n"
+        + "static const char *const staticpython_system_libraries[] = {\n"
+        + array_or_dummy(system_lines, "NULL")
+        + "\n};\n\n"
+        + f"const StaticPythonPackV1 {symbol} = {{\n"
+        + "    sizeof(StaticPythonPackV1),\n"
+        + "    STATICPYTHON_PACK_ABI_VERSION,\n"
+        + f"    {_c_bytes_literal(integration.name)},\n"
+        + f"    {_c_bytes_literal(integration.release_version)},\n"
+        + "    STATICPYTHON_CPYTHON_ABI,\n"
+        + f"    staticpython_frozen_modules, {len(frozen_records)},\n"
+        + f"    staticpython_builtin_modules, {len(builtin_lines)},\n"
+        + f"    staticpython_resources, {len(resource_records)},\n"
+        + f"    staticpython_dependencies, {len(dependency_lines)},\n"
+        + f"    staticpython_link_libraries, {len(library_lines)},\n"
+        + f"    staticpython_system_libraries, {len(system_lines)},\n"
+        + "    NULL\n"
+        + "};\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return symbol
+
+
+def export_library_pack(
+    source_root: Path,
+    output_dir: Path,
+    version_info: tuple[int, int, int],
+    version_full: str,
+    platform: str,
+    integration,
+    *,
+    verification_status: str = "not-run",
+    verification_report: dict | None = None,
+) -> Path:
+    if integration.release_version is None:
+        raise RuntimeError(f"pack {integration.name} does not have a resolved release version")
+    frozen_records = _integration_frozen_modules(source_root, integration)
+    native_records, wholearchive, system_libraries = _integration_native_libraries(source_root, platform, integration)
+    resource_files = collect_runtime_resource_files(source_root, [integration])
+    source_tree_hash, source_file_records = _integration_source_hash(source_root, integration)
+    license_files, license_status = _integration_license_files(source_root, integration)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    destination = output_dir / staticpython_pack_asset_name(
+        integration.name,
+        integration.release_version,
+        version_info,
+        platform,
+    )
+
+    with tempfile.TemporaryDirectory(prefix=f"staticpython-pack-{_pack_slug(integration.name)}-") as temp_dir:
+        staging_root = Path(temp_dir)
+        pack_symbol_prefix = _c_identifier(integration.name)
+        library_dir = staging_root / STATICPYTHON_PACK_LIBRARY_DIR
+        library_dir.mkdir(parents=True, exist_ok=True)
+        for record in native_records:
+            shutil.copy2(record["source_path"], library_dir / record["logical_name"])
+
+        resource_records: list[dict] = []
+        resource_source_dir = staging_root / STATICPYTHON_PACK_SOURCE_DIR / "resources"
+        resource_source_dir.mkdir(parents=True, exist_ok=True)
+        for index, (relative, path) in enumerate(sorted(resource_files.items()), start=1):
+            payload = path.read_bytes()
+            compressed = zlib.compress(payload, level=9)
+            symbol = (
+                f"staticpython_pack_{pack_symbol_prefix}_resource_"
+                f"{index:06d}_{hashlib.sha256(payload).hexdigest()[:16]}"
+            )
+            values = [str(value) for value in compressed]
+            rows = ["    " + ", ".join(values[offset : offset + 24]) + "," for offset in range(0, len(values), 24)]
+            resource_path = resource_source_dir / f"resource_{index:06d}.c"
+            resource_path.write_text(
+                "/* Auto-generated by StaticPython. */\n"
+                "#include <stddef.h>\n\n"
+                f"const unsigned char {symbol}[] = {{\n"
+                + ("\n".join(rows) if rows else "    0,")
+                + "\n};\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            resource_records.append({
+                "path": relative,
+                "symbol": symbol,
+                "size": len(payload),
+                "compressed_size": len(compressed),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "source": resource_path.relative_to(staging_root).as_posix(),
+            })
+
+        descriptor_symbol = _write_pack_descriptor_source(
+            staging_root,
+            integration,
+            version_info,
+            frozen_records,
+            resource_records,
+            native_records,
+            system_libraries,
+        )
+        descriptor_path = staging_root / STATICPYTHON_PACK_SOURCE_DIR / "pack.c"
+        descriptor_text = descriptor_path.read_text(encoding="utf-8")
+        extern_lines = [f"extern const unsigned char {record['symbol']}[];" for record in resource_records]
+        if extern_lines:
+            descriptor_text = descriptor_text.replace(
+                '#include "staticpython_pack.h"\n',
+                '#include "staticpython_pack.h"\n\n' + "\n".join(extern_lines) + "\n",
+                1,
+            )
+            descriptor_path.write_text(descriptor_text, encoding="utf-8", newline="\n")
+
+        licenses_dir = staging_root / "licenses"
+        licenses_dir.mkdir(parents=True, exist_ok=True)
+        license_records = []
+        used_names: set[str] = set()
+        license_source_records: dict[tuple[str, str], tuple[Path, str]] = {}
+        for source in license_files:
+            digest = sha256_file(source)
+            license_source_records.setdefault(
+                (source.name.casefold(), digest),
+                (source, digest),
+            )
+        for source, digest in sorted(
+            license_source_records.values(),
+            key=lambda record: (record[0].name.casefold(), record[1]),
+        ):
+            name = source.name
+            if name.casefold() in used_names:
+                name = f"{digest[:12]}-{name}"
+            used_names.add(name.casefold())
+            target = licenses_dir / name
+            shutil.copy2(source, target)
+            license_records.append(target.relative_to(staging_root).as_posix())
+
+        artifact_files = []
+        for path in sorted((item for item in staging_root.rglob("*") if item.is_file()), key=lambda item: item.as_posix()):
+            artifact_files.append({
+                "path": path.relative_to(staging_root).as_posix(),
+                "size": path.stat().st_size,
+                "sha256": sha256_file(path),
+            })
+        cpython_source = cpython_source_provenance(source_root, version_full)
+        smoke_test_records = []
+        if isinstance(verification_report, dict):
+            for record in verification_report.get("integration_smoke_tests", []):
+                if not isinstance(record, dict) or record.get("integration") != integration.name:
+                    continue
+                smoke_test_records.append({
+                    key: record[key]
+                    for key in ("name", "kind", "status", "skip_group")
+                    if key in record
+                })
+        metadata = {
+            "schema_version": STATICPYTHON_PACK_SCHEMA_VERSION,
+            "kind": "staticpython-library-pack",
+            "name": integration.name,
+            "version": integration.release_version,
+            "project_name": integration.project_name,
+            "source_provider": integration.source_provider,
+            "source_resolver": integration.source_resolver,
+            "source_tree_sha256": source_tree_hash,
+            "source_files": source_file_records,
+            "staticpython_commit": git_commit_or_none(REPO_ROOT),
+            "cpython_version": version_full,
+            "cpython_commit": cpython_source.get("commit"),
+            "cpython_tag": cpython_source.get("tag"),
+            "cpython_source": cpython_source,
+            "cpython_abi": f"cp{version_info[0]}{version_info[1]}",
+            "runtime_abi": f"staticpython-pack-v1-cp{version_info[0]}{version_info[1]}",
+            "platform": platform.lower(),
+            "descriptor_symbol": descriptor_symbol,
+            "descriptor_source": (STATICPYTHON_PACK_SOURCE_DIR / "pack.c").as_posix(),
+            "sources": [
+                (STATICPYTHON_PACK_SOURCE_DIR / "pack.c").as_posix(),
+                *[record["source"] for record in resource_records],
+            ],
+            "frozen_modules": [record["name"] for record in frozen_records],
+            "top_level_import_names": integration.top_level_import_names or integration.python_packages,
+            "builtin_modules": integration.builtin_module_registrations,
+            "resources": resource_records,
+            "dependencies": integration.dependencies,
+            "dependency_constraints": integration.dependency_constraints,
+            "conflicts": integration.conflicts,
+            "libraries": [record["logical_name"] for record in native_records],
+            "wholearchive": wholearchive,
+            "system_libraries": system_libraries,
+            "link_order": [record["logical_name"] for record in native_records],
+            "toolchain": {
+                "platform_toolset": "v143",
+                "runtime_library": "MultiThreaded",
+                "visual_studio_version": os.environ.get("VisualStudioVersion"),
+                "vscmd_version": os.environ.get("VSCMD_VER"),
+                "vc_tools_version": os.environ.get("VCToolsVersion"),
+                "windows_sdk_version": os.environ.get("WindowsSDKVersion"),
+            },
+            "license": {
+                "expression": integration.license_expression,
+                "status": license_status,
+                "files": license_records,
+                "sources": resolved_license_sources(integration),
+            },
+            "smoke_tests": integration.smoke_tests or [
+                {"kind": "import", "module": name}
+                for name in (integration.top_level_import_names or integration.python_packages)
+            ],
+            "verification": {
+                "status": verification_status,
+                "smoke_tests": smoke_test_records,
+            },
+            "files": artifact_files,
+        }
+        (staging_root / STATICPYTHON_PACK_METADATA_NAME).write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+            newline="\n",
+        )
+        write_deterministic_zip(staging_root, destination)
+
+    log(f"copied library pack {integration.name} {integration.release_version} to {destination}")
+    return destination
+
+
+def export_library_packs(
+    source_root: Path,
+    output_dir: Path,
+    version_info: tuple[int, int, int],
+    version_full: str,
+    platform: str,
+    integrations: list,
+    *,
+    verification_status: str = "not-run",
+    verification_report: dict | None = None,
+) -> list[Path]:
+    return [
+        export_library_pack(
+            source_root,
+            output_dir,
+            version_info,
+            version_full,
+            platform,
+            integration,
+            verification_status=verification_status,
+            verification_report=verification_report,
+        )
+        for integration in integrations
+    ]
+
+
+def select_output_pack_integrations(integrations: list, requested_names: list[str]) -> list:
+    if not requested_names:
+        return list(integrations)
+    by_name = {integration.name.casefold(): integration for integration in integrations}
+    selected = []
+    missing = []
+    seen: set[str] = set()
+    for requested_name in requested_names:
+        key = requested_name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        integration = by_name.get(key)
+        if integration is None:
+            missing.append(requested_name)
+            continue
+        selected.append(integration)
+    if missing:
+        raise RuntimeError(
+            "--output-pack-name did not match a selected integration: "
+            + ", ".join(sorted(missing, key=str.casefold))
+        )
+    return selected
+
+
 def detect_static_lib_sdk_root(path: Path) -> Path:
     if static_lib_sdk_metadata_path(path).exists():
         return path
@@ -1345,7 +2343,15 @@ def parse_cpython_version(source_root: Path) -> tuple[tuple[int, int, int], str,
     minor = define("PY_MINOR_VERSION")
     micro = define("PY_MICRO_VERSION")
     version_info = (int(major), int(minor), int(micro))
-    return version_info, f"{major}.{minor}", f"{major}.{minor}.{micro}"
+    version_match = re.search(r'^#define PY_VERSION\s+"([^"]+)"', text, flags=re.MULTILINE)
+    if not version_match:
+        raise RuntimeError(f"could not find PY_VERSION in {patchlevel}")
+    version_full, parsed_version_info = parse_version_string(version_match.group(1))
+    if parsed_version_info != version_info:
+        raise RuntimeError(
+            f"PY_VERSION {version_full!r} does not match numeric version macros {version_info}"
+        )
+    return version_info, f"{major}.{minor}", version_full
 
 
 def iter_overlay_entries(manifest: dict, integrations: list, version_info: tuple[int, int, int]) -> list[str]:
@@ -1973,14 +2979,79 @@ def _write_runtime_resource_group_module(
     return len(target_records), len(blob_records), len(shard_module_names), index_module_name, store_records
 
 
-def write_runtime_resource_module(source_root: Path, integrations: list) -> None:
+def _write_staticpython_pack_resource_store_c(
+    source_root: Path,
+    *,
+    target_records: list[tuple[str, str, str, int]],
+) -> None:
+    """Write the runtime-sdk base resource descriptor.
+
+    Payloads remain in the frozen resource shard modules.  The descriptor is
+    compiled into staticpython_runtime.lib and lets the common C provider
+    resolve resources across the base SDK and every selected library pack.
+    """
+    store_path = source_root / RUNTIME_RESOURCE_STORE_C_RELATIVE_PATH
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    entries = [
+        "    {"
+        f"{_c_bytes_literal(relative)}, "
+        f"{_c_bytes_literal(module_name)}, "
+        f"{_c_bytes_literal(blob_id)}, "
+        "NULL, 0, "
+        f"{size}, STATICPYTHON_RESOURCE_RAW"
+        "},"
+        for relative, module_name, blob_id, size in sorted(target_records, key=lambda item: item[0])
+    ]
+    entries_for_c = entries or [
+        f"    {{{_c_bytes_literal('')}, NULL, NULL, NULL, 0, 0, STATICPYTHON_RESOURCE_RAW}},"
+    ]
+    store_path.write_text(
+        "/* Auto-generated by StaticPython. Do not edit. */\n"
+        "#include \"Python.h\"\n"
+        "#include \"staticpython_pack.h\"\n\n"
+        "#define STATICPYTHON_STRINGIFY_INNER(value) #value\n"
+        "#define STATICPYTHON_STRINGIFY(value) STATICPYTHON_STRINGIFY_INNER(value)\n"
+        "#define STATICPYTHON_CPYTHON_ABI \\\n"
+        "    \"cp\" STATICPYTHON_STRINGIFY(PY_MAJOR_VERSION) STATICPYTHON_STRINGIFY(PY_MINOR_VERSION)\n\n"
+        "static const StaticPythonResourceV1 staticpython_base_resources[] = {\n"
+        + "\n".join(entries_for_c)
+        + "\n};\n\n"
+        "const StaticPythonPackV1 StaticPython_BaseResourcePackV1 = {\n"
+        "    sizeof(StaticPythonPackV1),\n"
+        "    STATICPYTHON_PACK_ABI_VERSION,\n"
+        "    \"staticpython-runtime-sdk\",\n"
+        "    PY_VERSION,\n"
+        "    STATICPYTHON_CPYTHON_ABI,\n"
+        "    NULL, 0,\n"
+        "    NULL, 0,\n"
+        "    staticpython_base_resources,\n"
+        f"    {len(entries)},\n"
+        "    NULL, 0,\n"
+        "    NULL, 0,\n"
+        "    NULL, 0,\n"
+        "    NULL\n"
+        "};\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def write_runtime_resource_module(
+    source_root: Path,
+    integrations: list,
+    *,
+    pack_descriptor: bool = False,
+) -> None:
     module_path = source_root / RUNTIME_RESOURCE_MODULE_RELATIVE_PATH
     module_path.parent.mkdir(parents=True, exist_ok=True)
     _cleanup_runtime_resource_modules(source_root)
 
     resource_files = collect_runtime_resource_files(source_root, integrations)
     if not resource_files:
-        _write_staticpython_resource_store_c(source_root, target_records=[])
+        if pack_descriptor:
+            _write_staticpython_pack_resource_store_c(source_root, target_records=[])
+        else:
+            _write_staticpython_resource_store_c(source_root, target_records=[])
         module_path.write_text(
             "# Auto-generated by StaticPython. Do not edit.\n"
             'RESOURCE_MANIFEST_HASH = "0" * 64\n'
@@ -2029,7 +3100,10 @@ def write_runtime_resource_module(source_root: Path, integrations: list) -> None
         shard_count += shards
         store_target_records.extend(store_records)
 
-    _write_staticpython_resource_store_c(source_root, target_records=store_target_records)
+    if pack_descriptor:
+        _write_staticpython_pack_resource_store_c(source_root, target_records=store_target_records)
+    else:
+        _write_staticpython_resource_store_c(source_root, target_records=store_target_records)
 
     group_lines = [
         "    " + repr(prefix) + f": {module_name!r},"
@@ -2306,7 +3380,7 @@ def patch_pyproject_props(source_root: Path) -> None:
         save_msbuild_project(path, tree)
 
 
-def patch_pythoncore_vcxproj(source_root: Path) -> None:
+def patch_pythoncore_vcxproj(source_root: Path, *, runtime_sdk: bool = False) -> None:
     path = source_root / "PCbuild" / "pythoncore.vcxproj"
     tree, root = load_msbuild_project(path)
 
@@ -2349,9 +3423,13 @@ def patch_pythoncore_vcxproj(source_root: Path) -> None:
                 count=1,
             )
 
+    removable_sources = {"..\\Modules\\challenge.c", "..\\Modules\\sandbox.c"}
+    if runtime_sdk:
+        removable_sources.add("..\\Modules\\main.c")
     for item_group in find_direct_children(root, "ItemGroup"):
         for child in list(item_group):
-            if child.tag == msbuild_tag("ClCompile") and child.get("Include") in {"..\\Modules\\challenge.c", "..\\Modules\\sandbox.c"}:
+            include = (child.get("Include") or "").replace("/", "\\")
+            if child.tag == msbuild_tag("ClCompile") and include in removable_sources:
                 item_group.remove(child)
 
     resource_store_include = "..\\Python\\staticpython_resource_store.c"
@@ -2363,11 +3441,17 @@ def patch_pythoncore_vcxproj(source_root: Path) -> None:
                 break
         if resource_store_compile is not None:
             break
-    if resource_store_compile is None:
+    if runtime_sdk and resource_store_compile is not None:
+        for item_group in find_direct_children(root, "ItemGroup"):
+            if resource_store_compile in list(item_group):
+                item_group.remove(resource_store_compile)
+                break
+    elif not runtime_sdk and resource_store_compile is None:
         item_group = ensure_item_group_with_tag(root, "ClCompile")
         resource_store_compile = ET.SubElement(item_group, msbuild_tag("ClCompile"))
         resource_store_compile.set("Include", resource_store_include)
-    set_frozen_data_compile_options(resource_store_compile)
+    if not runtime_sdk and resource_store_compile is not None:
+        set_frozen_data_compile_options(resource_store_compile)
 
     save_msbuild_project(path, tree)
 
@@ -2422,7 +3506,13 @@ def patch_python_vcxproj(source_root: Path, manifest: dict, integrations: list) 
     save_msbuild_project(path, tree)
 
 
-def patch_pc_config(source_root: Path, manifest: dict, integrations: list) -> None:
+def patch_pc_config(
+    source_root: Path,
+    manifest: dict,
+    integrations: list,
+    *,
+    runtime_sdk: bool = False,
+) -> None:
     path = source_root / "PC" / "config.c"
     text = path.read_text(encoding="utf-8")
 
@@ -2443,13 +3533,13 @@ def patch_pc_config(source_root: Path, manifest: dict, integrations: list) -> No
     baseline_extern_lines = [
         "extern PyObject* PyMarshal_Init(void);",
         "extern PyObject* PyInit__imp(void);",
-        "extern PyObject* PyInit__staticpython_resource_store(void);",
     ]
+    if not runtime_sdk:
+        baseline_extern_lines.append("extern PyObject* PyInit__staticpython_resource_store(void);")
     extern_lines = [*baseline_extern_lines, *[f"extern PyObject* {pyinit}(void);" for _, pyinit in registrations]]
-    table_lines = [
-        f'    {{"{RUNTIME_RESOURCE_STORE_MODULE}", PyInit__staticpython_resource_store}},',
-        *[f'    {{"{name}", {pyinit}}},' for name, pyinit in registrations],
-    ]
+    table_lines = [f'    {{"{name}", {pyinit}}},' for name, pyinit in registrations]
+    if not runtime_sdk:
+        table_lines.insert(0, f'    {{"{RUNTIME_RESOURCE_STORE_MODULE}", PyInit__staticpython_resource_store}},')
     extern_body = "\n" if not extern_lines else "\n" + "\n\n".join(extern_lines) + "\n\n"
     table_body = "\n" if not table_lines else "\n" + "\n\n".join(table_lines) + "\n\n"
     marker_1 = "/* -- ADDMODULE MARKER 1 -- */\n"
@@ -2471,6 +3561,8 @@ def apply_patches(
     integrations: list,
     platform: str,
     configuration: str,
+    *,
+    runtime_sdk: bool = False,
 ) -> None:
     hook_context = make_library_hook_context(source_root, version_info, version_mm, version_full, configuration, platform)
     run_pre_patch_hooks(integrations, hook_context)
@@ -2481,13 +3573,13 @@ def apply_patches(
     patch_pc_dl_nt_c(source_root)
     patch_python_sysmodule_c(source_root, version_mm)
     patch_pyproject_props(source_root)
-    patch_pythoncore_vcxproj(source_root)
+    patch_pythoncore_vcxproj(source_root, runtime_sdk=runtime_sdk)
     patch_freeze_module_vcxproj(source_root)
     patch_python_vcxproj(source_root, manifest, integrations)
     patch_static_library_projects(source_root, manifest, integrations)
-    patch_pc_config(source_root, manifest, integrations)
+    patch_pc_config(source_root, manifest, integrations, runtime_sdk=runtime_sdk)
     run_post_patch_hooks(integrations, hook_context)
-    write_runtime_resource_module(source_root, integrations)
+    write_runtime_resource_module(source_root, integrations, pack_descriptor=runtime_sdk)
 
 
 def verify_source_root(source_root: Path) -> None:
@@ -2687,6 +3779,14 @@ def download_cpython_source(
     archive_path = download_root / f"cpython-v{version}.zip"
     download_file(archive_url, archive_path)
     source_root = extract_zip_archive(archive_path, download_root, reuse_existing=reuse_existing)
+    commit = resolve_cpython_tag_commit(version) if source_archive_url is None else None
+    write_cpython_source_provenance(
+        source_root,
+        version=version,
+        archive_url=archive_url,
+        archive_path=archive_path,
+        commit=commit,
+    )
     log(f"downloaded source tree to {source_root}")
     return source_root
 
@@ -3262,6 +4362,8 @@ def build_python(
     static_project_start: str | None = None,
     use_prebuilt_static_libraries: bool = False,
     build_workers: int | None = None,
+    *,
+    runtime_sdk: bool = False,
 ) -> None:
     pcbuild = source_root / "PCbuild"
     run_pre_build_hooks(
@@ -3337,7 +4439,7 @@ def build_python(
             )
 
     final_build_properties = []
-    if use_prebuilt_static_libraries or static_project_filter is not None or static_project_start is not None:
+    if runtime_sdk or use_prebuilt_static_libraries or static_project_filter is not None or static_project_start is not None:
         run(
             [
                 resolve_msbuild_exe(),
@@ -3352,6 +4454,23 @@ def build_python(
             cwd=source_root,
         )
         final_build_properties.append("BuildProjectReferences=false")
+
+    if runtime_sdk:
+        run(
+            [
+                resolve_msbuild_exe(),
+                str(pcbuild / "staticpython_runtime.vcxproj"),
+                *msbuild_args(
+                    configuration,
+                    platform,
+                    "BuildProjectReferences=false",
+                    workers=build_workers,
+                ),
+            ],
+            cwd=source_root,
+        )
+        log("runtime-sdk build intentionally skipped python.vcxproj")
+        return
 
     run(
         [
@@ -3370,6 +4489,7 @@ def verify_built_python(
     host_python: str,
     profile: str,
     config_path: Path,
+    report_json: Path | None = None,
 ) -> Path:
     exe = get_pcbuild_output_dir(source_root, platform) / "python.exe"
     if not exe.exists():
@@ -3381,23 +4501,26 @@ def verify_built_python(
     verify_timeout = 60 * 20
     if isinstance(script_config, dict):
         verify_timeout = max(verify_timeout, int(float(script_config.get("timeout", 600))) + 300)
+    command = [
+        host_python,
+        str(REPO_ROOT / "verify.py"),
+        "--python-exe",
+        str(exe),
+        "--manifest",
+        str(MANIFEST_PATH),
+        "--repo-root",
+        str(REPO_ROOT),
+        "--source-root",
+        str(source_root),
+        "--profile",
+        profile,
+        "--config",
+        str(config_path),
+    ]
+    if report_json is not None:
+        command.extend(["--report-json", str(report_json)])
     run(
-        [
-            host_python,
-            str(REPO_ROOT / "verify.py"),
-            "--python-exe",
-            str(exe),
-            "--manifest",
-            str(MANIFEST_PATH),
-            "--repo-root",
-            str(REPO_ROOT),
-            "--source-root",
-            str(source_root),
-            "--profile",
-            profile,
-            "--config",
-            str(config_path),
-        ],
+        command,
         cwd=REPO_ROOT,
         timeout=verify_timeout,
     )
@@ -3519,6 +4642,32 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--output-runtime-sdk-dir",
+        type=Path,
+        help=(
+            "Export the PySuture runtime SDK. This is only valid with --profile runtime-sdk; "
+            "the archive includes static CPython, headers, frozen stdlib, registration runtime, and link metadata."
+        ),
+    )
+    parser.add_argument(
+        "--output-pack-dir",
+        type=Path,
+        help=(
+            "Export one StaticPythonPackV1 ZIP for each selected third-party integration. "
+            "Packs contain only that integration's frozen modules, resources, native libraries, and metadata."
+        ),
+    )
+    parser.add_argument(
+        "--output-pack-name",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Export only the named root integration from --output-pack-dir. May be repeated. "
+            "Selected dependency integrations remain linked for verification but are not duplicated in this shard."
+        ),
+    )
+    parser.add_argument(
         "--prebuilt-static-lib-sdk",
         type=Path,
         help=(
@@ -3555,6 +4704,15 @@ def main() -> int:
     config_path = (args.config or CONFIG_PATH).resolve()
     config = load_config(config_path)
     profile_name, profile = resolve_profile(config, args.profile)
+    runtime_sdk_mode = profile.get("build_type") == "runtime-sdk"
+    if args.output_runtime_sdk_dir is not None and not runtime_sdk_mode:
+        raise RuntimeError("--output-runtime-sdk-dir requires --profile runtime-sdk")
+    if runtime_sdk_mode and args.output_dir is not None:
+        raise RuntimeError("runtime-sdk does not produce a generic executable; remove --output-dir")
+    if runtime_sdk_mode and args.output_pack_dir is not None:
+        raise RuntimeError("runtime-sdk contains no optional libraries; use a library profile with --output-pack-dir")
+    if args.output_pack_name and args.output_pack_dir is None:
+        raise RuntimeError("--output-pack-name requires --output-pack-dir")
     target_version = Version(version_full)
     core_version_overrides = profile.get("core_library_version_overrides")
     third_party_version_overrides = profile.get("third_party_library_version_overrides")
@@ -3574,13 +4732,16 @@ def main() -> int:
         version_overrides=third_party_version_overrides,
         library_catalog=third_party_library_catalog,
     )
-    if profile.get("third_party_libraries") == "all":
+    if runtime_sdk_mode:
+        # A runtime SDK is deliberately independent from the optional package
+        # catalog.  Loading every integration here resolves PyPI releases even
+        # though none of them can participate in this build.
+        all_third_party_integrations = []
+    elif profile.get("third_party_libraries") == "all":
         all_third_party_integrations = third_party_integrations
     else:
-        all_third_party_integrations = load_integrations(
+        all_third_party_integrations = load_integration_definitions(
             LIB_PATCH_ROOT,
-            "all",
-            target_version=target_version,
             version_overrides=third_party_version_overrides,
             library_catalog=third_party_library_catalog,
         )
@@ -3605,7 +4766,7 @@ def main() -> int:
             log("skip source materialization and patching because only prebuilt static library installation was requested")
     else:
         if integrations:
-            if profile.get("third_party_libraries") != "all":
+            if not runtime_sdk_mode and profile.get("third_party_libraries") != "all":
                 log("pruning stale third-party source paths for the selected incremental profile")
                 cleanup_unselected_third_party_sources(
                     source_root,
@@ -3639,6 +4800,7 @@ def main() -> int:
             integrations,
             args.platform,
             args.configuration,
+            runtime_sdk=runtime_sdk_mode,
         )
         write_profile_metadata(
             source_root,
@@ -3668,6 +4830,7 @@ def main() -> int:
         )
 
     built_exe: Path | None = None
+    verification_report: dict | None = None
     try:
         if not args.skip_build:
             maybe_restore_getpath_header(source_root, version_info)
@@ -3701,12 +4864,24 @@ def main() -> int:
                 args.build_static_project_from,
                 use_prebuilt_static_libraries,
                 build_workers,
+                runtime_sdk=runtime_sdk_mode,
             )
-            built_exe = get_pcbuild_output_dir(source_root, args.platform) / "python.exe"
+            if not runtime_sdk_mode:
+                built_exe = get_pcbuild_output_dir(source_root, args.platform) / "python.exe"
 
-        if not args.skip_build and not args.skip_verify:
+        if not runtime_sdk_mode and not args.skip_build and not args.skip_verify:
             log("running post-build profile verification")
-            built_exe = verify_built_python(source_root, args.platform, manifest, args.host_python, profile_name, config_path)
+            verification_report_path = source_root / "PCbuild" / "staticpython-verify-report.json"
+            built_exe = verify_built_python(
+                source_root,
+                args.platform,
+                manifest,
+                args.host_python,
+                profile_name,
+                config_path,
+                report_json=verification_report_path,
+            )
+            verification_report = json.loads(verification_report_path.read_text(encoding="utf-8"))
 
         if not args.skip_build and args.output_dir:
             if built_exe is None:
@@ -3722,6 +4897,38 @@ def main() -> int:
                 profile_name,
                 manifest,
                 integrations,
+            )
+        if args.output_runtime_sdk_dir:
+            export_runtime_sdk(
+                source_root,
+                args.output_runtime_sdk_dir.resolve(),
+                version_info,
+                version_full,
+                args.platform,
+                profile_name,
+                manifest,
+                integrations,
+            )
+        if args.output_pack_dir:
+            if not third_party_integrations:
+                raise RuntimeError("the selected profile has no third-party integrations to export")
+            output_pack_integrations = select_output_pack_integrations(
+                third_party_integrations,
+                args.output_pack_name,
+            )
+            export_library_packs(
+                source_root,
+                args.output_pack_dir.resolve(),
+                version_info,
+                version_full,
+                args.platform,
+                output_pack_integrations,
+                verification_status=(
+                    "passed"
+                    if not args.skip_build and not args.skip_verify
+                    else "not-run"
+                ),
+                verification_report=verification_report,
             )
     finally:
         if sdk_temp_dir is not None:

@@ -14,6 +14,7 @@ def patch_tinycss2_sources(context):
 
 LIBRARY_INTEGRATION = simple_library(
     name="tinycss2",
+    release_version="1.5.1",
     overlay_entries=["Lib/tinycss2"],
     post_patch_hooks=[patch_tinycss2_sources],
 )

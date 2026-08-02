@@ -448,10 +448,27 @@ def _iter_exporter_entries():
 
 LIBRARY_INTEGRATION = simple_library(
     name="nbconvert",
+    release_version="7.17.1",
     source_mapping={
         "nbconvert": "Lib/nbconvert",
         "share/templates || nbconvert/templates": "share/jupyter/nbconvert/templates",
     },
     materialized_paths=["Lib/nbconvert/_staticpython_templates.py"],
     post_patch_hooks=[patch_nbconvert_sources],
+    smoke_tests=[
+        {
+            "name": "embedded-template-and-css-sanitizer",
+            "kind": "inline",
+            "code": (
+                "from bleach.css_sanitizer import CSSSanitizer; "
+                "from nbformat import v4; "
+                "from nbconvert.exporters import HTMLExporter; "
+                "notebook = v4.new_notebook(cells=[v4.new_markdown_cell('# StaticPython')]); "
+                "body, resources = HTMLExporter().from_notebook_node(notebook); "
+                "assert '<h1' in body and 'StaticPython' in body; "
+                "assert isinstance(resources, dict); "
+                "assert CSSSanitizer().sanitize_css('color: red')"
+            ),
+        }
+    ],
 )
