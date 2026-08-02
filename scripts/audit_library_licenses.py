@@ -22,6 +22,7 @@ from packaging.licenses import canonicalize_license_expression
 from packaging.version import Version
 
 from build_pack_shard_config import PACK_FAMILIES, build_shard_config
+from resolve_pack_versions import load_pack_version_lock
 
 
 def _safe_name(value: str) -> str:
@@ -153,6 +154,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--version-lock", type=Path, required=True)
     return parser.parse_args()
 
 
@@ -184,10 +186,15 @@ def main() -> None:
         work_root / "cpython",
     )
     version_info, version_mm, version_full = build.parse_cpython_version(source_root)
+    version_lock = load_pack_version_lock(
+        args.version_lock,
+        target_python_version=version_full,
+    )
     integrations = libs.load_integrations(
         build.LIB_PATCH_ROOT,
         selected_libraries,
         target_version=Version(version_full),
+        version_overrides=version_lock["versions"],
         library_catalog=catalog,
     )
     context = build.make_library_hook_context(
@@ -206,6 +213,9 @@ def main() -> None:
             "cpython_version": version_full,
             "family": args.family,
             "selected_libraries": selected_libraries,
+            "version_lock_sha256": hashlib.sha256(
+                args.version_lock.read_bytes()
+            ).hexdigest(),
         }
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

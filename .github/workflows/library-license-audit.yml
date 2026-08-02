@@ -63,11 +63,37 @@ jobs:
           "versions=$versionsJson" >> $env:GITHUB_OUTPUT
           Write-Host "Resolved CPython versions: $($versions -join ', ')"
 
+  resolve-pack-versions:
+    needs: resolve-cpython-matrix
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        cpython_version: ${{ fromJSON(needs.resolve-cpython-matrix.outputs.versions) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install resolver dependencies
+        run: python -m pip install "packaging>=24.2"
+      - name: Resolve one global pack version set
+        shell: pwsh
+        run: |
+          python .\scripts\resolve_pack_versions.py `
+            --target-python-version "${{ matrix.cpython_version }}" `
+            --output ".tmp\pack-version-lock-${{ matrix.cpython_version }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: license-pack-version-lock-${{ matrix.cpython_version }}
+          path: .tmp/pack-version-lock-${{ matrix.cpython_version }}.json
+          if-no-files-found: error
+
   audit:
     name: Audit ${{ matrix.cpython_version }} / ${{ matrix.family }}
     runs-on: windows-2022
     timeout-minutes: 180
-    needs: resolve-cpython-matrix
+    needs: [resolve-cpython-matrix, resolve-pack-versions]
     strategy:
       fail-fast: false
       max-parallel: 8
@@ -83,6 +109,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: license-pack-version-lock-${{ matrix.cpython_version }}
+          path: .tmp/version-lock
       - name: Install audit dependencies
         run: python -m pip install "packaging>=24.2"
       - name: Prepare exact sources and audit license metadata
@@ -93,6 +123,7 @@ jobs:
           python .\scripts\audit_library_licenses.py `
             --cpython-version "${{ matrix.cpython_version }}" `
             --family "${{ matrix.family }}" `
+            --version-lock ".tmp\version-lock\pack-version-lock-${{ matrix.cpython_version }}.json" `
             --work-root $workRoot `
             --output ".tmp\library-license-${{ matrix.cpython_version }}-${{ matrix.family }}.json"
       - name: Upload license audit report

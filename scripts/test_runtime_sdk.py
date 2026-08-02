@@ -36,6 +36,7 @@ _SHARD_SPEC = importlib.util.spec_from_file_location(
 assert _SHARD_SPEC is not None and _SHARD_SPEC.loader is not None
 build_pack_shard_config = importlib.util.module_from_spec(_SHARD_SPEC)
 _SHARD_SPEC.loader.exec_module(build_pack_shard_config)
+import resolve_pack_versions as pack_version_resolver
 
 _LICENSE_AUDIT_SPEC = importlib.util.spec_from_file_location(
     "staticpython_audit_library_licenses",
@@ -950,6 +951,62 @@ const struct _module_alias aliases[] = {
             observed.extend(selected)
         self.assertCountEqual(observed, expected)
         self.assertEqual(len({name.casefold() for name in observed}), len(observed))
+
+        globally_resolved = {"mpmath": "1.3.0", "sympy": "1.14.0"}
+        shard_config, _selected = build_pack_shard_config.build_shard_config(
+            config,
+            "m-r",
+            version_overrides=globally_resolved,
+        )
+        self.assertEqual(
+            shard_config["profiles"]["pack-shard"]["third_party_library_version_overrides"],
+            globally_resolved,
+        )
+
+    def test_global_pack_version_lock_preserves_cross_family_solution(self) -> None:
+        config = build.load_config()
+        integrations = [
+            libs.LibraryIntegration(
+                name="mpmath",
+                source_provider="pypi",
+                project_name="mpmath",
+                release_version="1.3.0",
+            ),
+            libs.LibraryIntegration(
+                name="sympy",
+                source_provider="pypi",
+                project_name="sympy",
+                release_version="1.14.0",
+                dependencies=["mpmath"],
+                dependency_constraints={"mpmath": "<1.4,>=1.1.0"},
+            ),
+        ]
+        with mock.patch.object(
+            pack_version_resolver.libs,
+            "load_integrations",
+            return_value=integrations,
+        ) as load:
+            payload = pack_version_resolver.resolve_pack_versions(config, "3.11.15")
+
+        self.assertEqual(payload["versions"]["mpmath"], "1.3.0")
+        self.assertEqual(payload["versions"]["sympy"], "1.14.0")
+        self.assertEqual(payload["target_python_version"], "3.11.15")
+        selected = load.call_args.args[1]
+        self.assertIn("mpmath", selected)
+        self.assertIn("sympy", selected)
+
+        lock_path = self.root / "pack-version-lock.json"
+        lock_path.write_text(json.dumps(payload), encoding="utf-8")
+        loaded = pack_version_resolver.load_pack_version_lock(
+            lock_path,
+            target_python_version="3.11.15",
+        )
+        self.assertEqual(loaded["versions"]["mpmath"], "1.3.0")
+        with self.assertRaisesRegex(RuntimeError, "targets Python"):
+            pack_version_resolver.load_pack_version_lock(
+                lock_path,
+                target_python_version="3.12.13",
+            )
 
     def test_loading_cleanup_definitions_does_not_resolve_remote_dependencies(self) -> None:
         library_root = self.root / "Lib"

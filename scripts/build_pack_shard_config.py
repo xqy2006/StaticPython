@@ -7,17 +7,27 @@ import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_ROOT.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
 
 from build import staticpython_pack_release_family
+from resolve_pack_versions import load_pack_version_lock
 
 
 PACK_FAMILIES = ("a-f", "g-l", "m-r", "s-z", "other")
 
 
-def build_shard_config(base_config: dict, family: str, profile_name: str = "pack-shard") -> tuple[dict, list[str]]:
+def build_shard_config(
+    base_config: dict,
+    family: str,
+    profile_name: str = "pack-shard",
+    *,
+    version_overrides: dict[str, str] | None = None,
+) -> tuple[dict, list[str]]:
     if family not in PACK_FAMILIES:
         raise RuntimeError(f"unknown pack family {family!r}")
     profiles = base_config.get("profiles")
@@ -53,6 +63,24 @@ def build_shard_config(base_config: dict, family: str, profile_name: str = "pack
         "but only root integrations are exported."
     )
     shard_profile["third_party_libraries"] = selected
+    if version_overrides is not None:
+        existing_overrides = shard_profile.get("third_party_library_version_overrides", {})
+        if not isinstance(existing_overrides, dict):
+            raise RuntimeError("full.third_party_library_version_overrides must be an object")
+        conflicting = sorted(
+            name
+            for name, version in existing_overrides.items()
+            if name in version_overrides and version_overrides[name] != version
+        )
+        if conflicting:
+            raise RuntimeError(
+                "pack version lock conflicts with configured overrides: "
+                + ", ".join(conflicting)
+            )
+        shard_profile["third_party_library_version_overrides"] = {
+            **version_overrides,
+            **existing_overrides,
+        }
     shard_profile["verification"] = {"enabled": False}
     shard_config["profiles"][profile_name] = shard_profile
     return shard_config, selected
@@ -63,6 +91,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-config", type=Path, default=REPO_ROOT / "config.json")
     parser.add_argument("--family", choices=PACK_FAMILIES, required=True)
     parser.add_argument("--profile-name", default="pack-shard")
+    parser.add_argument("--version-lock", type=Path)
+    parser.add_argument("--target-python-version")
     parser.add_argument("--output-config", type=Path, required=True)
     parser.add_argument("--output-pack-names", type=Path, required=True)
     return parser.parse_args()
@@ -71,7 +101,23 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     base_config = json.loads(args.base_config.read_text(encoding="utf-8"))
-    shard_config, selected = build_shard_config(base_config, args.family, args.profile_name)
+    if (args.version_lock is None) != (args.target_python_version is None):
+        raise RuntimeError(
+            "--version-lock and --target-python-version must be provided together"
+        )
+    version_overrides = None
+    if args.version_lock is not None:
+        lock = load_pack_version_lock(
+            args.version_lock,
+            target_python_version=args.target_python_version,
+        )
+        version_overrides = lock["versions"]
+    shard_config, selected = build_shard_config(
+        base_config,
+        args.family,
+        args.profile_name,
+        version_overrides=version_overrides,
+    )
     args.output_config.parent.mkdir(parents=True, exist_ok=True)
     args.output_pack_names.parent.mkdir(parents=True, exist_ok=True)
     args.output_config.write_text(
@@ -84,7 +130,16 @@ def main() -> None:
         encoding="utf-8",
         newline="\n",
     )
-    print(json.dumps({"family": args.family, "profile": args.profile_name, "pack_count": len(selected)}))
+    print(
+        json.dumps(
+            {
+                "family": args.family,
+                "profile": args.profile_name,
+                "pack_count": len(selected),
+                "version_lock_count": len(version_overrides or {}),
+            }
+        )
+    )
 
 
 if __name__ == "__main__":
