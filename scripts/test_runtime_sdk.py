@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import importlib.util
 import shutil
 import sys
@@ -714,6 +715,82 @@ const struct _module_alias aliases[] = {
         copied_license = source_root / integration.license_files[0]
         self.assertEqual(copied_license.read_text(encoding="utf-8"), "upstream license\n")
 
+    def test_declared_license_source_is_versioned_and_hash_verified(self) -> None:
+        payload = b"fallback license\n"
+        digest = hashlib.sha256(payload).hexdigest()
+        source_root = self.root / "source"
+        source_root.mkdir()
+        integration = libs.LibraryIntegration(
+            name="demo",
+            source_provider="pypi",
+            project_name="demo-project",
+            release_version="1.2.3",
+            license_expression="MIT",
+            license_sources=[
+                {
+                    "filename": "LICENSE",
+                    "url": "https://example.invalid/demo/v{release_version}/LICENSE",
+                    "sha256": digest,
+                }
+            ],
+        )
+        context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=source_root,
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=self.root / "downloads",
+            work_cache_root=self.root / "work",
+            asset_overlay_root=self.root / "assets",
+            log=lambda _message: None,
+        )
+        with mock.patch.object(libs, "_read_url_bytes", return_value=payload) as read:
+            libs._finalize_integration_license_metadata(context, integration)
+
+        read.assert_called_once_with("https://example.invalid/demo/v1.2.3/LICENSE")
+        self.assertEqual(integration.license_files, ["licenses/demo/LICENSE"])
+        self.assertEqual((source_root / integration.license_files[0]).read_bytes(), payload)
+        self.assertEqual(
+            build.resolved_license_sources(integration),
+            [
+                {
+                    "filename": "LICENSE",
+                    "url": "https://example.invalid/demo/v1.2.3/LICENSE",
+                    "sha256": digest,
+                }
+            ],
+        )
+
+    def test_declared_license_source_rejects_hash_drift(self) -> None:
+        source_root = self.root / "source"
+        source_root.mkdir()
+        integration = libs.LibraryIntegration(
+            name="demo",
+            release_version="1.2.3",
+            license_sources=[
+                {
+                    "filename": "LICENSE",
+                    "url": "https://example.invalid/LICENSE",
+                    "sha256": "0" * 64,
+                }
+            ],
+        )
+        context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=source_root,
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=self.root / "downloads",
+            work_cache_root=self.root / "work",
+            asset_overlay_root=self.root / "assets",
+            log=lambda _message: None,
+        )
+        with mock.patch.object(libs, "_read_url_bytes", return_value=b"changed\n"):
+            with self.assertRaisesRegex(RuntimeError, "hash mismatch"):
+                libs._materialize_declared_license_sources(context, integration)
+
     def test_license_expression_inference_prefers_specific_metadata(self) -> None:
         cases = {
             "Apache-2.0 AND MIT": "Apache-2.0 AND MIT",
@@ -762,6 +839,18 @@ const struct _module_alias aliases[] = {
         for name, expression in expected.items():
             with self.subTest(name=name):
                 self.assertEqual(by_name[name].license_expression, expression)
+
+        fallback_sources = {
+            "humanize",
+            "loguru",
+            "tqdm",
+            "ua_parser_builtins",
+            "webencodings",
+        }
+        for name in fallback_sources:
+            with self.subTest(license_source=name):
+                self.assertEqual(len(by_name[name].license_sources), 1)
+                self.assertRegex(by_name[name].license_sources[0]["sha256"], r"^[0-9a-f]{64}$")
 
     def test_library_license_audit_reports_all_incomplete_integrations(self) -> None:
         source_root = self.root / "source"

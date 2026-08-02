@@ -196,6 +196,18 @@ def integration_names(integrations: list) -> list[str]:
     return [integration.name for integration in integrations]
 
 
+def resolved_license_sources(integration) -> list[dict]:
+    records: list[dict] = []
+    for rule in integration.license_sources:
+        record = dict(rule)
+        record["url"] = str(rule["url"]).format(
+            release_version=integration.release_version,
+            project_name=integration.project_name or integration.name,
+        )
+        records.append(record)
+    return records
+
+
 def integration_versions(integrations: list) -> dict[str, dict]:
     payload: dict[str, dict] = {}
     for integration in integrations:
@@ -211,6 +223,7 @@ def integration_versions(integrations: list) -> dict[str, dict]:
             "resource_rules": integration.resource_rules,
             "license_expression": integration.license_expression,
             "license_files": integration.license_files,
+            "license_sources": resolved_license_sources(integration),
             "smoke_tests": integration.smoke_tests,
         }
     return payload
@@ -1777,10 +1790,20 @@ def export_library_pack(
         licenses_dir.mkdir(parents=True, exist_ok=True)
         license_records = []
         used_names: set[str] = set()
+        license_source_records: dict[tuple[str, str], tuple[Path, str]] = {}
         for source in license_files:
+            digest = sha256_file(source)
+            license_source_records.setdefault(
+                (source.name.casefold(), digest),
+                (source, digest),
+            )
+        for source, digest in sorted(
+            license_source_records.values(),
+            key=lambda record: (record[0].name.casefold(), record[1]),
+        ):
             name = source.name
             if name.casefold() in used_names:
-                name = f"{hashlib.sha256(str(source).encode('utf-8')).hexdigest()[:8]}-{name}"
+                name = f"{digest[:12]}-{name}"
             used_names.add(name.casefold())
             target = licenses_dir / name
             shutil.copy2(source, target)
@@ -1851,6 +1874,7 @@ def export_library_pack(
                 "expression": integration.license_expression,
                 "status": license_status,
                 "files": license_records,
+                "sources": resolved_license_sources(integration),
             },
             "smoke_tests": integration.smoke_tests or [
                 {"kind": "import", "module": name}

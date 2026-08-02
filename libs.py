@@ -110,6 +110,7 @@ class LibraryIntegration:
     resource_rules: list[dict] = field(default_factory=list)
     license_expression: str | None = None
     license_files: list[str] = field(default_factory=list)
+    license_sources: list[dict] = field(default_factory=list)
     smoke_tests: list[dict] = field(default_factory=list)
     source_ignore_patterns: list[str] = field(default_factory=list)
     prepare_source_hooks: list[Hook] = field(default_factory=list)
@@ -1317,6 +1318,95 @@ def _materialize_license_candidates(
     context.log(f"materialized {len(integration.license_files)} license/notice file(s) for {integration.name}")
 
 
+def _materialize_declared_license_sources(
+    context: LibraryHookContext,
+    integration: LibraryIntegration,
+) -> None:
+    if not integration.release_version:
+        raise RuntimeError(
+            f"{integration.name} declares license sources but does not have a resolved release version"
+        )
+    target_root = context.source_root / "licenses" / re.sub(
+        r"[^0-9A-Za-z_.-]+",
+        "-",
+        integration.name,
+    )
+    target_root.mkdir(parents=True, exist_ok=True)
+    for index, rule in enumerate(integration.license_sources, start=1):
+        if not isinstance(rule, dict):
+            raise RuntimeError(f"{integration.name} license source #{index} must be an object")
+        unknown_keys = sorted(set(rule) - {"filename", "url", "sha256"})
+        if unknown_keys:
+            raise RuntimeError(
+                f"{integration.name} license source #{index} has unsupported keys: "
+                + ", ".join(unknown_keys)
+            )
+        filename = rule.get("filename")
+        url_template = rule.get("url")
+        expected_sha256 = str(rule.get("sha256") or "").casefold()
+        if not isinstance(filename, str) or not filename:
+            raise RuntimeError(f"{integration.name} license source #{index} is missing filename")
+        normalized_filename = filename.replace("\\", "/")
+        parsed_filename = PurePosixPath(normalized_filename)
+        if (
+            parsed_filename.is_absolute()
+            or len(parsed_filename.parts) != 1
+            or parsed_filename.name in {"", ".", ".."}
+        ):
+            raise RuntimeError(
+                f"{integration.name} license source #{index} filename must be a basename"
+            )
+        if not isinstance(url_template, str) or not url_template.startswith("https://"):
+            raise RuntimeError(
+                f"{integration.name} license source #{index} must use an HTTPS URL"
+            )
+        if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+            raise RuntimeError(
+                f"{integration.name} license source #{index} must declare a SHA-256 digest"
+            )
+        try:
+            url = url_template.format(
+                release_version=integration.release_version,
+                project_name=integration.project_name or integration.name,
+            )
+        except (KeyError, ValueError) as exc:
+            raise RuntimeError(
+                f"{integration.name} license source #{index} has an invalid URL template"
+            ) from exc
+
+        cache_path = (
+            context.download_cache_root
+            / "license-sources"
+            / _normalized_project_name(integration.name)
+            / integration.release_version
+            / f"{expected_sha256}-{parsed_filename.name}"
+        )
+        if cache_path.exists():
+            payload = cache_path.read_bytes()
+        else:
+            context.log(f"downloading {integration.name} license source from {url}")
+            payload = _read_url_bytes(url)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_bytes(payload)
+        observed_sha256 = hashlib.sha256(payload).hexdigest()
+        if observed_sha256 != expected_sha256:
+            raise RuntimeError(
+                f"{integration.name} license source #{index} hash mismatch: "
+                f"expected {expected_sha256}, observed {observed_sha256}"
+            )
+
+        target = target_root / parsed_filename.name
+        if target.exists() and target.read_bytes() != payload:
+            target = target_root / f"{observed_sha256[:12]}-{parsed_filename.name}"
+        target.write_bytes(payload)
+        relative = target.relative_to(context.source_root).as_posix()
+        if relative not in integration.license_files:
+            integration.license_files.append(relative)
+    context.log(
+        f"materialized {len(integration.license_files)} declared license source(s) for {integration.name}"
+    )
+
+
 def _finalize_integration_license_metadata(
     context: LibraryHookContext,
     integration: LibraryIntegration,
@@ -1326,31 +1416,32 @@ def _finalize_integration_license_metadata(
         release_payload = _load_pypi_release_payload(project_name, integration.release_version)
         integration.license_expression = _infer_license_expression(release_payload.get("info", {}))
 
-    if integration.license_files:
-        return
+    if not integration.license_files:
+        candidates: list[Path] = []
+        for relative in integration.materialized_paths:
+            path = context.source_root / relative
+            root = path if path.is_dir() else path.parent
+            candidates.extend(_distribution_license_candidates(root, maximum_depth=4))
 
-    candidates: list[Path] = []
-    for relative in integration.materialized_paths:
-        path = context.source_root / relative
-        root = path if path.is_dir() else path.parent
-        candidates.extend(_distribution_license_candidates(root, maximum_depth=4))
+        if integration.source_provider == "pypi" and integration.release_version:
+            project_name = integration.project_name or integration.name
+            cached_distribution_root = (
+                context.work_cache_root
+                / "pypi"
+                / _normalized_project_name(project_name)
+                / integration.release_version
+            )
+            # Custom source hooks use slightly different extraction layouts. The
+            # version-scoped cache root is stable across all of them and keeps the
+            # scan bounded to the exact distribution selected for this pack.
+            candidates.extend(
+                _distribution_license_candidates(cached_distribution_root, maximum_depth=6)
+            )
 
-    if integration.source_provider == "pypi" and integration.release_version:
-        project_name = integration.project_name or integration.name
-        cached_distribution_root = (
-            context.work_cache_root
-            / "pypi"
-            / _normalized_project_name(project_name)
-            / integration.release_version
-        )
-        # Custom source hooks use slightly different extraction layouts. The
-        # version-scoped cache root is stable across all of them and keeps the
-        # scan bounded to the exact distribution selected for this pack.
-        candidates.extend(
-            _distribution_license_candidates(cached_distribution_root, maximum_depth=6)
-        )
+        _materialize_license_candidates(context, integration, candidates)
 
-    _materialize_license_candidates(context, integration, candidates)
+    if not integration.license_files and integration.license_sources:
+        _materialize_declared_license_sources(context, integration)
 
 
 def _version_format_args(context: LibraryHookContext) -> dict[str, int | str]:
@@ -1531,6 +1622,7 @@ def pypi_library(
     resource_rules: list[dict] | None = None,
     license_expression: str | None = None,
     license_files: list[str] | None = None,
+    license_sources: list[dict] | None = None,
     smoke_tests: list[dict] | None = None,
     materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
@@ -1583,6 +1675,7 @@ def pypi_library(
         resource_rules=list(resource_rules or []),
         license_expression=license_expression,
         license_files=list(license_files or []),
+        license_sources=list(license_sources or []),
         smoke_tests=list(smoke_tests or []),
         source_ignore_patterns=list(source_ignore_patterns or []),
         prepare_source_hooks=[],
@@ -1626,6 +1719,7 @@ def github_library(
     resource_rules: list[dict] | None = None,
     license_expression: str | None = None,
     license_files: list[str] | None = None,
+    license_sources: list[dict] | None = None,
     smoke_tests: list[dict] | None = None,
     materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
@@ -1678,6 +1772,7 @@ def github_library(
         resource_rules=list(resource_rules or []),
         license_expression=license_expression,
         license_files=list(license_files or []),
+        license_sources=list(license_sources or []),
         smoke_tests=list(smoke_tests or []),
         source_ignore_patterns=list(source_ignore_patterns or []),
         prepare_source_hooks=[],
@@ -1733,6 +1828,7 @@ def simple_library(
     resource_rules: list[dict] | None = None,
     license_expression: str | None = None,
     license_files: list[str] | None = None,
+    license_sources: list[dict] | None = None,
     smoke_tests: list[dict] | None = None,
     materialized_paths: list[str] | None = None,
     cleanup_paths: list[str] | None = None,
@@ -1769,6 +1865,7 @@ def simple_library(
         "resource_rules": resource_rules,
         "license_expression": license_expression,
         "license_files": license_files,
+        "license_sources": license_sources,
         "smoke_tests": smoke_tests,
         "materialized_paths": materialized_paths,
         "cleanup_paths": cleanup_paths,
@@ -1849,6 +1946,7 @@ def _integration_from_catalog_entry(entry: dict) -> LibraryIntegration:
         "resource_rules",
         "license_expression",
         "license_files",
+        "license_sources",
         "smoke_tests",
         "materialized_paths",
         "source_provider",

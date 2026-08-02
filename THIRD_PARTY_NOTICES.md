@@ -8,6 +8,9 @@ of CPython or any integrated dependency.
 - Each optional library pack must include the license files declared by its
   `LibraryIntegration` and a machine-readable license expression in
   `pack.json`.
+- If an upstream PyPI artifact omits its license text, `license_sources`
+  retrieves the text from an immutable upstream tag or commit and verifies a
+  reviewed SHA-256 digest before it can enter a pack.
 - `Lib/hypothesis/compat/*.py` is derived from Hypothesis 6.164.0 and remains
   available under the Mozilla Public License 2.0. The generated Hypothesis
   pack includes the upstream `LICENSE.txt` in full.
