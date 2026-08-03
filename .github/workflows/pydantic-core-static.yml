@@ -1,0 +1,184 @@
+name: Experimental pydantic-core static pack
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/pydantic-core-static.yml"
+      - "Lib/pydantic_core/**"
+      - "assets/overlay/Include/staticpython_pack.h"
+      - "assets/overlay/Python/staticpython_pack_runtime.c"
+      - "build.py"
+      - "config.json"
+      - "libs.py"
+      - "scripts/test_pydantic_core_pack.py"
+      - "scripts/verify_pack_with_runtime_sdk.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staticpython-pydantic-core-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  STATICPYTHON_BUILD_WORKERS: "2"
+  VERIFY_CPYTHON_VERSION: "3.13.14"
+  RUST_TOOLCHAIN: "1.88.0"
+  RUST_TARGET: "x86_64-pc-windows-msvc"
+
+jobs:
+  sdk-linked-pydantic-core:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies and pinned Rust
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install packaging
+          choco install strawberryperl -y --no-progress
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --target $env:RUST_TARGET
+          rustup run $env:RUST_TOOLCHAIN rustc -Vv
+          rustup run $env:RUST_TOOLCHAIN cargo -V
+
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Run pydantic-core contract tests
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\test_pydantic_core_pack.py
+          python .\scripts\test_runtime_sdk.py
+
+      - name: Build exact-commit audited runtime SDK
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP "pydantic-core-runtime"
+          $runtimeDist = Join-Path $env:GITHUB_WORKSPACE "dist\runtime"
+          New-Item -ItemType Directory -Force $runtimeDist | Out-Null
+          python .\build.py `
+            --cpython-version $env:VERIFY_CPYTHON_VERSION `
+            --download-root $runtimeRoot `
+            --profile runtime-sdk `
+            --build-workers $env:STATICPYTHON_BUILD_WORKERS `
+            --output-runtime-sdk-dir $runtimeDist
+
+      - name: Build static Rust pack, link audited SDK, and run behavior smoke
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $runtimeSdk = @(Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE\dist\runtime" -Filter *.zip -File)
+          if ($runtimeSdk.Count -ne 1) {
+            throw "Expected exactly one runtime SDK archive, found $($runtimeSdk.Count)"
+          }
+          $packRoot = Join-Path $env:RUNNER_TEMP "pydantic-core-pack"
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\pydantic-core"
+          $packDist = Join-Path $resultRoot "packs"
+          New-Item -ItemType Directory -Force $packDist | Out-Null
+          python .\build.py `
+            --cpython-version $env:VERIFY_CPYTHON_VERSION `
+            --download-root $packRoot `
+            --config .\config.json `
+            --profile pydantic-core-experimental `
+            --pack-only `
+            --pack-runtime-sdk $runtimeSdk[0].FullName `
+            --build-workers $env:STATICPYTHON_BUILD_WORKERS `
+            --output-pack-dir $packDist `
+            --output-pack-name pydantic_core
+          $sourceRoot = Join-Path $packRoot "cpython-$env:VERIFY_CPYTHON_VERSION"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" `
+            -Destination "$resultRoot\staticpython-pack-verify-report.json"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.map" `
+            -Destination "$resultRoot\staticpython-pack-verify.map"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.pdb" `
+            -Destination "$resultRoot\staticpython-pack-verify.pdb"
+
+      - name: Audit pydantic-core pack contract
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\pydantic-core"
+          $packs = @(Get-ChildItem -LiteralPath "$resultRoot\packs" -Filter *.zip -File)
+          if ($packs.Count -ne 1) { throw "Expected one pydantic-core pack, found $($packs.Count)" }
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($packs[0].FullName)
+          try {
+            $names = @($archive.Entries | ForEach-Object FullName)
+            $forbidden = @($names | Where-Object { [IO.Path]::GetExtension($_) -in @('.dll', '.pyd', '.exe') })
+            if ($forbidden.Count -gt 0) { throw "Pack contains dynamic/executable files: $($forbidden -join ', ')" }
+            $entry = $archive.GetEntry("pack.json")
+            if (-not $entry) { throw "Pack has no pack.json" }
+            $reader = [IO.StreamReader]::new($entry.Open())
+            try { $metadata = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+          } finally {
+            $archive.Dispose()
+          }
+          if ($metadata.name -ne 'pydantic_core' -or $metadata.version -ne '2.47.0') {
+            throw "Unexpected pydantic-core pack identity"
+          }
+          if ($metadata.toolchain.rust.toolchain -ne $env:RUST_TOOLCHAIN) {
+            throw "Pack does not record the pinned Rust toolchain"
+          }
+          if (-not $metadata.toolchain.rust.crt_static -or -not $metadata.toolchain.rust.locked) {
+            throw "Pack does not attest a locked static CRT Rust build"
+          }
+          if ($metadata.toolchain.rust.target -ne $env:RUST_TARGET) {
+            throw "Pack has the wrong Rust target"
+          }
+          if ($metadata.license.status -ne 'complete' -or $metadata.license.expression -ne 'MIT') {
+            throw "Pack license metadata is incomplete"
+          }
+          if ($metadata.verification.status -ne 'passed') {
+            throw "Pack was promoted without passing verification"
+          }
+          if (@($metadata.libraries) -notcontains 'pydantic_core._pydantic_core.lib') {
+            throw "Pack is missing the Rust static library"
+          }
+          $report = Get-Content -LiteralPath "$resultRoot\staticpython-pack-verify-report.json" -Raw | ConvertFrom-Json
+          if ($report.status -ne 'passed' -or $report.pe_audit.status -ne 'passed') {
+            throw "SDK-linked behavior or PE audit failed"
+          }
+          if (@($report.released_files).Count -ne 0) {
+            throw "pydantic-core verification released runtime files"
+          }
+          @(
+            "## Experimental pydantic-core static pack",
+            "",
+            "- CPython: ``$env:VERIFY_CPYTHON_VERSION``",
+            "- pydantic-core: ``$($metadata.version)``",
+            "- Rust: ``$($metadata.toolchain.rust.rustc_version)``",
+            "- Runtime ABI: ``$($metadata.runtime_abi)``",
+            "- PE dependencies: $(@($report.pe_audit.dependencies) -join ', ')"
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload pydantic-core static evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pydantic-core-static-cp313
+          path: |
+            dist/pydantic-core/packs/*.zip
+            dist/pydantic-core/staticpython-pack-verify-report.json
+            dist/pydantic-core/staticpython-pack-verify.map
+            dist/pydantic-core/staticpython-pack-verify.pdb
+          if-no-files-found: warn
+          retention-days: 30

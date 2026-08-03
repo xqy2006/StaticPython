@@ -1638,6 +1638,19 @@
         "enabled": false
       }
     },
+    "pydantic-core-experimental": {
+      "description": "Build the pinned experimental pydantic-core Rust static pack and its frozen Python package without adding it to the full supported catalog.",
+      "core_libraries": "all",
+      "third_party_libraries": [
+        "pydantic_core"
+      ],
+      "third_party_library_version_overrides": {
+        "pydantic_core": "2.47.0"
+      },
+      "verification": {
+        "enabled": false
+      }
+    },
     "full": {
       "description": "Build CPython plus every configured third-party library integration. Pure libraries come from third_party_library_catalog; native or patched libraries remain under Lib/<name>/setup.py.",
       "core_libraries": "all",
