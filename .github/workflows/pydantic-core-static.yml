@@ -213,8 +213,18 @@ jobs:
           if ($report.status -ne 'passed' -or $report.pe_audit.status -ne 'passed') {
             throw "SDK-linked behavior or PE audit failed"
           }
-          if (@($report.released_files).Count -ne 0) {
-            throw "pydantic-core verification released runtime files"
+          $releasedFiles = @(
+            foreach ($smoke in @($report.integration_smoke_tests)) {
+              if ($null -eq $smoke.PSObject.Properties['released_files']) {
+                throw "pydantic-core verification smoke $($smoke.name) has no released_files evidence"
+              }
+              foreach ($path in @($smoke.released_files)) {
+                "$($smoke.integration):$($smoke.name):$path"
+              }
+            }
+          )
+          if ($releasedFiles.Count -ne 0) {
+            throw "pydantic-core verification released runtime files: $($releasedFiles -join ', ')"
           }
           @(
             "## Experimental pydantic-core static pack",

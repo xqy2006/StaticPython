@@ -149,6 +149,14 @@ class PydanticCorePackTests(unittest.TestCase):
         )
         self.assertEqual(parsed["host"], "x86_64-pc-windows-msvc")
 
+    def test_workflow_audits_released_files_per_smoke_record(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("@($report.released_files)", workflow)
+        self.assertIn("$smoke.PSObject.Properties['released_files']", workflow)
+        self.assertIn("foreach ($path in @($smoke.released_files))", workflow)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
