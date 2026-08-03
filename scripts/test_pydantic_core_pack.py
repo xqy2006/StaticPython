@@ -10,8 +10,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+SCRIPTS_ROOT = REPO_ROOT / "scripts"
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
 import libs
+import verify_pack_with_runtime_sdk
 
 
 def load_integration_module():
@@ -58,6 +62,11 @@ class PydanticCorePackTests(unittest.TestCase):
         self.assertNotIn(
             "pydantic_core._pydantic_core.lib",
             integration.python_link_wholearchive_release_x64,
+        )
+        self.assertIn("ntdll.lib", integration.python_link_dependencies_release_x64)
+        self.assertIn(
+            "ntdll.lib",
+            verify_pack_with_runtime_sdk.WINDOWS_LINK_LIBRARY_NAMES,
         )
         self.assertEqual(
             [rule["package"] for rule in integration.patch_rules],

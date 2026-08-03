@@ -26,6 +26,7 @@ RUST_SYSTEM_LIBRARIES = [
     "advapi32.lib",
     "bcrypt.lib",
     "kernel32.lib",
+    "ntdll.lib",
     "userenv.lib",
     "ws2_32.lib",
 ]
