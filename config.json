@@ -1639,7 +1639,20 @@
       }
     },
     "pydantic-core-experimental": {
-      "description": "Build the pinned experimental pydantic-core Rust static pack and its frozen Python package without adding it to the full supported catalog.",
+      "description": "Build the pydantic-core version required by current stable Pydantic as an experimental Rust static pack without adding it to the full supported catalog.",
+      "core_libraries": "all",
+      "third_party_libraries": [
+        "pydantic_core"
+      ],
+      "third_party_library_version_overrides": {
+        "pydantic_core": "2.46.4"
+      },
+      "verification": {
+        "enabled": false
+      }
+    },
+    "pydantic-core-latest-experimental": {
+      "description": "Build the latest stable standalone pydantic-core release as an experimental Rust static pack without adding it to the full supported catalog.",
       "core_libraries": "all",
       "third_party_libraries": [
         "pydantic_core"

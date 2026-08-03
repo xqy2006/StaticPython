@@ -9,9 +9,15 @@ from libs import pypi_library, source_path, write_source_text
 
 
 PYDANTIC_CORE_VERSION = "2.47.0"
-PYDANTIC_CORE_SDIST_SHA256 = (
-    "422c1797a7864b2a9a996435aba92fe571fb80190f67a31edbc1ac040c7b51fe"
-)
+PYDANTIC_CORE_PYDANTIC_STABLE_VERSION = "2.46.4"
+PYDANTIC_CORE_SDIST_SHA256_BY_VERSION = {
+    PYDANTIC_CORE_PYDANTIC_STABLE_VERSION: (
+        "62f875393d7f270851f20523dd2e29f082bcc82292d66db2b64ea71f64b6e1c1"
+    ),
+    PYDANTIC_CORE_VERSION: (
+        "422c1797a7864b2a9a996435aba92fe571fb80190f67a31edbc1ac040c7b51fe"
+    ),
+}
 RUST_TOOLCHAIN = "1.88.0"
 RUST_TARGET = "x86_64-pc-windows-msvc"
 RUST_LIBRARY_NAME = "pydantic_core._pydantic_core.lib"
@@ -70,6 +76,17 @@ def _write_pyo3_config(context) -> Path:
     return config_path
 
 
+def _cargo_encoded_rustflags(source_root: Path, target_root: Path) -> str:
+    return "\x1f".join(
+        [
+            "-C",
+            "target-feature=+crt-static",
+            f"--remap-path-prefix={source_root.resolve()}=C:/staticpython/source",
+            f"--remap-path-prefix={target_root.resolve()}=C:/staticpython/target",
+        ]
+    )
+
+
 def build_pydantic_core_static_library(context) -> None:
     if (
         context.configuration.casefold() != "release"
@@ -118,24 +135,19 @@ def build_pydantic_core_static_library(context) -> None:
     target_root = source_path(context, RUST_TARGET_ROOT)
     target_root.mkdir(parents=True, exist_ok=True)
 
-    remap_source = str(context.source_root.resolve())
-    remap_target = str(target_root.resolve())
-    rustflags = " ".join(
-        [
-            "-C target-feature=+crt-static",
-            f"--remap-path-prefix={remap_source}=C:/staticpython/source",
-            f"--remap-path-prefix={remap_target}=C:/staticpython/target",
-        ]
-    )
     environment = os.environ.copy()
+    environment.pop("RUSTFLAGS", None)
     environment.update(
         {
+            "CARGO_ENCODED_RUSTFLAGS": _cargo_encoded_rustflags(
+                context.source_root,
+                target_root,
+            ),
             "CARGO_INCREMENTAL": "0",
             "CARGO_TARGET_DIR": str(target_root),
             "PYO3_BUILD_EXTENSION_MODULE": "1",
             "PYO3_CONFIG_FILE": str(pyo3_config.resolve()),
             "PYO3_USE_RAW_DYLIB": "0",
-            "RUSTFLAGS": rustflags,
             "SOURCE_DATE_EPOCH": "0",
         }
     )
@@ -181,9 +193,7 @@ LIBRARY_INTEGRATION = pypi_library(
     name="pydantic_core",
     project_name="pydantic_core",
     release_version=PYDANTIC_CORE_VERSION,
-    source_archive_sha256_by_version={
-        PYDANTIC_CORE_VERSION: PYDANTIC_CORE_SDIST_SHA256,
-    },
+    source_archive_sha256_by_version=PYDANTIC_CORE_SDIST_SHA256_BY_VERSION,
     dependencies=["typing_extensions"],
     dependency_constraints={"typing_extensions": ">=4.14.1"},
     source_mapping={
@@ -220,6 +230,17 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     patch_rules=[
         {
+            "package": f"=={PYDANTIC_CORE_PYDANTIC_STABLE_VERSION}",
+            "path": "pydantic_core_builtin/Cargo.toml",
+            "replacements": [
+                {
+                    "old": 'crate-type = ["cdylib", "rlib"]',
+                    "new": 'crate-type = ["staticlib", "rlib"]',
+                    "count": 1,
+                }
+            ],
+        },
+        {
             "package": f"=={PYDANTIC_CORE_VERSION}",
             "path": "pydantic_core_builtin/Cargo.toml",
             "replacements": [
@@ -240,7 +261,7 @@ LIBRARY_INTEGRATION = pypi_library(
             "kind": "inline",
             "code": (
                 "import pydantic_core as pc; "
-                f"assert pc.__version__ == '{PYDANTIC_CORE_VERSION}'; "
+                "assert pc.__version__ in ('2.46.4', '2.47.0'); "
                 "validator=pc.SchemaValidator({'type':'int'}); "
                 "assert validator.validate_python('7') == 7; "
                 "assert pc.from_json(b'{\"ok\":true}') == {'ok': True}"

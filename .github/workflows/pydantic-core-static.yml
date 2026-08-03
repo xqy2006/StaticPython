@@ -30,9 +30,9 @@ env:
   RUST_TARGET: "x86_64-pc-windows-msvc"
 
 jobs:
-  sdk-linked-pydantic-core:
+  runtime-sdk:
     runs-on: windows-2022
-    timeout-minutes: 360
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
@@ -40,12 +40,73 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build dependencies and pinned Rust
+      - name: Install runtime build dependencies
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install packaging
           choco install strawberryperl -y --no-progress
+
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Run runtime SDK contract tests
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\test_runtime_sdk.py
+
+      - name: Build exact-commit audited runtime SDK
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP "pydantic-core-runtime"
+          $runtimeDist = Join-Path $env:GITHUB_WORKSPACE "dist\runtime"
+          New-Item -ItemType Directory -Force $runtimeDist | Out-Null
+          python .\build.py `
+            --cpython-version $env:VERIFY_CPYTHON_VERSION `
+            --download-root $runtimeRoot `
+            --profile runtime-sdk `
+            --build-workers $env:STATICPYTHON_BUILD_WORKERS `
+            --output-runtime-sdk-dir $runtimeDist
+
+      - name: Upload exact runtime SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pydantic-core-runtime-sdk-cp313
+          path: dist/runtime/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  sdk-linked-pydantic-core:
+    needs: runtime-sdk
+    runs-on: windows-2022
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pydantic_core_version: "2.46.4"
+            profile: pydantic-core-experimental
+          - pydantic_core_version: "2.47.0"
+            profile: pydantic-core-latest-experimental
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pack build dependencies and pinned Rust
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install packaging
           rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --target $env:RUST_TARGET
           rustup run $env:RUST_TOOLCHAIN rustc -Vv
           rustup run $env:RUST_TOOLCHAIN cargo -V
@@ -63,39 +124,32 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           python .\scripts\test_pydantic_core_pack.py
-          python .\scripts\test_runtime_sdk.py
 
-      - name: Build exact-commit audited runtime SDK
-        shell: pwsh
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          $runtimeRoot = Join-Path $env:RUNNER_TEMP "pydantic-core-runtime"
-          $runtimeDist = Join-Path $env:GITHUB_WORKSPACE "dist\runtime"
-          New-Item -ItemType Directory -Force $runtimeDist | Out-Null
-          python .\build.py `
-            --cpython-version $env:VERIFY_CPYTHON_VERSION `
-            --download-root $runtimeRoot `
-            --profile runtime-sdk `
-            --build-workers $env:STATICPYTHON_BUILD_WORKERS `
-            --output-runtime-sdk-dir $runtimeDist
+      - uses: actions/download-artifact@v4
+        with:
+          name: pydantic-core-runtime-sdk-cp313
+          path: dist/runtime
 
       - name: Build static Rust pack, link audited SDK, and run behavior smoke
         shell: pwsh
+        env:
+          PYDANTIC_CORE_VERSION: ${{ matrix.pydantic_core_version }}
+          PYDANTIC_CORE_PROFILE: ${{ matrix.profile }}
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $runtimeSdk = @(Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE\dist\runtime" -Filter *.zip -File)
           if ($runtimeSdk.Count -ne 1) {
             throw "Expected exactly one runtime SDK archive, found $($runtimeSdk.Count)"
           }
-          $packRoot = Join-Path $env:RUNNER_TEMP "pydantic-core-pack"
-          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\pydantic-core"
+          $packRoot = Join-Path $env:RUNNER_TEMP "pydantic-core-pack-$env:PYDANTIC_CORE_VERSION"
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\pydantic-core-$env:PYDANTIC_CORE_VERSION"
           $packDist = Join-Path $resultRoot "packs"
           New-Item -ItemType Directory -Force $packDist | Out-Null
           python .\build.py `
             --cpython-version $env:VERIFY_CPYTHON_VERSION `
             --download-root $packRoot `
             --config .\config.json `
-            --profile pydantic-core-experimental `
+            --profile $env:PYDANTIC_CORE_PROFILE `
             --pack-only `
             --pack-runtime-sdk $runtimeSdk[0].FullName `
             --build-workers $env:STATICPYTHON_BUILD_WORKERS `
@@ -114,10 +168,12 @@ jobs:
 
       - name: Audit pydantic-core pack contract
         shell: pwsh
+        env:
+          PYDANTIC_CORE_VERSION: ${{ matrix.pydantic_core_version }}
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\pydantic-core"
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\pydantic-core-$env:PYDANTIC_CORE_VERSION"
           $packs = @(Get-ChildItem -LiteralPath "$resultRoot\packs" -Filter *.zip -File)
           if ($packs.Count -ne 1) { throw "Expected one pydantic-core pack, found $($packs.Count)" }
           $archive = [System.IO.Compression.ZipFile]::OpenRead($packs[0].FullName)
@@ -132,7 +188,7 @@ jobs:
           } finally {
             $archive.Dispose()
           }
-          if ($metadata.name -ne 'pydantic_core' -or $metadata.version -ne '2.47.0') {
+          if ($metadata.name -ne 'pydantic_core' -or $metadata.version -ne $env:PYDANTIC_CORE_VERSION) {
             throw "Unexpected pydantic-core pack identity"
           }
           if ($metadata.toolchain.rust.toolchain -ne $env:RUST_TOOLCHAIN) {
@@ -174,11 +230,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pydantic-core-static-cp313
+          name: pydantic-core-static-${{ matrix.pydantic_core_version }}-cp313
           path: |
-            dist/pydantic-core/packs/*.zip
-            dist/pydantic-core/staticpython-pack-verify-report.json
-            dist/pydantic-core/staticpython-pack-verify.map
-            dist/pydantic-core/staticpython-pack-verify.pdb
+            dist/pydantic-core-${{ matrix.pydantic_core_version }}/packs/*.zip
+            dist/pydantic-core-${{ matrix.pydantic_core_version }}/staticpython-pack-verify-report.json
+            dist/pydantic-core-${{ matrix.pydantic_core_version }}/staticpython-pack-verify.map
+            dist/pydantic-core-${{ matrix.pydantic_core_version }}/staticpython-pack-verify.pdb
           if-no-files-found: warn
           retention-days: 30

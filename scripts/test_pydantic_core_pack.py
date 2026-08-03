@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -35,6 +36,7 @@ class PydanticCorePackTests(unittest.TestCase):
         self.assertEqual(
             integration.source_archive_sha256_by_version,
             {
+                "2.46.4": "62f875393d7f270851f20523dd2e29f082bcc82292d66db2b64ea71f64b6e1c1",
                 "2.47.0": "422c1797a7864b2a9a996435aba92fe571fb80190f67a31edbc1ac040c7b51fe"
             },
         )
@@ -57,9 +59,14 @@ class PydanticCorePackTests(unittest.TestCase):
             "pydantic_core._pydantic_core.lib",
             integration.python_link_wholearchive_release_x64,
         )
-        replacement = integration.patch_rules[0]["replacements"][0]
-        self.assertEqual(replacement["old"], 'crate-type = ["cdylib", "rlib"]')
-        self.assertEqual(replacement["new"], 'crate-type = ["staticlib", "rlib"]')
+        self.assertEqual(
+            [rule["package"] for rule in integration.patch_rules],
+            ["==2.46.4", "==2.47.0"],
+        )
+        for rule in integration.patch_rules:
+            replacement = rule["replacements"][0]
+            self.assertEqual(replacement["old"], 'crate-type = ["cdylib", "rlib"]')
+            self.assertEqual(replacement["new"], 'crate-type = ["staticlib", "rlib"]')
         self.assertEqual(integration.license_expression, "MIT")
 
     def test_pyo3_config_targets_exact_non_abi3_cpython(self) -> None:
@@ -89,6 +96,33 @@ class PydanticCorePackTests(unittest.TestCase):
                     "suppress_build_script_link_lines=true",
                 ],
             )
+
+    def test_experimental_profiles_cover_stable_pydantic_and_latest_core(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        profiles = config["profiles"]
+        self.assertEqual(
+            profiles["pydantic-core-experimental"]["third_party_library_version_overrides"],
+            {"pydantic_core": "2.46.4"},
+        )
+        self.assertEqual(
+            profiles["pydantic-core-latest-experimental"][
+                "third_party_library_version_overrides"
+            ],
+            {"pydantic_core": "2.47.0"},
+        )
+
+    def test_encoded_rustflags_preserve_paths_with_spaces(self) -> None:
+        source = Path("C:/build root/source tree")
+        target = Path("C:/build root/target tree")
+        self.assertEqual(
+            self.module._cargo_encoded_rustflags(source, target).split("\x1f"),
+            [
+                "-C",
+                "target-feature=+crt-static",
+                f"--remap-path-prefix={source.resolve()}=C:/staticpython/source",
+                f"--remap-path-prefix={target.resolve()}=C:/staticpython/target",
+            ],
+        )
 
     def test_rustc_verbose_version_parser_preserves_provenance(self) -> None:
         parsed = self.module._parse_rustc_verbose_version(
