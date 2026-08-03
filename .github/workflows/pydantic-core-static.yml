@@ -1,4 +1,4 @@
-name: Experimental Pydantic static packs
+name: Experimental Pydantic and FastAPI static packs
 
 on:
   push:
@@ -25,6 +25,7 @@ on:
       - "libs.py"
       - "scripts/test_pydantic_core_pack.py"
       - "scripts/test_pydantic_pack.py"
+      - "scripts/test_fastapi_pack.py"
       - "scripts/verify_pack_with_runtime_sdk.py"
   workflow_dispatch:
 
@@ -724,5 +725,170 @@ jobs:
             dist/pydantic-2.13.4/verifiers/**/*.exe
             dist/pydantic-2.13.4/verifiers/**/*.map
             dist/pydantic-2.13.4/verifiers/**/*.pdb
+          if-no-files-found: warn
+          retention-days: 30
+
+  sdk-linked-fastapi:
+    needs: runtime-sdk
+    runs-on: windows-2022
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pack build dependencies and pinned Rust
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install packaging
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --target $env:RUST_TARGET
+          rustup run $env:RUST_TOOLCHAIN rustc -Vv
+          rustup run $env:RUST_TOOLCHAIN cargo -V
+
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Run FastAPI pack contract tests
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\test_fastapi_pack.py
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pydantic-core-runtime-sdk-cp313
+          path: dist/runtime
+
+      - name: Build dependency-complete FastAPI packs and run behavior smoke
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $runtimeSdk = @(Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE\dist\runtime" -Filter *.zip -File)
+          if ($runtimeSdk.Count -ne 1) {
+            throw "Expected exactly one runtime SDK archive, found $($runtimeSdk.Count)"
+          }
+          $packRoot = Join-Path $env:RUNNER_TEMP "fastapi-pack-0.141.1"
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\fastapi-0.141.1"
+          $packDist = Join-Path $resultRoot "packs"
+          New-Item -ItemType Directory -Force $packDist | Out-Null
+          python .\build.py `
+            --cpython-version $env:VERIFY_CPYTHON_VERSION `
+            --download-root $packRoot `
+            --config .\config.json `
+            --profile fastapi-experimental `
+            --pack-only `
+            --pack-runtime-sdk $runtimeSdk[0].FullName `
+            --build-workers $env:STATICPYTHON_BUILD_WORKERS `
+            --output-pack-dir $packDist
+          $sourceRoot = Join-Path $packRoot "cpython-$env:VERIFY_CPYTHON_VERSION"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" `
+            -Destination "$resultRoot\staticpython-pack-verify-report.json"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.map" `
+            -Destination "$resultRoot\staticpython-pack-verify.map"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.pdb" `
+            -Destination "$resultRoot\staticpython-pack-verify.pdb"
+
+      - name: Audit FastAPI pack contract
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\fastapi-0.141.1"
+          $packs = @(Get-ChildItem -LiteralPath "$resultRoot\packs" -Filter *.zip -File)
+          if ($packs.Count -ne 10) { throw "Expected ten dependency-complete FastAPI packs, found $($packs.Count)" }
+
+          $metadataByName = @{}
+          foreach ($pack in $packs) {
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($pack.FullName)
+            try {
+              $names = @($archive.Entries | ForEach-Object FullName)
+              $forbidden = @($names | Where-Object { [IO.Path]::GetExtension($_) -in @('.dll', '.pyd', '.exe') })
+              if ($forbidden.Count -gt 0) { throw "$($pack.Name) contains dynamic/executable files: $($forbidden -join ', ')" }
+              $entry = $archive.GetEntry("pack.json")
+              if (-not $entry) { throw "$($pack.Name) has no pack.json" }
+              $reader = [IO.StreamReader]::new($entry.Open())
+              try { $metadata = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+            } finally {
+              $archive.Dispose()
+            }
+            if ($metadataByName.ContainsKey($metadata.name)) { throw "Duplicate pack identity $($metadata.name)" }
+            if ($metadata.verification.status -ne 'passed') { throw "$($metadata.name) was not verified" }
+            if ($metadata.license.status -ne 'complete') { throw "$($metadata.name) has incomplete license evidence" }
+            $metadataByName[$metadata.name] = $metadata
+          }
+
+          $expected = [ordered]@{
+            annotated_doc = '0.0.5'
+            annotated_types = '0.8.0'
+            anyio = '4.14.2'
+            fastapi = '0.141.1'
+            idna = '3.18'
+            pydantic = '2.13.4'
+            pydantic_core = '2.46.4'
+            starlette = '1.3.1'
+            typing_extensions = '4.16.0'
+            typing_inspection = '0.4.2'
+          }
+          foreach ($name in $expected.Keys) {
+            if (-not $metadataByName.ContainsKey($name)) { throw "Missing dependency pack $name" }
+            if ($metadataByName[$name].version -ne $expected[$name]) {
+              throw "Unexpected $name version $($metadataByName[$name].version)"
+            }
+          }
+
+          $fastapi = $metadataByName['fastapi']
+          if ($fastapi.source_archive_sha256 -ne 'e8822fc40db1e1858054d7a949a888695bc9bdce70139178e33bd2871a453ca1') {
+            throw "FastAPI source archive hash is not the pinned sdist"
+          }
+          if ($fastapi.license.expression -ne 'MIT') { throw "FastAPI license expression is not MIT" }
+          $expectedDependencies = @('annotated_doc', 'pydantic', 'starlette', 'typing_extensions', 'typing_inspection')
+          if ((@($fastapi.dependencies) -join ',') -ne ($expectedDependencies -join ',')) {
+            throw "FastAPI dependency metadata does not match the locked core closure"
+          }
+
+          $report = Get-Content -LiteralPath "$resultRoot\staticpython-pack-verify-report.json" -Raw | ConvertFrom-Json
+          if ($report.status -ne 'passed' -or $report.pe_audit.status -ne 'passed') {
+            throw "SDK-linked FastAPI behavior or PE audit failed"
+          }
+          if (@($report.released_files).Count -ne 0) {
+            throw "FastAPI verification released runtime files"
+          }
+          $fastapiSmokes = @($report.integration_smoke_tests | Where-Object {
+            $_.integration -eq 'fastapi' -and $_.status -eq 'passed'
+          })
+          if ($fastapiSmokes.Count -ne 1) { throw "FastAPI behavior smoke did not pass exactly once" }
+          @(
+            "## Experimental FastAPI static pack",
+            "",
+            "- CPython: ``$env:VERIFY_CPYTHON_VERSION``",
+            "- FastAPI: ``$($fastapi.version)``",
+            "- Starlette: ``$($metadataByName['starlette'].version)``",
+            "- Pydantic: ``$($metadataByName['pydantic'].version)``",
+            "- Runtime ABI: ``$($fastapi.runtime_abi)``",
+            "- Packs: $($expected.Keys -join ', ')",
+            "- PE dependencies: $(@($report.pe_audit.dependencies) -join ', ')"
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload FastAPI static evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastapi-static-0.141.1-cp313
+          path: |
+            dist/fastapi-0.141.1/packs/*.zip
+            dist/fastapi-0.141.1/staticpython-pack-verify-report.json
+            dist/fastapi-0.141.1/staticpython-pack-verify.map
+            dist/fastapi-0.141.1/staticpython-pack-verify.pdb
           if-no-files-found: warn
           retention-days: 30
