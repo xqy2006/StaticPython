@@ -14,6 +14,7 @@ SCRIPTS_ROOT = REPO_ROOT / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
+import build
 import libs
 import verify_pack_with_runtime_sdk
 
@@ -64,6 +65,8 @@ class PydanticCorePackTests(unittest.TestCase):
             integration.python_link_wholearchive_release_x64,
         )
         self.assertIn("ntdll.lib", integration.python_link_dependencies_release_x64)
+        self.assertTrue(build.is_windows_sdk_library("ntdll.lib"))
+        self.assertFalse(build.is_packaged_static_library("ntdll.lib"))
         self.assertIn(
             "ntdll.lib",
             verify_pack_with_runtime_sdk.WINDOWS_LINK_LIBRARY_NAMES,

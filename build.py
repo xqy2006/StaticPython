@@ -197,6 +197,7 @@ WINDOWS_SDK_LIBRARY_NAMES = {
     "imm32.lib",
     "msimg32.lib",
     "netapi32.lib",
+    "ntdll.lib",
     "oleacc.lib",
     "setupapi.lib",
     "windowscodecs.lib",
