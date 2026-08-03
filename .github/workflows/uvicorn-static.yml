@@ -164,8 +164,18 @@ jobs:
           if ($report.status -ne 'passed' -or $report.pe_audit.status -ne 'passed') {
             throw "SDK-linked Uvicorn behavior or PE audit failed"
           }
-          if (@($report.released_files).Count -ne 0) {
-            throw "Uvicorn verification released runtime files"
+          $releasedFiles = @(
+            foreach ($smoke in @($report.integration_smoke_tests)) {
+              if ($null -eq $smoke.PSObject.Properties['released_files']) {
+                throw "Uvicorn verification smoke $($smoke.name) has no released_files evidence"
+              }
+              foreach ($path in @($smoke.released_files)) {
+                "$($smoke.integration):$($smoke.name):$path"
+              }
+            }
+          )
+          if ($releasedFiles.Count -ne 0) {
+            throw "Uvicorn verification released runtime files: $($releasedFiles -join ', ')"
           }
           $forbiddenPe = @($report.pe_audit.dependencies | Where-Object {
             $_ -match '^(python.*\.dll|vcruntime.*\.dll|msvcp.*\.dll)$'
