@@ -2152,6 +2152,7 @@ def _integration_from_catalog_entry(entry: dict) -> LibraryIntegration:
         "project_name",
         "release_version",
         "minimum_release_version",
+        "source_archive_sha256_by_version",
         "dependencies",
         "auto_resolve_dependencies",
         "source_entries",
