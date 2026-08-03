@@ -23,10 +23,12 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 contract_build = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(contract_build)
+import pack_evidence
 
 
 def _pack_metadata(payload: bytes = b"payload") -> dict:
     return {
+        "schema_version": 1,
         "kind": "staticpython-library-pack",
         "name": "demo",
         "version": "1.0",
@@ -39,7 +41,9 @@ def _pack_metadata(payload: bytes = b"payload") -> dict:
         "license": {"status": "complete"},
         "verification": {
             "status": "passed",
-            "smoke_tests": [{"name": "behavior", "status": "passed"}],
+            "smoke_tests": [
+                {"name": "behavior", "kind": "import", "status": "passed"}
+            ],
         },
         "files": [
             {
@@ -49,6 +53,20 @@ def _pack_metadata(payload: bytes = b"payload") -> dict:
             }
         ],
     }
+
+
+def _bind_metadata(metadata: dict) -> None:
+    metadata["verification"].update(
+        {
+            "provisional_pack_sha256": "a" * 64,
+            "payload_manifest_sha256": pack_evidence.pack_payload_manifest_sha256(
+                metadata
+            ),
+            "metadata_without_verification_sha256": (
+                pack_evidence.pack_metadata_without_verification_sha256(metadata)
+            ),
+        }
+    )
 
 
 def _write_pack(path: Path, *, extra_name: str | None = None) -> None:
@@ -63,6 +81,7 @@ def _write_pack(path: Path, *, extra_name: str | None = None) -> None:
                 "sha256": hashlib.sha256(extra_payload).hexdigest(),
             }
         )
+    _bind_metadata(metadata)
     with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
         archive.writestr("src/payload.bin", payload)
         archive.writestr("pack.json", json.dumps(metadata))
@@ -164,6 +183,21 @@ class LibraryContractBuildTests(unittest.TestCase):
             root = Path(temporary)
             _write_pack(root / "demo.zip", extra_name="lib/demo.pyd")
             with self.assertRaisesRegex(RuntimeError, "dynamic native artifacts"):
+                contract_build.verify_pack(root, "demo", "1.0", "3.13.14")
+
+    def test_pack_rejects_missing_promotion_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pack = root / "demo.zip"
+            _write_pack(pack)
+            with ZipFile(pack) as archive:
+                payload = archive.read("src/payload.bin")
+                metadata = json.loads(archive.read("pack.json"))
+            metadata["verification"].pop("provisional_pack_sha256")
+            with ZipFile(pack, "w", compression=ZIP_DEFLATED) as archive:
+                archive.writestr("src/payload.bin", payload)
+                archive.writestr("pack.json", json.dumps(metadata))
+            with self.assertRaisesRegex(RuntimeError, "incomplete or unknown"):
                 contract_build.verify_pack(root, "demo", "1.0", "3.13.14")
 
     def test_pe_audit_allows_system_dlls_and_rejects_vc_runtime(self) -> None:

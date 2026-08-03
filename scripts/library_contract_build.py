@@ -6,12 +6,20 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from zipfile import ZipFile
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from pack_evidence import validate_pack_verification_metadata
 
 
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -251,6 +259,7 @@ def verify_pack(
     verification = metadata.get("verification")
     if not isinstance(verification, dict) or verification.get("status") != "passed":
         raise RuntimeError("pack verification status is not passed")
+    validate_pack_verification_metadata(metadata)
     smoke_tests = verification.get("smoke_tests")
     if not isinstance(smoke_tests, list) or not smoke_tests:
         raise RuntimeError("pack contains no behavior smoke-test records")

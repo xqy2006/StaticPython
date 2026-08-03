@@ -15,8 +15,10 @@ class PublishReleaseAssetTests(unittest.TestCase):
         commit = "a" * 40
         pack = root / "pack.zip"
         runtime = root / "runtime.zip"
+        verification = root / "staticpython-pack-verification-cp311-a-f.json"
         pack.write_bytes(b"pack")
         runtime.write_bytes(b"runtime")
+        verification.write_text('{"status":"passed"}\n', encoding="utf-8")
 
         def record(path: Path) -> dict:
             return {
@@ -32,8 +34,9 @@ class PublishReleaseAssetTests(unittest.TestCase):
             "staticpython_repository": "xqy2006/StaticPython",
             "staticpython_commit": commit,
             "release_families": {
-                "a-f": {"tag": "packs-a-f", "asset_count": 1},
+                "a-f": {"tag": "packs-a-f", "asset_count": 2},
             },
+            "verification_reports": {"a-f": [record(verification)]},
             "packs": {
                 "demo": {
                     "1": {
@@ -54,7 +57,10 @@ class PublishReleaseAssetTests(unittest.TestCase):
             index, commit = self._fixture(root)
             specs = build_release_specs(root, index, "xqy2006/StaticPython", commit)
             self.assertEqual([spec.tag for spec in specs], ["packs-a-f", "runtime"])
-            self.assertEqual([asset.name for asset in specs[0].assets], ["pack.zip"])
+            self.assertEqual(
+                [asset.name for asset in specs[0].assets],
+                ["pack.zip", "staticpython-pack-verification-cp311-a-f.json"],
+            )
             self.assertEqual(
                 [asset.name for asset in specs[1].assets],
                 ["runtime-index.v1.json", "runtime.zip"],

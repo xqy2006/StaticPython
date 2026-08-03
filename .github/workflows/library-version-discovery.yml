@@ -10,6 +10,7 @@ on:
       - "scripts/*library*history*.py"
       - "scripts/verify_pack_with_runtime_sdk.py"
       - "scripts/test_verify_pack_with_runtime_sdk.py"
+      - "pack_evidence.py"
       - "build.py"
       - "config.json"
       - "libs.py"
@@ -23,6 +24,7 @@ on:
       - "scripts/*library*history*.py"
       - "scripts/verify_pack_with_runtime_sdk.py"
       - "scripts/test_verify_pack_with_runtime_sdk.py"
+      - "pack_evidence.py"
       - "build.py"
       - "config.json"
       - "libs.py"
@@ -52,6 +54,7 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       has_candidates: ${{ steps.matrix.outputs.has_candidates }}
+      runtime_versions: ${{ steps.matrix.outputs.runtime_versions }}
       contract_sha256: ${{ steps.matrix.outputs.contract_sha256 }}
     steps:
       - uses: actions/checkout@v4
@@ -249,11 +252,19 @@ jobs:
           }
           python @matrixArgs
           $matrix = (Get-Content -LiteralPath $matrixPath -Raw).Trim()
-          $includeCount = @((ConvertFrom-Json $matrix).include).Count
+          $parsedMatrix = ConvertFrom-Json $matrix
+          $candidateRecords = @($parsedMatrix.include | Where-Object { $null -ne $_ })
+          $includeCount = $candidateRecords.Count
+          $runtimeVersions = @(
+            $candidateRecords |
+              ForEach-Object { [string]$_.python_version } |
+              Sort-Object -Unique
+          )
           $hasCandidates = ($includeCount -gt 0).ToString().ToLowerInvariant()
           $contract = Get-Content -LiteralPath $contractPath -Raw | ConvertFrom-Json
           "matrix=$matrix" >> $env:GITHUB_OUTPUT
           "has_candidates=$hasCandidates" >> $env:GITHUB_OUTPUT
+          "runtime_versions=$(ConvertTo-Json -InputObject @($runtimeVersions) -Compress)" >> $env:GITHUB_OUTPUT
           "contract_sha256=$($contract.contract_sha256)" >> $env:GITHUB_OUTPUT
           Get-Content -LiteralPath $summaryPath | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
 
@@ -266,8 +277,58 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-  validate-new-candidates:
+  build-contract-runtime-sdks:
     needs: discover
+    if: ${{ needs.discover.outputs.has_candidates == 'true' }}
+    runs-on: windows-2022
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ${{ fromJSON(needs.discover.outputs.runtime_versions) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime SDK build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install packaging
+          choco install strawberryperl -y --no-progress
+
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Build audited contract runtime SDK
+        shell: pwsh
+        run: |
+          $dist = "$env:GITHUB_WORKSPACE\dist\contract-runtime\${{ matrix.python_version }}"
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          python .\build.py `
+            --cpython-version "${{ matrix.python_version }}" `
+            --download-root "$env:RUNNER_TEMP\contract-runtime-${{ matrix.python_version }}" `
+            --profile runtime-sdk `
+            --build-workers $env:STATICPYTHON_CONTRACT_BUILD_WORKERS `
+            --output-runtime-sdk-dir $dist
+
+      - name: Upload immutable contract runtime SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-runtime-sdk-${{ matrix.python_version }}
+          path: dist/contract-runtime/${{ matrix.python_version }}/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  validate-new-candidates:
+    needs: [discover, build-contract-runtime-sdks]
     if: ${{ needs.discover.outputs.has_candidates == 'true' }}
     runs-on: windows-2022
     timeout-minutes: 360
@@ -296,6 +357,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Download exact contract runtime SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-runtime-sdk-${{ matrix.python_version }}
+          path: ${{ runner.temp }}/contract-runtime-sdk-${{ matrix.python_version }}
 
       - name: Install build dependencies
         shell: pwsh
@@ -336,12 +403,23 @@ jobs:
         shell: pwsh
         run: |
           $packDir = "$env:CONTRACT_RESULT_ROOT\packs"
+          $runtimeSdk = @(
+            Get-ChildItem `
+              -LiteralPath "$env:RUNNER_TEMP\contract-runtime-sdk-${{ matrix.python_version }}" `
+              -Filter *.zip `
+              -File
+          )
+          if ($runtimeSdk.Count -ne 1) {
+            throw "Expected exactly one contract runtime SDK, found $($runtimeSdk.Count)"
+          }
           New-Item -ItemType Directory -Force $packDir | Out-Null
           python .\build.py `
             --cpython-version $env:CONTRACT_PYTHON_VERSION `
             --download-root $env:CONTRACT_BUILD_ROOT `
             --config "$env:CONTRACT_RESULT_ROOT\config.json" `
             --profile library-contract `
+            --pack-only `
+            --pack-runtime-sdk $runtimeSdk[0].FullName `
             --build-workers $env:STATICPYTHON_CONTRACT_BUILD_WORKERS `
             --output-pack-dir $packDir `
             --output-pack-name $env:CONTRACT_LIBRARY
@@ -349,7 +427,15 @@ jobs:
       - name: Audit source, pack, behavior and PE dependencies
         shell: pwsh
         run: |
-          $pythonExe = "$env:CONTRACT_BUILD_ROOT\cpython-$env:CONTRACT_PYTHON_VERSION\PCbuild\amd64\python.exe"
+          $reportPath = "$env:CONTRACT_BUILD_ROOT\cpython-$env:CONTRACT_PYTHON_VERSION\PCbuild\staticpython-pack-verify-report.json"
+          $pack = @(Get-ChildItem -LiteralPath "$env:CONTRACT_RESULT_ROOT\packs" -Filter *.zip -File)
+          if ($pack.Count -ne 1) { throw "Expected exactly one final contract pack, found $($pack.Count)" }
+          python .\pack_evidence.py --report $reportPath --pack $pack[0].FullName
+          $sdkReport = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          $verificationExe = [string]$sdkReport.executable
+          if (-not (Test-Path -LiteralPath $verificationExe -PathType Leaf)) {
+            throw "SDK-linked verification executable is missing: $verificationExe"
+          }
           python .\scripts\library_contract_build.py verify `
             --download-root $env:CONTRACT_SOURCE_CACHE `
             --project-name $env:CONTRACT_PROJECT_NAME `
@@ -359,7 +445,7 @@ jobs:
             --filename $env:CONTRACT_SOURCE_FILENAME `
             --sha256 $env:CONTRACT_SOURCE_SHA256 `
             --pack-dir "$env:CONTRACT_RESULT_ROOT\packs" `
-            --python-exe $pythonExe `
+            --python-exe $verificationExe `
             --report "$env:CONTRACT_RESULT_ROOT\library-contract-build-report.json"
 
       - name: Upload candidate evidence
@@ -371,7 +457,7 @@ jobs:
             ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/packs/*.zip
             ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/library-contract-build-report.json
             ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/config.json
-            ${{ runner.temp }}/library-contract-${{ matrix.slug }}/cpython-${{ matrix.python_version }}/PCbuild/staticpython-verify-report.json
+            ${{ runner.temp }}/library-contract-${{ matrix.slug }}/cpython-${{ matrix.python_version }}/PCbuild/staticpython-pack-verify-report.json
           if-no-files-found: warn
           retention-days: 30
 

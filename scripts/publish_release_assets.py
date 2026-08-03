@@ -53,16 +53,28 @@ def _find_index(asset_root: Path, explicit: Path | None) -> Path:
     return matches[0].resolve()
 
 
-def _discover_zip_assets(asset_root: Path) -> dict[str, Path]:
+def _discover_release_assets(asset_root: Path) -> dict[str, Path]:
     by_name: dict[str, Path] = {}
-    for path in sorted(asset_root.rglob("*.zip")):
+    candidates = [
+        path
+        for path in asset_root.rglob("*")
+        if path.is_file()
+        and (
+            path.suffix.casefold() == ".zip"
+            or (
+                path.name.startswith("staticpython-pack-verification-")
+                and path.suffix.casefold() == ".json"
+            )
+        )
+    ]
+    for path in sorted(candidates, key=lambda item: item.name.casefold()):
         if path.name in by_name:
             raise RuntimeError(f"duplicate release asset filename: {path.name}")
         by_name[path.name] = path.resolve()
     return by_name
 
 
-def _asset_spec(record: dict, zip_by_name: dict[str, Path]) -> AssetSpec:
+def _asset_spec(record: dict, assets_by_name: dict[str, Path]) -> AssetSpec:
     name = record.get("filename")
     expected_size = record.get("size")
     expected_sha = record.get("sha256")
@@ -72,9 +84,9 @@ def _asset_spec(record: dict, zip_by_name: dict[str, Path]) -> AssetSpec:
         raise RuntimeError(f"release index contains an invalid size for {name}")
     if not isinstance(expected_sha, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
         raise RuntimeError(f"release index contains an invalid SHA-256 for {name}")
-    path = zip_by_name.get(name)
+    path = assets_by_name.get(name)
     if path is None:
-        raise RuntimeError(f"release index references a missing ZIP asset: {name}")
+        raise RuntimeError(f"release index references a missing release asset: {name}")
     actual_size = path.stat().st_size
     if actual_size != expected_size:
         raise RuntimeError(f"release asset size mismatch for {name}: {actual_size} != {expected_size}")
@@ -103,7 +115,7 @@ def build_release_specs(
     if index.get("staticpython_commit") != source_commit:
         raise RuntimeError("release artifact index belongs to a different StaticPython commit")
 
-    zip_by_name = _discover_zip_assets(asset_root)
+    assets_by_name = _discover_release_assets(asset_root)
     referenced_names: set[str] = set()
     specs: list[ReleaseSpec] = []
     short_commit = source_commit[:12]
@@ -111,6 +123,9 @@ def build_release_specs(
     families = index.get("release_families")
     if not isinstance(packs, dict) or not isinstance(families, dict) or not families:
         raise RuntimeError("release artifact index has no library-pack families")
+    all_verification_reports = index.get("verification_reports", {})
+    if not isinstance(all_verification_reports, dict):
+        raise RuntimeError("release artifact index has invalid verification reports")
 
     for family, family_record in sorted(families.items()):
         if not isinstance(family_record, dict):
@@ -127,11 +142,22 @@ def build_release_specs(
                     raise RuntimeError("release index has invalid pack ABI metadata")
                 for record in by_abi.values():
                     if isinstance(record, dict) and record.get("release_family") == family:
-                        asset = _asset_spec(record, zip_by_name)
+                        asset = _asset_spec(record, assets_by_name)
                         if asset.name in referenced_names:
                             raise RuntimeError(f"release index references asset more than once: {asset.name}")
                         referenced_names.add(asset.name)
                         assets.append(asset)
+        verification_reports = all_verification_reports.get(family, [])
+        if not isinstance(verification_reports, list):
+            raise RuntimeError(f"release family {family} has invalid verification reports")
+        for report_record in verification_reports:
+            if not isinstance(report_record, dict):
+                raise RuntimeError(f"release family {family} has an invalid report asset")
+            asset = _asset_spec(report_record, assets_by_name)
+            if asset.name in referenced_names:
+                raise RuntimeError(f"release index references asset more than once: {asset.name}")
+            referenced_names.add(asset.name)
+            assets.append(asset)
         assets.sort(key=lambda item: item.name.casefold())
         if len(assets) != family_record.get("asset_count"):
             raise RuntimeError(
@@ -157,7 +183,7 @@ def build_release_specs(
     for record in runtimes.values():
         if not isinstance(record, dict):
             raise RuntimeError("release index has invalid runtime metadata")
-        asset = _asset_spec(record, zip_by_name)
+        asset = _asset_spec(record, assets_by_name)
         if asset.name in referenced_names:
             raise RuntimeError(f"release index references asset more than once: {asset.name}")
         referenced_names.add(asset.name)
@@ -179,9 +205,9 @@ def build_release_specs(
         )
     )
 
-    unreferenced = sorted(set(zip_by_name) - referenced_names)
+    unreferenced = sorted(set(assets_by_name) - referenced_names)
     if unreferenced:
-        raise RuntimeError("release artifact contains unreferenced ZIP assets: " + ", ".join(unreferenced))
+        raise RuntimeError("release artifact contains unreferenced assets: " + ", ".join(unreferenced))
     return tuple(specs)
 
 

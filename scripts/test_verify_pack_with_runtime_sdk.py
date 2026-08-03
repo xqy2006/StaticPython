@@ -142,6 +142,19 @@ class VerifyPackWithRuntimeSDKTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "case-colliding"):
             verifier.safe_extract_zip(collision, self.root / "extract-collision")
 
+        for index, unsafe_name in enumerate(
+            ("C:evil", "dir/file:stream", "NUL.txt", "trailing.")
+        ):
+            with self.subTest(unsafe_name=unsafe_name):
+                archive_path = self.root / f"windows-unsafe-{index}.zip"
+                with ZipFile(archive_path, "w") as archive:
+                    archive.writestr(unsafe_name, "bad")
+                with self.assertRaisesRegex(RuntimeError, "unsafe ZIP member"):
+                    verifier.safe_extract_zip(
+                        archive_path,
+                        self.root / f"extract-windows-unsafe-{index}",
+                    )
+
     def test_runtime_and_pack_hashes_and_provenance_are_validated(self) -> None:
         runtime_root, runtime = self._make_runtime()
         self.assertEqual(verifier.validate_runtime_sdk(runtime_root)["runtime_abi"], "staticpython-pack-v1-cp313")

@@ -26,6 +26,7 @@ from tools import resolve_tool_exe
 from pack_evidence import (
     pack_metadata_without_verification_sha256,
     pack_payload_manifest_sha256,
+    safe_archive_member_name,
 )
 
 
@@ -133,14 +134,9 @@ def sha256_file(path: Path) -> str:
 
 
 def _safe_relative(value: object, *, description: str) -> PurePosixPath:
-    if not isinstance(value, str) or not value or "\\" in value:
-        raise RuntimeError(f"invalid {description}: {value!r}")
-    path = PurePosixPath(value)
-    if path.is_absolute() or value.startswith("/") or any(part in {"", ".", ".."} for part in path.parts):
-        raise RuntimeError(f"unsafe {description}: {value!r}")
-    if path.parts and ":" in path.parts[0]:
-        raise RuntimeError(f"unsafe {description}: {value!r}")
-    return path
+    return PurePosixPath(
+        safe_archive_member_name(value, description=description)
+    )
 
 
 def _safe_file(root: Path, relative: object, *, description: str = "asset path") -> Path:
@@ -1219,7 +1215,8 @@ def verify_assets(args: argparse.Namespace) -> int:
                         "name": pack.metadata["name"],
                         "version": pack.metadata["version"],
                         "path": str(pack.archive),
-                        "sha256": sha256_file(pack.archive),
+                        "sha256": (provisional_sha := sha256_file(pack.archive)),
+                        "provisional_sha256": provisional_sha,
                         "payload_manifest_sha256": pack_payload_manifest_sha256(pack.metadata),
                         "metadata_without_verification_sha256": (
                             pack_metadata_without_verification_sha256(pack.metadata)

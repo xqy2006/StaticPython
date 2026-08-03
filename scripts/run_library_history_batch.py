@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 import build_library_contract_config as contract_config  # noqa: E402
 import library_contract_build as contract_build  # noqa: E402
 import library_history_evidence as history_evidence  # noqa: E402
+import pack_evidence  # noqa: E402
 
 
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -55,6 +56,7 @@ def _validate_verifier_report(
 ) -> dict:
     if report.get("status") != "passed" or report.get("failures"):
         raise RuntimeError("SDK-linked pack verifier did not pass")
+    pack_evidence.validate_promoted_pack_evidence(report, [pack_path])
     runtime = report.get("runtime_sdk")
     if not isinstance(runtime, dict):
         raise RuntimeError("SDK-linked pack verifier has no runtime_sdk record")
@@ -71,17 +73,30 @@ def _validate_verifier_report(
                 f"expected {expected!r}, got {runtime.get(key)!r}"
             )
     packs = report.get("packs")
-    if not isinstance(packs, list) or len(packs) != 1 or not isinstance(packs[0], dict):
-        raise RuntimeError("SDK-linked pack verifier must describe exactly one pack")
+    if not isinstance(packs, list) or not packs:
+        raise RuntimeError("SDK-linked pack verifier must describe at least one pack")
+    matching_packs = [
+        record
+        for record in packs
+        if isinstance(record, dict)
+        and record.get("name") == library
+        and record.get("version") == version
+    ]
+    if len(matching_packs) != 1:
+        raise RuntimeError(
+            "SDK-linked pack verifier must describe the exact root pack once: "
+            f"{library} {version} matched {len(matching_packs)} records"
+        )
+    root_pack = matching_packs[0]
     expected_pack_sha = history_evidence.file_sha256(pack_path)
     expected_pack = {"name": library, "version": version}
     for key, expected in expected_pack.items():
-        if packs[0].get(key) != expected:
+        if root_pack.get(key) != expected:
             raise RuntimeError(
                 f"SDK-linked pack verifier pack {key} mismatch: "
-                f"expected {expected!r}, got {packs[0].get(key)!r}"
+                f"expected {expected!r}, got {root_pack.get(key)!r}"
             )
-    provisional_pack_sha = packs[0].get("sha256")
+    provisional_pack_sha = root_pack.get("sha256")
     if not isinstance(provisional_pack_sha, str) or not SHA256_PATTERN.fullmatch(
         provisional_pack_sha
     ):

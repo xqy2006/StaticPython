@@ -24,6 +24,12 @@ from build import (
     sha256_file,
     staticpython_pack_release_family,
 )
+from pack_evidence import (
+    file_sha256 as evidence_file_sha256,
+    read_pack_metadata,
+    validate_pack_verification_metadata,
+    validate_promoted_pack_evidence,
+)
 
 
 TARGET_ABIS = ("cp311", "cp312", "cp313", "cp314", "cp315")
@@ -69,7 +75,7 @@ def discover_assets(root: Path) -> tuple[list[tuple[Path, dict]], list[tuple[Pat
             continue
         pack = read_json_member(path, STATICPYTHON_PACK_METADATA_NAME)
         if pack is not None:
-            packs.append((path, pack))
+            packs.append((path, read_pack_metadata(path)))
     return runtimes, packs
 
 
@@ -81,6 +87,115 @@ def _asset_record(path: Path, metadata: dict, repository: str, tag: str) -> dict
         "sha256": sha256_file(path),
         "metadata": metadata,
     }
+
+
+def validate_pack_promotion_reports(
+    root: Path,
+    pack_assets: list[tuple[Path, dict]],
+    runtimes: dict[str, dict],
+) -> dict[Path, dict]:
+    if not pack_assets:
+        return {}
+    packs_by_name: dict[str, Path] = {}
+    for path, _metadata in pack_assets:
+        if path.name in packs_by_name:
+            raise RuntimeError(f"duplicate pack asset filename: {path.name}")
+        packs_by_name[path.name] = path
+    report_paths = sorted(
+        root.rglob("staticpython-pack-verification-*.json"),
+        key=lambda path: path.name.casefold(),
+    )
+    if not report_paths:
+        raise RuntimeError("verified pack assets have no SDK promotion reports")
+
+    covered: dict[Path, dict] = {}
+    report_names: set[str] = set()
+    for report_path in report_paths:
+        if report_path.name in report_names:
+            raise RuntimeError(f"duplicate pack promotion report filename: {report_path.name}")
+        report_names.add(report_path.name)
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise RuntimeError(f"invalid pack promotion report {report_path.name}: {exc}") from exc
+        if not isinstance(report, dict):
+            raise RuntimeError(f"pack promotion report must be an object: {report_path.name}")
+        promotion = report.get("promotion")
+        records = promotion.get("packs") if isinstance(promotion, dict) else None
+        if not isinstance(records, list) or not records:
+            raise RuntimeError(f"pack promotion report has no final assets: {report_path.name}")
+        selected: list[Path] = []
+        for record in records:
+            asset_name = record.get("asset") if isinstance(record, dict) else None
+            if not isinstance(asset_name, str) or asset_name not in packs_by_name:
+                raise RuntimeError(
+                    f"pack promotion report {report_path.name} references unknown asset {asset_name!r}"
+                )
+            pack_path = packs_by_name[asset_name]
+            if pack_path in covered:
+                raise RuntimeError(f"pack asset has multiple promotion reports: {asset_name}")
+            selected.append(pack_path)
+        validate_promoted_pack_evidence(report, selected)
+        report_sha = evidence_file_sha256(report_path)
+        runtime = report.get("runtime_sdk", {})
+        pe_audit = report.get("pe_audit", {})
+        provisional_by_identity = {
+            (record.get("name"), record.get("version")): record
+            for record in report["packs"]
+        }
+        promotion_by_asset = {record["asset"]: record for record in records}
+        promoted_families = {
+            pack_family(read_pack_metadata(pack_path)["name"])
+            for pack_path in selected
+        }
+        if len(promoted_families) != 1:
+            raise RuntimeError(
+                f"pack promotion report {report_path.name} spans release families: "
+                f"{sorted(promoted_families)}"
+            )
+        report_family = next(iter(promoted_families))
+        for pack_path in selected:
+            metadata = read_pack_metadata(pack_path)
+            identity = (metadata["name"], metadata["version"])
+            provisional = provisional_by_identity[identity]
+            final = promotion_by_asset[pack_path.name]
+            abi = metadata.get("cpython_abi")
+            runtime_record = runtimes.get(abi)
+            if not isinstance(runtime_record, dict):
+                raise RuntimeError(
+                    f"pack promotion report {report_path.name} has no indexed runtime for {abi}"
+                )
+            runtime_metadata = runtime_record.get("metadata", {})
+            expected_runtime = {
+                "archive_sha256": runtime_record.get("sha256"),
+                "cpython_version": runtime_metadata.get("cpython_version"),
+                "runtime_abi": runtime_metadata.get("runtime_abi"),
+                "staticpython_commit": runtime_metadata.get("staticpython_commit"),
+            }
+            if not isinstance(runtime, dict) or any(
+                runtime.get(field) != expected
+                for field, expected in expected_runtime.items()
+            ):
+                raise RuntimeError(
+                    f"pack promotion report {report_path.name} does not match its {abi} runtime SDK"
+                )
+            covered[pack_path] = {
+                "report_filename": report_path.name,
+                "report_size": report_path.stat().st_size,
+                "report_sha256": report_sha,
+                "report_family": report_family,
+                "runtime_sdk_sha256": runtime.get("archive_sha256"),
+                "provisional_pack_sha256": provisional["sha256"],
+                "final_pack_sha256": final["final_sha256"],
+                "pe_dependencies": pe_audit["dependencies"],
+            }
+
+    missing = sorted(
+        path.name for path, _metadata in pack_assets if path not in covered
+    )
+    if missing:
+        raise RuntimeError("verified pack assets lack promotion evidence: " + ", ".join(missing))
+    return covered
 
 
 def _is_full_commit(value: object) -> bool:
@@ -242,7 +357,8 @@ def build_index(
 
     packs: dict[str, dict[str, dict[str, dict]]] = {}
     release_families: dict[str, dict] = {}
-    family_counts: dict[str, int] = {}
+    family_pack_counts: dict[str, int] = {}
+    family_report_assets: dict[str, dict[str, dict]] = {}
     if require_verified:
         incomplete_licenses = [
             path.name
@@ -254,6 +370,17 @@ def build_index(
                 "release index contains packs with incomplete license metadata:\n- "
                 + "\n- ".join(incomplete_licenses)
             )
+        for path, metadata in pack_assets:
+            if metadata.get("verification", {}).get("status") != "passed":
+                raise RuntimeError(f"pack asset {path.name} is not verified")
+            validate_pack_verification_metadata(metadata)
+        promotion_evidence = validate_pack_promotion_reports(
+            asset_root,
+            pack_assets,
+            runtimes,
+        )
+    else:
+        promotion_evidence = {}
     for path, metadata in pack_assets:
         name = metadata.get("name")
         version = metadata.get("version")
@@ -267,6 +394,7 @@ def build_index(
         if require_verified and metadata.get("verification", {}).get("status") != "passed":
             raise RuntimeError(f"pack asset {path.name} is not verified")
         if require_verified:
+            validate_pack_verification_metadata(metadata)
             _validate_verified_provenance(metadata, path)
             runtime_metadata = runtimes.get(abi, {}).get("metadata", {})
             if (
@@ -278,20 +406,45 @@ def build_index(
                 raise RuntimeError(f"pack asset {path.name} does not match its {abi} runtime toolchain")
         family = pack_family(name)
         tag = f"{pack_tag_prefix}-{family}"
-        family_counts[family] = family_counts.get(family, 0) + 1
+        family_pack_counts[family] = family_pack_counts.get(family, 0) + 1
         record = _asset_record(path, metadata, repository, tag)
         record["release_family"] = family
+        if require_verified:
+            evidence = dict(promotion_evidence[path])
+            if evidence.pop("report_family") != family:
+                raise RuntimeError(
+                    f"pack asset {path.name} promotion report belongs to a different release family"
+                )
+            report_filename = evidence.pop("report_filename")
+            report_asset = {
+                "filename": report_filename,
+                "url": asset_url(repository, tag, report_filename),
+            }
+            report_asset["size"] = evidence.pop("report_size")
+            report_asset["sha256"] = evidence.pop("report_sha256")
+            reports = family_report_assets.setdefault(family, {})
+            previous = reports.setdefault(report_asset["filename"], report_asset)
+            if previous != report_asset:
+                raise RuntimeError(
+                    f"release family {family} has conflicting report asset {report_asset['filename']}"
+                )
+            evidence["report"] = report_asset
+            record["verification_evidence"] = evidence
         by_abi = packs.setdefault(name, {}).setdefault(version, {})
         if abi in by_abi:
             raise RuntimeError(f"duplicate pack asset for {name} {version} {abi}")
         by_abi[abi] = record
 
-    for family, count in sorted(family_counts.items()):
+    for family, pack_count in sorted(family_pack_counts.items()):
+        report_count = len(family_report_assets.get(family, {}))
+        count = pack_count + report_count
         if count > 900:
             raise RuntimeError(f"release family {family} has {count} assets; maximum is 900")
         release_families[family] = {
             "tag": f"{pack_tag_prefix}-{family}",
             "asset_count": count,
+            "pack_asset_count": pack_count,
+            "verification_report_asset_count": report_count,
             "maximum_assets": 900,
         }
 
@@ -320,6 +473,15 @@ def build_index(
         },
         "runtime_release_tag": runtime_tag,
         "release_families": release_families,
+        "verification_reports": {
+            family: [
+                record
+                for _name, record in sorted(
+                    reports.items(), key=lambda item: item[0].casefold()
+                )
+            ]
+            for family, reports in sorted(family_report_assets.items())
+        },
         "runtimes": dict(sorted(runtimes.items())),
         "packs": {
             name: {

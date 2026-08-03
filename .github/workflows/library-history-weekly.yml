@@ -11,6 +11,7 @@ on:
       - "scripts/library_contract_build.py"
       - "scripts/build_library_contract_config.py"
       - "scripts/verify_pack_with_runtime_sdk.py"
+      - "pack_evidence.py"
       - "build.py"
       - "config.json"
       - "Lib/**"

@@ -38,6 +38,7 @@ from libs import (
 )
 from tools import resolve_tool_exe
 from pack_evidence import (
+    bind_promoted_pack_evidence,
     pack_metadata_without_verification_sha256,
     pack_payload_manifest_sha256,
 )
@@ -1993,125 +1994,6 @@ def export_library_packs(
         )
         for integration in integrations
     ]
-
-
-def _read_exported_pack_metadata(pack_path: Path) -> dict:
-    with ZipFile(pack_path) as archive:
-        records = [record for record in archive.infolist() if not record.is_dir()]
-        names = [record.filename for record in records]
-        records_by_name = {record.filename: record for record in records}
-        if len(names) != len(set(names)):
-            raise RuntimeError(f"promoted pack contains duplicate ZIP members: {pack_path.name}")
-        if names.count(STATICPYTHON_PACK_METADATA_NAME) != 1:
-            raise RuntimeError(f"promoted pack must contain one root pack.json: {pack_path.name}")
-        try:
-            metadata = json.loads(archive.read(STATICPYTHON_PACK_METADATA_NAME))
-        except (BadZipFile, json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise RuntimeError(f"could not read promoted pack metadata {pack_path.name}: {exc}") from exc
-        if not isinstance(metadata, dict):
-            raise RuntimeError(f"promoted pack metadata must be an object: {pack_path.name}")
-        files = metadata.get("files")
-        if not isinstance(files, list):
-            raise RuntimeError(f"promoted pack files must be a list: {pack_path.name}")
-        recorded_paths: set[str] = set()
-        for record in files:
-            if not isinstance(record, dict):
-                raise RuntimeError(f"promoted pack has an invalid file record: {pack_path.name}")
-            relative = record.get("path")
-            expected_size = record.get("size")
-            expected_sha = record.get("sha256")
-            if not isinstance(relative, str) or relative in recorded_paths or relative not in names:
-                raise RuntimeError(f"promoted pack has an invalid recorded path: {relative!r}")
-            if not isinstance(expected_size, int) or expected_size < 0:
-                raise RuntimeError(f"promoted pack has an invalid recorded size: {relative}")
-            if not isinstance(expected_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
-                raise RuntimeError(f"promoted pack has an invalid recorded SHA-256: {relative}")
-            archive_record = records_by_name[relative]
-            if archive_record.file_size != expected_size:
-                raise RuntimeError(f"promoted pack payload does not match its manifest: {relative}")
-            digest = hashlib.sha256()
-            with archive.open(archive_record, "r") as payload:
-                for chunk in iter(lambda: payload.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            if digest.hexdigest() != expected_sha:
-                raise RuntimeError(f"promoted pack payload does not match its manifest: {relative}")
-            recorded_paths.add(relative)
-        unrecorded = sorted(set(names) - {STATICPYTHON_PACK_METADATA_NAME} - recorded_paths)
-        if unrecorded:
-            raise RuntimeError(f"promoted pack contains unrecorded files: {unrecorded}")
-    return metadata
-
-
-def bind_promoted_pack_evidence(
-    verification_report: dict,
-    promoted_packs: list[Path],
-) -> dict:
-    if (
-        verification_report.get("kind") != "staticpython-pack-sdk-verification"
-        or verification_report.get("status") != "passed"
-    ):
-        raise RuntimeError("pack promotion requires a passed SDK verification report")
-    provisional_records = verification_report.get("packs")
-    if not isinstance(provisional_records, list):
-        raise RuntimeError("SDK verification report has no provisional pack records")
-    if not promoted_packs:
-        raise RuntimeError("pack promotion requires at least one final pack")
-
-    final_records: list[dict] = []
-    for pack_path in promoted_packs:
-        metadata = _read_exported_pack_metadata(pack_path)
-        name = metadata.get("name")
-        version = metadata.get("version")
-        matching_records = [
-            record
-            for record in provisional_records
-            if isinstance(record, dict)
-            and record.get("name") == name
-            and record.get("version") == version
-        ]
-        if len(matching_records) != 1:
-            raise RuntimeError(
-                f"promoted pack {name} {version} has {len(matching_records)} provisional records"
-            )
-        provisional = matching_records[0]
-        verification = metadata.get("verification")
-        if not isinstance(verification, dict) or verification.get("status") != "passed":
-            raise RuntimeError(f"promoted pack {name} {version} is not verification=passed")
-
-        comparisons = {
-            "provisional_pack_sha256": provisional.get("sha256"),
-            "payload_manifest_sha256": pack_payload_manifest_sha256(metadata),
-            "metadata_without_verification_sha256": (
-                pack_metadata_without_verification_sha256(metadata)
-            ),
-        }
-        for field, actual in comparisons.items():
-            expected = verification.get(field)
-            if not isinstance(expected, str) or expected != actual:
-                raise RuntimeError(
-                    f"promoted pack {name} {version} does not preserve verified {field}"
-                )
-
-        final_records.append(
-            {
-                "name": name,
-                "version": version,
-                "path": str(pack_path),
-                "provisional_sha256": provisional["sha256"],
-                "final_sha256": sha256_file(pack_path),
-                "payload_manifest_sha256": comparisons["payload_manifest_sha256"],
-                "metadata_without_verification_sha256": comparisons[
-                    "metadata_without_verification_sha256"
-                ],
-            }
-        )
-
-    verification_report["promotion"] = {
-        "status": "passed",
-        "policy": "verification-metadata-only",
-        "packs": final_records,
-    }
-    return verification_report
 
 
 def select_output_pack_integrations(integrations: list, requested_names: list[str]) -> list:
