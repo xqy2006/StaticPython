@@ -102,6 +102,7 @@ class LibraryIntegration:
     staged_static_libraries_release_x64: list[dict] = field(default_factory=list)
     python_link_dependencies_release_x64: list[str] = field(default_factory=list)
     python_link_wholearchive_release_x64: list[str] = field(default_factory=list)
+    trusted_object_origins: list[dict] = field(default_factory=list)
     top_level_import_names: list[str] = field(default_factory=list)
     dependency_constraints: dict[str, str] = field(default_factory=dict)
     conflicts: list[str] = field(default_factory=list)
@@ -1614,6 +1615,7 @@ def pypi_library(
     staged_static_libraries_release_x64: list[dict] | None = None,
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
+    trusted_object_origins: list[dict] | None = None,
     top_level_import_names: list[str] | None = None,
     dependency_constraints: dict[str, str] | None = None,
     conflicts: list[str] | None = None,
@@ -1667,6 +1669,7 @@ def pypi_library(
         staged_static_libraries_release_x64=list(staged_static_libraries_release_x64 or []),
         python_link_dependencies_release_x64=list(python_link_dependencies_release_x64 or []),
         python_link_wholearchive_release_x64=list(python_link_wholearchive_release_x64 or []),
+        trusted_object_origins=list(trusted_object_origins or []),
         top_level_import_names=list(top_level_import_names or python_packages or [name]),
         dependency_constraints=dict(dependency_constraints or {}),
         conflicts=list(conflicts or []),
@@ -1711,6 +1714,7 @@ def github_library(
     staged_static_libraries_release_x64: list[dict] | None = None,
     python_link_dependencies_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
+    trusted_object_origins: list[dict] | None = None,
     top_level_import_names: list[str] | None = None,
     dependency_constraints: dict[str, str] | None = None,
     conflicts: list[str] | None = None,
@@ -1764,6 +1768,7 @@ def github_library(
         staged_static_libraries_release_x64=list(staged_static_libraries_release_x64 or []),
         python_link_dependencies_release_x64=list(python_link_dependencies_release_x64 or []),
         python_link_wholearchive_release_x64=list(python_link_wholearchive_release_x64 or []),
+        trusted_object_origins=list(trusted_object_origins or []),
         top_level_import_names=list(top_level_import_names or python_packages or [name]),
         dependency_constraints=dict(dependency_constraints or {}),
         conflicts=list(conflicts or []),
