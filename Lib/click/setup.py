@@ -180,6 +180,11 @@ def patch_click_sources(context) -> None:
 
 LIBRARY_INTEGRATION = simple_library(
     name='click',
+    dependencies=['colorama'],
     overlay_entries=['Lib/click'],
+    release_version='8.4.2',
+    source_archive_sha256_by_version={
+        '8.4.2': '9a6cea6e60b17ebe0a44c5cc636d94f09bd66142c1cd7d8b4cd731c4917a15f6',
+    },
     post_patch_hooks=[patch_click_sources],
 )
