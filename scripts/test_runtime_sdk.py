@@ -711,6 +711,34 @@ struct _inittab _PyImport_Inittab[] = {
             license_expression="MIT",
             license_files=["Lib/demo/LICENSE.txt"],
         )
+        provisional_output = self.root / "provisional-dist"
+        provisional_path = build.export_library_pack(
+            self.root,
+            provisional_output,
+            (3, 13, 0),
+            "3.13.0",
+            "x64",
+            integration,
+        )
+        with ZipFile(provisional_path) as archive:
+            provisional_metadata = json.loads(archive.read("pack.json"))
+        verification_report = {
+            "kind": "staticpython-pack-sdk-verification",
+            "status": "passed",
+            "packs": [{
+                "name": "demo",
+                "version": "1.2.3",
+                "sha256": build.sha256_file(provisional_path),
+                "payload_manifest_sha256": build.pack_payload_manifest_sha256(provisional_metadata),
+                "metadata_without_verification_sha256": (
+                    build.pack_metadata_without_verification_sha256(provisional_metadata)
+                ),
+            }],
+            "integration_smoke_tests": [
+                {"integration": "demo", "name": "import-demo", "kind": "import", "status": "passed"},
+                {"integration": "other", "name": "import-other", "kind": "import", "status": "passed"},
+            ],
+        }
         output = self.root / "dist"
         archive_path = build.export_library_pack(
             self.root,
@@ -720,12 +748,7 @@ struct _inittab _PyImport_Inittab[] = {
             "x64",
             integration,
             verification_status="passed",
-            verification_report={
-                "integration_smoke_tests": [
-                    {"integration": "demo", "name": "import-demo", "kind": "import", "status": "passed"},
-                    {"integration": "other", "name": "import-other", "kind": "import", "status": "passed"},
-                ]
-            },
+            verification_report=verification_report,
         )
         with ZipFile(archive_path) as archive:
             metadata = json.loads(archive.read("pack.json"))
@@ -739,9 +762,107 @@ struct _inittab _PyImport_Inittab[] = {
                 metadata["verification"]["smoke_tests"],
                 [{"name": "import-demo", "kind": "import", "status": "passed"}],
             )
+            self.assertEqual(
+                metadata["verification"]["provisional_pack_sha256"],
+                build.sha256_file(provisional_path),
+            )
             self.assertIn('"demo"', descriptor)
             self.assertIn("staticpython_pack_demo_resource_", descriptor)
             self.assertNotIn('_Py_M__other', descriptor)
+        bound = build.bind_promoted_pack_evidence(verification_report, [archive_path])
+        self.assertEqual(bound["promotion"]["packs"][0]["final_sha256"], build.sha256_file(archive_path))
+
+    def test_promoted_pack_evidence_binds_final_archive_to_verified_payload(self) -> None:
+        staging = self.root / "pack-stage"
+        staging.mkdir()
+        (staging / "payload.bin").write_bytes(b"verified payload")
+        payload_record = {
+            "path": "payload.bin",
+            "size": 16,
+            "sha256": hashlib.sha256(b"verified payload").hexdigest(),
+        }
+        provisional_metadata = {
+            "schema_version": 1,
+            "kind": "staticpython-library-pack",
+            "name": "demo",
+            "version": "1.0",
+            "files": [payload_record],
+            "verification": {"status": "not-run", "smoke_tests": []},
+        }
+        (staging / "pack.json").write_text(json.dumps(provisional_metadata), encoding="utf-8")
+        provisional = self.root / "provisional.zip"
+        build.write_deterministic_zip(staging, provisional)
+        payload_manifest_sha = build.pack_payload_manifest_sha256(provisional_metadata)
+        metadata_sha = build.pack_metadata_without_verification_sha256(provisional_metadata)
+        report = {
+            "schema_version": 1,
+            "kind": "staticpython-pack-sdk-verification",
+            "status": "passed",
+            "packs": [{
+                "name": "demo",
+                "version": "1.0",
+                "sha256": build.sha256_file(provisional),
+                "payload_manifest_sha256": payload_manifest_sha,
+                "metadata_without_verification_sha256": metadata_sha,
+            }],
+        }
+        final_metadata = dict(provisional_metadata)
+        final_metadata["verification"] = {
+            "status": "passed",
+            "smoke_tests": [{"name": "demo", "status": "passed"}],
+            "provisional_pack_sha256": build.sha256_file(provisional),
+            "payload_manifest_sha256": payload_manifest_sha,
+            "metadata_without_verification_sha256": metadata_sha,
+        }
+        (staging / "pack.json").write_text(json.dumps(final_metadata), encoding="utf-8")
+        final = self.root / "final.zip"
+        build.write_deterministic_zip(staging, final)
+
+        bound = build.bind_promoted_pack_evidence(report, [final])
+
+        self.assertEqual(bound["promotion"]["status"], "passed")
+        self.assertEqual(bound["promotion"]["packs"][0]["final_sha256"], build.sha256_file(final))
+
+    def test_promoted_pack_evidence_rejects_payload_drift(self) -> None:
+        staging = self.root / "pack-stage"
+        staging.mkdir()
+        (staging / "payload.bin").write_bytes(b"changed")
+        changed_record = {
+            "path": "payload.bin",
+            "size": 7,
+            "sha256": hashlib.sha256(b"changed").hexdigest(),
+        }
+        metadata = {
+            "schema_version": 1,
+            "kind": "staticpython-library-pack",
+            "name": "demo",
+            "version": "1.0",
+            "files": [changed_record],
+            "verification": {
+                "status": "passed",
+                "smoke_tests": [],
+                "provisional_pack_sha256": "a" * 64,
+                "payload_manifest_sha256": "b" * 64,
+                "metadata_without_verification_sha256": "c" * 64,
+            },
+        }
+        (staging / "pack.json").write_text(json.dumps(metadata), encoding="utf-8")
+        final = self.root / "final.zip"
+        build.write_deterministic_zip(staging, final)
+        report = {
+            "kind": "staticpython-pack-sdk-verification",
+            "status": "passed",
+            "packs": [{
+                "name": "demo",
+                "version": "1.0",
+                "sha256": "a" * 64,
+                "payload_manifest_sha256": "b" * 64,
+                "metadata_without_verification_sha256": "c" * 64,
+            }],
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "does not preserve verified payload_manifest_sha256"):
+            build.bind_promoted_pack_evidence(report, [final])
 
     def test_prepare_hooks_finalize_custom_pypi_license_metadata(self) -> None:
         source_root = self.root / "source"

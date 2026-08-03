@@ -23,6 +23,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools import resolve_tool_exe
+from pack_evidence import (
+    pack_metadata_without_verification_sha256,
+    pack_payload_manifest_sha256,
+)
 
 
 RUNTIME_METADATA_PATH = "metadata/runtime-sdk.v1.json"
@@ -1216,6 +1220,10 @@ def verify_assets(args: argparse.Namespace) -> int:
                         "version": pack.metadata["version"],
                         "path": str(pack.archive),
                         "sha256": sha256_file(pack.archive),
+                        "payload_manifest_sha256": pack_payload_manifest_sha256(pack.metadata),
+                        "metadata_without_verification_sha256": (
+                            pack_metadata_without_verification_sha256(pack.metadata)
+                        ),
                     }
                     for pack in packs
                 ],
