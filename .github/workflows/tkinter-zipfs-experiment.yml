@@ -119,6 +119,7 @@ jobs:
           } finally {
             $evidence = @{
               "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" = "$resultRoot\staticpython-pack-verify-report.json"
+              "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.exe" = "$resultRoot\staticpython-pack-verify.exe"
               "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.map" = "$resultRoot\staticpython-pack-verify.map"
               "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.pdb" = "$resultRoot\staticpython-pack-verify.pdb"
             }
@@ -186,6 +187,58 @@ jobs:
           if ($report.status -ne "passed" -or $report.pe_audit.status -ne "passed") {
             throw "SDK-linked tkinter verification or PE audit did not pass"
           }
+          $exePath = "$resultRoot\staticpython-pack-verify.exe"
+          $mapPath = "$resultRoot\staticpython-pack-verify.map"
+          $pdbPath = "$resultRoot\staticpython-pack-verify.pdb"
+          foreach ($evidencePath in @($exePath, $mapPath, $pdbPath)) {
+            if (
+              -not (Test-Path -LiteralPath $evidencePath -PathType Leaf) -or
+              (Get-Item -LiteralPath $evidencePath).Length -le 0
+            ) {
+              throw "tkinter verifier evidence is missing or empty: $evidencePath"
+            }
+          }
+          $exeSha256 = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if (
+            $exeSha256 -ne $report.executable_sha256 -or
+            $exeSha256 -ne $report.pe_audit.executable_sha256
+          ) {
+            throw "uploaded tkinter verifier executable hash does not match its report"
+          }
+          $mapSha256 = (Get-FileHash -LiteralPath $mapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($mapSha256 -ne $report.pe_audit.map_sha256) {
+            throw "uploaded tkinter verifier map hash does not match its report"
+          }
+          if (
+            @($report.pe_audit.forbidden_dependencies).Count -ne 0 -or
+            @($report.pe_audit.non_system_dependencies).Count -ne 0 -or
+            @($report.pe_audit.forbidden_entry_symbols).Count -ne 0 -or
+            @($report.pe_audit.main_object_records).Count -ne 0
+          ) {
+            throw "tkinter verifier report contains forbidden PE evidence"
+          }
+          $dependencyOutput = (& dumpbin /NOLOGO /DEPENDENTS $exePath | Out-String)
+          if ($LASTEXITCODE -ne 0) {
+            throw "dumpbin could not re-audit the uploaded tkinter verifier executable"
+          }
+          $observedDependencies = @(
+            $dependencyOutput -split "`r?`n" |
+              ForEach-Object { $_.Trim() } |
+              Where-Object { $_ -match '(?i)^[a-z0-9_.-]+\.dll$' } |
+              ForEach-Object { $_.ToUpperInvariant() } |
+              Sort-Object -Unique
+          )
+          $reportedDependencies = @(
+            $report.pe_audit.dependencies |
+              ForEach-Object { $_.ToUpperInvariant() } |
+              Sort-Object -Unique
+          )
+          if (
+            $observedDependencies.Count -eq 0 -or
+            @(Compare-Object $reportedDependencies $observedDependencies).Count -ne 0
+          ) {
+            throw "uploaded tkinter verifier PE imports do not match its report"
+          }
           @(
             "## Experimental tkinter ZipFS pack",
             "",
@@ -204,6 +257,7 @@ jobs:
           path: |
             dist/tkinter/packs/*.zip
             dist/tkinter/staticpython-pack-verify-report.json
+            dist/tkinter/staticpython-pack-verify.exe
             dist/tkinter/staticpython-pack-verify.map
             dist/tkinter/staticpython-pack-verify.pdb
           if-no-files-found: warn

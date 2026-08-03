@@ -412,10 +412,28 @@ Tcl_AppInit(Tcl_Interp *interp)
         self.assertIn("finally {", build_step)
         for evidence in (
             "staticpython-pack-verify-report.json",
+            "staticpython-pack-verify.exe",
             "staticpython-pack-verify.map",
             "staticpython-pack-verify.pdb",
         ):
             self.assertIn(evidence, build_step)
+
+        audit_step = workflow.split(
+            "- name: Assert no-extraction pack evidence",
+            1,
+        )[1].split("- name: Upload tkinter pack evidence", 1)[0]
+        self.assertIn("Get-FileHash -LiteralPath $exePath", audit_step)
+        self.assertIn("Get-FileHash -LiteralPath $mapPath", audit_step)
+        self.assertIn("dumpbin /NOLOGO /DEPENDENTS $exePath", audit_step)
+        self.assertIn("Compare-Object $reportedDependencies $observedDependencies", audit_step)
+        self.assertIn("forbidden_entry_symbols", audit_step)
+        self.assertIn("main_object_records", audit_step)
+
+        upload_step = workflow.split(
+            "- name: Upload tkinter pack evidence",
+            1,
+        )[1]
+        self.assertIn("dist/tkinter/staticpython-pack-verify.exe", upload_step)
 
     def test_archive_manifest_uses_pinned_commit_without_git_checkout(self) -> None:
         source = self.root / "tcl-source"
