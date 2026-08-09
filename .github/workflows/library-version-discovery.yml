@@ -239,7 +239,8 @@ jobs:
             "--contract", $contractPath,
             "--delta", $deltaPath,
             "--matrix-output", $matrixPath,
-            "--summary-output", $summaryPath
+            "--summary-output", $summaryPath,
+            "--defer-overflow-to-history"
           )
           if ("${{ github.event_name }}" -eq "pull_request") {
             $matrixArgs += @(

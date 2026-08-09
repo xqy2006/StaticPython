@@ -24,6 +24,7 @@ SCHEMA_VERSION = 1
 INDEX_KIND = "staticpython-library-contract-index"
 EVIDENCE_KIND = "staticpython-library-contract-promotion-evidence"
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+DEFERRED_REASON = "weekly-history-shards"
 
 
 def _canonical_sha256(payload: dict) -> str:
@@ -214,6 +215,7 @@ def _validate_matrix_and_reports(
 ) -> tuple[dict, list[dict], list[dict]]:
     blockers: list[dict] = []
     matrix_records: list[dict] = []
+    raw_deferred = None
     if matrix is None:
         if delta.get("new_candidates") and not (delta.get("drifted_candidates") or delta.get("regressions")):
             blockers.append({"code": "missing-validation-matrix", "count": 1})
@@ -224,6 +226,7 @@ def _validate_matrix_and_reports(
         if any(not isinstance(record, dict) for record in include):
             raise RuntimeError("validation matrix records must be objects")
         matrix_records = list(include)
+        raw_deferred = matrix.get("deferred")
 
     delta_candidates = delta.get("new_candidates")
     if not isinstance(delta_candidates, list):
@@ -238,7 +241,24 @@ def _validate_matrix_and_reports(
         for record in matrix_records
         if record.get("validation_reason") == "new-candidate"
     }
-    if delta_identities != matrix_new_identities and not (
+    deferred = None
+    if raw_deferred is not None:
+        valid_deferred = (
+            isinstance(raw_deferred, dict)
+            and raw_deferred.get("reason") == DEFERRED_REASON
+            and raw_deferred.get("candidate_count") == len(delta_candidates)
+            and raw_deferred.get("candidate_count") == len(delta_identities)
+            and raw_deferred.get("contract_sha256") == delta.get("current_contract_sha256")
+            and isinstance(raw_deferred.get("matrix_limit"), int)
+            and 0 < raw_deferred["matrix_limit"] <= 256
+            and not matrix_new_identities
+            and len(delta_candidates) > raw_deferred["matrix_limit"]
+        )
+        if valid_deferred:
+            deferred = dict(raw_deferred)
+        else:
+            blockers.append({"code": "invalid-history-deferral", "count": 1})
+    if deferred is None and delta_identities != matrix_new_identities and not (
         matrix is None and (delta.get("drifted_candidates") or delta.get("regressions"))
     ):
         blockers.append(
@@ -328,6 +348,7 @@ def _validate_matrix_and_reports(
         "failed": failed,
         "unexpected": unexpected,
         "passed": passed,
+        "deferred": deferred,
     }
     return validation, verified_new, blockers
 
@@ -434,6 +455,9 @@ def promote_catalog(
     if blockers:
         decision_status = "frozen"
         gate_status = "failed"
+    elif validation.get("deferred") is not None:
+        decision_status = "deferred"
+        gate_status = "passed"
     elif previous_sha == candidate_sha:
         decision_status = "unchanged"
         gate_status = "passed"
@@ -570,6 +594,7 @@ def build_summary(index: dict, evidence: dict) -> str:
     delta = evidence["delta"]
     active = index.get("active")
     proposed = index.get("proposed_active")
+    deferred = validation.get("deferred")
     lines = [
         "## StaticPython library contract promotion",
         "",
@@ -578,6 +603,7 @@ def build_summary(index: dict, evidence: dict) -> str:
         f"- Active: `{active.get('contract_sha256') if isinstance(active, dict) else '<none>'}`",
         f"- Proposed active: `{proposed.get('contract_sha256') if isinstance(proposed, dict) else '<none>'}`",
         f"- Validation: `{validation['passed_count']}/{validation['expected_count']}` passed",
+        f"- Deferred to weekly history shards: `{deferred.get('candidate_count', 0) if isinstance(deferred, dict) else 0}`",
         f"- New evidence-backed unbuildable records: `{len(delta['new_unbuildable'])}`",
         f"- Source drift records: `{len(delta['drifted_candidates'])}`",
         f"- Regression records: `{len(delta['regressions'])}`",
