@@ -329,6 +329,40 @@ class PromotionTests(unittest.TestCase):
         self.assertEqual(evidence["validation"]["passed_count"], 2)
         self.assertEqual(evidence["validation"]["missing"], [])
         self.assertEqual(evidence["validation"]["unexpected"], [])
+        self.assertEqual(
+            {record["artifact"] for record in evidence["validation"]["passed"]},
+            {"library-contract-batch-001-test"},
+        )
+
+        tampered_second = dict(second_matrix)
+        tampered_second["source_url"] = "https://example.invalid/tampered.tar.gz"
+        with self.assertRaisesRegex(RuntimeError, "payload differs from include record"):
+            self.run_promotion(
+                candidate,
+                delta(
+                    baseline["contract_sha256"],
+                    candidate["contract_sha256"],
+                    baseline=False,
+                    new_candidates=[first_delta, second_delta],
+                ),
+                matrix_payload={
+                    "include": batch_candidates,
+                    "batches": [
+                        {
+                            "slug": "batch-001-test",
+                            "candidate_count": 2,
+                            "candidates_json": json.dumps(
+                                [first_matrix, tampered_second],
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                        }
+                    ],
+                },
+                validation_reports=[first_report, second_report],
+                previous_catalog=previous_catalog,
+                output_name="batched-tampered",
+            )
 
     def test_missing_validation_freezes_previous_active_directory(self) -> None:
         baseline = contract({"3.13.14": {"status": "unbuildable", "reason": "no source"}})
