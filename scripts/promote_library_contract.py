@@ -25,6 +25,9 @@ INDEX_KIND = "staticpython-library-contract-index"
 EVIDENCE_KIND = "staticpython-library-contract-promotion-evidence"
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 DEFERRED_REASON = "weekly-history-shards"
+MATRIX_LIMIT = 256
+MAX_CANDIDATES_PER_BATCH = 2
+SAFE_ARTIFACT_SLUG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 
 
 def _canonical_sha256(payload: dict) -> str:
@@ -208,6 +211,82 @@ def _validation_reports(root: Path | None) -> tuple[dict[tuple[str, str, str], d
     return reports, duplicates
 
 
+def _matrix_artifacts(matrix: dict, matrix_records: list[dict]) -> dict[str, str]:
+    """Bind every candidate to the exact Actions artifact that carries its report."""
+    include_by_slug: dict[str, dict] = {}
+    for record in matrix_records:
+        slug = record.get("slug")
+        if not isinstance(slug, str) or SAFE_ARTIFACT_SLUG_PATTERN.fullmatch(slug) is None:
+            raise RuntimeError(f"validation matrix record has an invalid artifact slug: {record!r}")
+        if slug in include_by_slug:
+            raise RuntimeError(f"validation matrix contains duplicate candidate slug: {slug}")
+        include_by_slug[slug] = record
+
+    raw_batches = matrix.get("batches")
+    if raw_batches is None:
+        # Compatibility for evidence produced before candidates were grouped into
+        # bounded jobs. In that layout each candidate had its own artifact.
+        return {slug: f"library-contract-{slug}" for slug in include_by_slug}
+    if not isinstance(raw_batches, list):
+        raise RuntimeError("validation matrix batches must be an array")
+
+    artifact_by_candidate: dict[str, str] = {}
+    seen_batch_slugs: set[str] = set()
+    for batch in raw_batches:
+        if not isinstance(batch, dict):
+            raise RuntimeError("validation matrix batch records must be objects")
+        batch_slug = batch.get("slug")
+        if (
+            not isinstance(batch_slug, str)
+            or SAFE_ARTIFACT_SLUG_PATTERN.fullmatch(batch_slug) is None
+        ):
+            raise RuntimeError(f"validation matrix batch has an invalid artifact slug: {batch!r}")
+        if batch_slug in seen_batch_slugs:
+            raise RuntimeError(f"validation matrix contains duplicate batch slug: {batch_slug}")
+        seen_batch_slugs.add(batch_slug)
+
+        candidate_count = batch.get("candidate_count")
+        if (
+            not isinstance(candidate_count, int)
+            or isinstance(candidate_count, bool)
+            or not 1 <= candidate_count <= MAX_CANDIDATES_PER_BATCH
+        ):
+            raise RuntimeError(f"validation matrix batch has an invalid candidate count: {batch!r}")
+        candidates_json = batch.get("candidates_json")
+        if not isinstance(candidates_json, str) or not candidates_json:
+            raise RuntimeError("validation matrix batch has no candidates_json payload")
+        try:
+            candidates = json.loads(candidates_json)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("validation matrix batch candidates_json is invalid") from exc
+        if not isinstance(candidates, list) or len(candidates) != candidate_count:
+            raise RuntimeError("validation matrix batch candidate count does not match its payload")
+
+        artifact = f"library-contract-{batch_slug}"
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                raise RuntimeError("validation matrix batch candidates must be objects")
+            candidate_slug = candidate.get("slug")
+            if not isinstance(candidate_slug, str) or candidate_slug not in include_by_slug:
+                raise RuntimeError("validation matrix batch contains an unknown candidate slug")
+            if candidate != include_by_slug[candidate_slug]:
+                raise RuntimeError(
+                    f"validation matrix batch payload differs from include record: {candidate_slug}"
+                )
+            if candidate_slug in artifact_by_candidate:
+                raise RuntimeError(
+                    f"validation matrix candidate appears in multiple batches: {candidate_slug}"
+                )
+            artifact_by_candidate[candidate_slug] = artifact
+
+    missing = sorted(set(include_by_slug) - set(artifact_by_candidate))
+    if missing:
+        raise RuntimeError(
+            "validation matrix batches omit candidate artifacts: " + ", ".join(missing)
+        )
+    return artifact_by_candidate
+
+
 def _validate_matrix_and_reports(
     delta: dict,
     matrix: dict | None,
@@ -215,6 +294,7 @@ def _validate_matrix_and_reports(
 ) -> tuple[dict, list[dict], list[dict]]:
     blockers: list[dict] = []
     matrix_records: list[dict] = []
+    artifact_by_candidate: dict[str, str] = {}
     raw_deferred = None
     if matrix is None:
         if delta.get("new_candidates") and not (delta.get("drifted_candidates") or delta.get("regressions")):
@@ -226,6 +306,7 @@ def _validate_matrix_and_reports(
         if any(not isinstance(record, dict) for record in include):
             raise RuntimeError("validation matrix records must be objects")
         matrix_records = list(include)
+        artifact_by_candidate = _matrix_artifacts(matrix, matrix_records)
         raw_deferred = matrix.get("deferred")
 
     delta_candidates = delta.get("new_candidates")
@@ -243,16 +324,36 @@ def _validate_matrix_and_reports(
     }
     deferred = None
     if raw_deferred is not None:
+        matrix_limit = (
+            raw_deferred.get("matrix_limit") if isinstance(raw_deferred, dict) else None
+        )
+        max_candidates_per_batch = (
+            raw_deferred.get("max_candidates_per_batch")
+            if isinstance(raw_deferred, dict)
+            else None
+        )
+        incremental_candidate_limit = (
+            raw_deferred.get("incremental_candidate_limit")
+            if isinstance(raw_deferred, dict)
+            else None
+        )
         valid_deferred = (
             isinstance(raw_deferred, dict)
             and raw_deferred.get("reason") == DEFERRED_REASON
             and raw_deferred.get("candidate_count") == len(delta_candidates)
             and raw_deferred.get("candidate_count") == len(delta_identities)
             and raw_deferred.get("contract_sha256") == delta.get("current_contract_sha256")
-            and isinstance(raw_deferred.get("matrix_limit"), int)
-            and 0 < raw_deferred["matrix_limit"] <= 256
+            and isinstance(matrix_limit, int)
+            and not isinstance(matrix_limit, bool)
+            and 0 < matrix_limit <= MATRIX_LIMIT
+            and isinstance(max_candidates_per_batch, int)
+            and not isinstance(max_candidates_per_batch, bool)
+            and 0 < max_candidates_per_batch <= MAX_CANDIDATES_PER_BATCH
+            and isinstance(incremental_candidate_limit, int)
+            and not isinstance(incremental_candidate_limit, bool)
+            and incremental_candidate_limit == matrix_limit * max_candidates_per_batch
             and not matrix_new_identities
-            and len(delta_candidates) > raw_deferred["matrix_limit"]
+            and len(delta_candidates) > incremental_candidate_limit
         )
         if valid_deferred:
             deferred = dict(raw_deferred)
@@ -286,6 +387,7 @@ def _validate_matrix_and_reports(
     verified_new: list[dict] = []
     for matrix_record in matrix_records:
         identity = _matrix_identity(matrix_record)
+        matrix_slug = matrix_record["slug"]
         key = identity[:3]
         if key in expected_keys:
             blockers.append(
@@ -305,7 +407,7 @@ def _validate_matrix_and_reports(
             "python_version": matrix_record.get("python_version"),
             "source_sha256": identity[3],
             "validation_reason": matrix_record.get("validation_reason"),
-            "artifact": f"library-contract-{matrix_record.get('slug', '<missing>')}",
+            "artifact": artifact_by_candidate[matrix_slug],
         }
         if report is None:
             missing.append(identity_record)

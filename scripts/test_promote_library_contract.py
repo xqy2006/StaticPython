@@ -140,6 +140,7 @@ class PromotionTests(unittest.TestCase):
         mode: str = "promote",
         matrix_payload: dict | None = None,
         validation_report: dict | None = None,
+        validation_reports: list[dict] | None = None,
         previous_catalog: Path | None = None,
         legacy_baseline: Path | None = None,
         output_name: str = "catalog",
@@ -152,6 +153,14 @@ class PromotionTests(unittest.TestCase):
         validation_root = self.root / f"{output_name}-validation"
         if validation_report is not None:
             write_json(validation_root / "job" / "library-contract-build-report.json", validation_report)
+        for index, candidate_report in enumerate(validation_reports or [], start=1):
+            write_json(
+                validation_root
+                / "library-contract-batch-001"
+                / f"candidate-{index}"
+                / "library-contract-build-report.json",
+                candidate_report,
+            )
         output = self.root / output_name
         result = promotion.promote_catalog(
             candidate_path,
@@ -220,6 +229,140 @@ class PromotionTests(unittest.TestCase):
             ).read_text()
         )
         self.assertEqual(evidence["validation"]["passed_count"], 1)
+
+    def test_batched_reports_are_recursively_matched_to_exact_candidates(self) -> None:
+        baseline = contract({"3.13.14": {"status": "unbuildable", "reason": "no source"}})
+        baseline["libraries"]["demo"]["versions"]["1.1"] = {
+            "targets": {"3.13.14": {"status": "unbuildable", "reason": "no source"}}
+        }
+        baseline["status_counts"]["unbuildable"] = 2
+        baseline["contract_sha256"] = contract_module._contract_sha256(
+            {key: value for key, value in baseline.items() if key != "contract_sha256"}
+        )
+        baseline_path = write_json(self.root / "batched-legacy.json", baseline)
+        _initial, previous_catalog = self.run_promotion(
+            baseline,
+            delta(baseline["contract_sha256"], baseline["contract_sha256"], baseline=False),
+            legacy_baseline=baseline_path,
+            output_name="batched-previous",
+        )
+
+        first_sha = "a" * 64
+        second_sha = "c" * 64
+        candidate = contract(
+            {"3.13.14": {"status": "candidate", "source": source(first_sha)}}
+        )
+        second_source = {
+            **source(second_sha),
+            "filename": "demo-1.1.tar.gz",
+            "url": "https://files.pythonhosted.org/demo-1.1.tar.gz",
+        }
+        candidate["libraries"]["demo"]["versions"]["1.1"] = {
+            "targets": {"3.13.14": {"status": "candidate", "source": second_source}}
+        }
+        candidate["status_counts"]["candidate"] = 2
+        candidate["contract_sha256"] = contract_module._contract_sha256(
+            {key: value for key, value in candidate.items() if key != "contract_sha256"}
+        )
+
+        first_delta = candidate_record(first_sha)
+        second_delta = {
+            **candidate_record(second_sha),
+            "version": "1.1",
+            "source": second_source,
+        }
+        first_matrix = matrix_record(first_sha)
+        second_matrix = {
+            **matrix_record(second_sha),
+            "version": "1.1",
+            "source_filename": "demo-1.1.tar.gz",
+            "source_url": "https://files.pythonhosted.org/demo-1.1.tar.gz",
+            "slug": f"demo-1.1-py3.13.14-{second_sha[:12]}",
+        }
+        batch_candidates = [first_matrix, second_matrix]
+        first_report = report(first_sha)
+        second_report = {
+            **report(second_sha),
+            "version": "1.1",
+            "source_archive": "downloads/demo-1.1.tar.gz",
+            "pack": "packs/demo-1.1.zip",
+            "pack_sha256": "d" * 64,
+        }
+
+        result, output = self.run_promotion(
+            candidate,
+            delta(
+                baseline["contract_sha256"],
+                candidate["contract_sha256"],
+                baseline=False,
+                new_candidates=[first_delta, second_delta],
+            ),
+            matrix_payload={
+                "include": batch_candidates,
+                "batches": [
+                    {
+                        "slug": "batch-001-test",
+                        "candidate_count": 2,
+                        "candidates_json": json.dumps(
+                            batch_candidates,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    }
+                ],
+            },
+            validation_reports=[first_report, second_report],
+            previous_catalog=previous_catalog,
+            output_name="batched-promoted",
+        )
+        self.assertEqual(result["decision"]["status"], "promoted")
+        self.assertEqual(len(result["active"]["verified_combinations"]), 2)
+        evidence = json.loads(
+            (
+                output
+                / "candidates"
+                / candidate["contract_sha256"]
+                / "promotion-evidence.v1.json"
+            ).read_text()
+        )
+        self.assertEqual(evidence["validation"]["expected_count"], 2)
+        self.assertEqual(evidence["validation"]["passed_count"], 2)
+        self.assertEqual(evidence["validation"]["missing"], [])
+        self.assertEqual(evidence["validation"]["unexpected"], [])
+        self.assertEqual(
+            {record["artifact"] for record in evidence["validation"]["passed"]},
+            {"library-contract-batch-001-test"},
+        )
+
+        tampered_second = dict(second_matrix)
+        tampered_second["source_url"] = "https://example.invalid/tampered.tar.gz"
+        with self.assertRaisesRegex(RuntimeError, "payload differs from include record"):
+            self.run_promotion(
+                candidate,
+                delta(
+                    baseline["contract_sha256"],
+                    candidate["contract_sha256"],
+                    baseline=False,
+                    new_candidates=[first_delta, second_delta],
+                ),
+                matrix_payload={
+                    "include": batch_candidates,
+                    "batches": [
+                        {
+                            "slug": "batch-001-test",
+                            "candidate_count": 2,
+                            "candidates_json": json.dumps(
+                                [first_matrix, tampered_second],
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                        }
+                    ],
+                },
+                validation_reports=[first_report, second_report],
+                previous_catalog=previous_catalog,
+                output_name="batched-tampered",
+            )
 
     def test_missing_validation_freezes_previous_active_directory(self) -> None:
         baseline = contract({"3.13.14": {"status": "unbuildable", "reason": "no source"}})
@@ -399,6 +542,8 @@ class PromotionTests(unittest.TestCase):
                     "candidate_count": 1,
                     "contract_sha256": candidate["contract_sha256"],
                     "matrix_limit": 0,
+                    "max_candidates_per_batch": 1,
+                    "incremental_candidate_limit": 0,
                 },
             },
             previous_catalog=previous_catalog,
@@ -417,6 +562,8 @@ class PromotionTests(unittest.TestCase):
             "candidate_count": 1,
             "contract_sha256": candidate["contract_sha256"],
             "matrix_limit": 1,
+            "max_candidates_per_batch": 1,
+            "incremental_candidate_limit": 1,
         }
         # A real overflow must be larger than its matrix limit. Model two
         # exact candidates without weakening the production invariant.
@@ -457,6 +604,34 @@ class PromotionTests(unittest.TestCase):
             ).read_text()
         )
         self.assertEqual(evidence["validation"]["deferred"], deferred)
+
+        for label, updates in (
+            (
+                "oversized-batch",
+                {"max_candidates_per_batch": 3, "incremental_candidate_limit": 3},
+            ),
+            ("capacity-mismatch", {"max_candidates_per_batch": 2}),
+            ("not-overflow", {"incremental_candidate_limit": 2}),
+        ):
+            with self.subTest(label=label):
+                tampered = {**deferred, **updates}
+                invalid, _invalid_output = self.run_promotion(
+                    candidate,
+                    delta(
+                        baseline["contract_sha256"],
+                        candidate["contract_sha256"],
+                        baseline=False,
+                        new_candidates=[candidate_record(source_sha), second],
+                    ),
+                    matrix_payload={"include": [], "deferred": tampered},
+                    previous_catalog=previous_catalog,
+                    output_name=f"deferred-{label}",
+                )
+                self.assertEqual(invalid["decision"]["status"], "frozen")
+                self.assertIn(
+                    "invalid-history-deferral",
+                    {record["code"] for record in invalid["decision"]["blockers"]},
+                )
 
     def test_tampered_delta_cannot_hide_a_regression(self) -> None:
         source_sha = "a" * 64
