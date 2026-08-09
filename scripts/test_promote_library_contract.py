@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -143,6 +144,7 @@ class PromotionTests(unittest.TestCase):
         validation_reports: list[dict] | None = None,
         previous_catalog: Path | None = None,
         legacy_baseline: Path | None = None,
+        history_support_catalog: Path | None = None,
         output_name: str = "catalog",
     ) -> tuple[dict, Path]:
         candidate_path = write_json(self.root / f"{output_name}-candidate.json", candidate)
@@ -170,6 +172,7 @@ class PromotionTests(unittest.TestCase):
             validation_root=validation_root,
             previous_catalog_root=previous_catalog,
             legacy_baseline_contract_path=legacy_baseline,
+            history_support_catalog_root=history_support_catalog,
             mode=mode,
             provenance={"run_id": "123", "source_commit": "c" * 40},
         )
@@ -632,6 +635,151 @@ class PromotionTests(unittest.TestCase):
                     "invalid-history-deferral",
                     {record["code"] for record in invalid["decision"]["blockers"]},
                 )
+
+    def test_exact_full_history_validation_adopts_a_deferred_contract(self) -> None:
+        baseline = contract({"3.13.14": {"status": "unbuildable", "reason": "not integrated"}})
+        baseline_path = write_json(self.root / "history-legacy.json", baseline)
+        _initial, previous_catalog = self.run_promotion(
+            baseline,
+            delta(baseline["contract_sha256"], baseline["contract_sha256"], baseline=False),
+            legacy_baseline=baseline_path,
+            output_name="history-previous",
+        )
+        source_sha = "a" * 64
+        candidate = contract({"3.13.14": {"status": "candidate", "source": source(source_sha)}})
+        second = candidate_record(source_sha)
+        second["version"] = "1.1"
+        second["source"] = {**second["source"], "filename": "demo-1.1.tar.gz"}
+        candidate["libraries"]["demo"]["versions"]["1.1"] = {
+            "targets": {"3.13.14": {"status": "candidate", "source": second["source"]}}
+        }
+        candidate["status_counts"]["candidate"] = 2
+        candidate["contract_sha256"] = contract_module._contract_sha256(
+            {key: value for key, value in candidate.items() if key != "contract_sha256"}
+        )
+        candidate_delta = delta(
+            baseline["contract_sha256"],
+            candidate["contract_sha256"],
+            baseline=False,
+            new_candidates=[candidate_record(source_sha), second],
+        )
+        deferred = {
+            "reason": "weekly-history-shards",
+            "candidate_count": 2,
+            "contract_sha256": candidate["contract_sha256"],
+            "matrix_limit": 1,
+            "max_candidates_per_batch": 1,
+            "incremental_candidate_limit": 1,
+        }
+        history_root = self.root / "history-support"
+        history_contract = write_json(
+            history_root / "validated" / "library-version-contract.json",
+            candidate,
+        )
+        history_active = {
+            "contract_sha256": candidate["contract_sha256"],
+            "directory": "validated",
+            "contract": history_contract.relative_to(history_root).as_posix(),
+            "manifest_sha256": "b" * 64,
+            "support_sha256": "c" * 64,
+            "evidence_sha256": "d" * 64,
+            "verified_combination_count": 2,
+            "provenance": {"run_id": "weekly-456"},
+        }
+        with mock.patch.object(
+            promotion.history_evidence,
+            "_load_previous_support_catalog",
+            return_value=(
+                {"active": history_active, "index_sha256": "e" * 64},
+                {"status": "verified", "selection": {"mode": "full-history"}},
+            ),
+        ):
+            result, output = self.run_promotion(
+                candidate,
+                candidate_delta,
+                matrix_payload={"include": [], "deferred": deferred},
+                previous_catalog=previous_catalog,
+                history_support_catalog=history_root,
+                output_name="history-adopted",
+            )
+        self.assertEqual(result["decision"]["status"], "promoted")
+        self.assertEqual(result["decision"]["gate"], "passed")
+        self.assertEqual(result["active"]["contract_sha256"], candidate["contract_sha256"])
+        self.assertEqual(result["active"]["promotion_basis"], "weekly-history-validation")
+        self.assertEqual(result["active"]["history_validation"]["evidence_sha256"], "d" * 64)
+        self.assertEqual(result["active"]["history_validation"]["index_sha256"], "e" * 64)
+        self.assertEqual(
+            result["active"]["history_validation"]["selection"],
+            {"mode": "full-history"},
+        )
+        evidence = json.loads(
+            (
+                output
+                / "candidates"
+                / candidate["contract_sha256"]
+                / "promotion-evidence.v1.json"
+            ).read_text()
+        )
+        self.assertEqual(evidence["history_validation"]["provenance"]["run_id"], "weekly-456")
+
+    def test_history_validation_is_bound_to_the_exact_contract_payload(self) -> None:
+        candidate = contract({"3.13.14": {"status": "candidate", "source": source("a" * 64)}})
+        history_root = self.root / "mismatched-history-support"
+        mismatched_path = write_json(
+            history_root / "validated" / "library-version-contract.json",
+            contract({"3.13.14": {"status": "unbuildable", "reason": "different"}}),
+        )
+        active = {
+            "contract_sha256": candidate["contract_sha256"],
+            "directory": "validated",
+            "contract": mismatched_path.relative_to(history_root).as_posix(),
+        }
+        with mock.patch.object(
+            promotion.history_evidence,
+            "_load_previous_support_catalog",
+            return_value=(
+                {"active": active},
+                {"status": "verified", "selection": {"mode": "full-history"}},
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exact candidate contract"):
+                promotion._matching_history_validation(history_root, candidate)
+
+    def test_legacy_or_non_full_history_support_cannot_adopt_a_contract(self) -> None:
+        candidate = contract({"3.13.14": {"status": "candidate", "source": source("a" * 64)}})
+        history_root = self.root / "insufficient-history-support"
+        history_contract = write_json(
+            history_root / "validated" / "library-version-contract.json",
+            candidate,
+        )
+        active = {
+            "contract_sha256": candidate["contract_sha256"],
+            "contract": history_contract.relative_to(history_root).as_posix(),
+        }
+        with mock.patch.object(
+            promotion.history_evidence,
+            "_load_previous_support_catalog",
+            return_value=(
+                {"active": active},
+                {"status": "verified", "selection": {"mode": "full-history"}},
+            ),
+        ):
+            self.assertIsNone(
+                promotion._matching_history_validation(history_root, candidate)
+            )
+
+        active["directory"] = "validated"
+        with mock.patch.object(
+            promotion.history_evidence,
+            "_load_previous_support_catalog",
+            return_value=(
+                {"active": active},
+                {"status": "verified", "selection": {"mode": "pull-request-smoke"}},
+            ),
+        ):
+            self.assertIsNone(
+                promotion._matching_history_validation(history_root, candidate)
+            )
 
     def test_tampered_delta_cannot_hide_a_regression(self) -> None:
         source_sha = "a" * 64
