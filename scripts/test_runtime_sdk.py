@@ -1266,6 +1266,69 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertEqual(pack["release_family"], "a-f")
         self.assertIn("/staticpython-packs-deadbeef-a-f/attrs.zip", pack["url"])
 
+    def test_release_index_keeps_only_resolver_metadata(self) -> None:
+        runtime_metadata = {
+            "runtime_abi": "staticpython-pack-v1-cp313",
+            "link_libraries": ["pythoncore.lib"],
+            "verification": {"status": "passed"},
+            "files": [{"path": "lib/pythoncore.lib", "sha256": "a" * 64}],
+        }
+        self.assertEqual(
+            build_release_index.runtime_index_metadata(runtime_metadata),
+            {
+                "runtime_abi": "staticpython-pack-v1-cp313",
+                "link_libraries": ["pythoncore.lib"],
+                "verification": {"status": "passed"},
+            },
+        )
+
+        pack_path = self.root / "demo.zip"
+        pack_metadata = {
+            "name": "demo",
+            "version": "1.0",
+            "sources": ["src/pack.c", "src/resources/resource_000001.c"],
+            "resources": [
+                {
+                    "path": "demo/data.json",
+                    "symbol": "staticpython_pack_demo_resource_1",
+                    "source": "src/resources/resource_000001.c",
+                    "size": 42,
+                    "compressed_size": 21,
+                    "sha256": "b" * 64,
+                }
+            ],
+            "libraries": ["demo.lib"],
+            "suppressed_system_libraries": ["gdiplus.lib"],
+            "source_files": [{"path": "demo/data.json", "sha256": "b" * 64}],
+            "smoke_tests": [{"kind": "import", "module": "demo"}],
+            "files": [{"path": "lib/demo.lib", "sha256": "c" * 64}],
+        }
+        projected = build_release_index.pack_index_metadata(pack_metadata, pack_path)
+        self.assertEqual(projected["resources"], [{"path": "demo/data.json"}])
+        self.assertEqual(projected["sources"], pack_metadata["sources"])
+        self.assertEqual(projected["libraries"], ["demo.lib"])
+        self.assertEqual(projected["suppressed_system_libraries"], ["gdiplus.lib"])
+        self.assertNotIn("source_files", projected)
+        self.assertNotIn("smoke_tests", projected)
+        self.assertNotIn("files", projected)
+        self.assertEqual(
+            pack_metadata["resources"][0]["symbol"],
+            "staticpython_pack_demo_resource_1",
+        )
+
+    def test_release_index_rejects_resource_without_virtual_path(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "invalid resource record"):
+            build_release_index.pack_index_metadata(
+                {"resources": [{"source": "src/resources/resource_000001.c"}]},
+                self.root / "demo.zip",
+            )
+
+    def test_release_index_serialization_is_compact_and_newline_terminated(self) -> None:
+        self.assertEqual(
+            build_release_index.serialize_index({"schema_version": 1, "values": [1, 2]}),
+            '{"schema_version":1,"values":[1,2]}\n',
+        )
+
     def test_release_index_requires_every_pack_for_every_target_abi(self) -> None:
         packs = {"demo": {"1.0": {"cp311": {}}}}
         with self.assertRaisesRegex(RuntimeError, "missing target ABIs"):
