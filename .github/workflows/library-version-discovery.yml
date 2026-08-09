@@ -275,7 +275,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 10
-      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.matrix).include }}
     env:
       CONTRACT_LIBRARY: ${{ matrix.library }}
       CONTRACT_PROJECT_NAME: ${{ matrix.project_name }}
