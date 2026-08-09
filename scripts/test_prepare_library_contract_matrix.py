@@ -204,6 +204,11 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('"--defer-overflow-to-history"', daily)
+        self.assertIn(
+            "include: ${{ fromJSON(needs.discover.outputs.matrix).include }}",
+            daily,
+        )
+        self.assertNotIn("matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}", daily)
         self.assertIn("Discover current source version contract", weekly)
         self.assertIn('selection = "current-source-discovery"', weekly)
         self.assertIn('"previous-library-version-contract.json"', weekly)
