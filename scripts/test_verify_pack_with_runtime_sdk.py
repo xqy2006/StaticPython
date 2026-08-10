@@ -196,6 +196,70 @@ class VerifyPackWithRuntimeSDKTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "trusted object library is missing"):
             verifier.validate_pack(pack_root, runtime)
 
+    def test_main_object_audit_allows_only_declared_archive_origin(self) -> None:
+        allowed, forbidden = verifier._classify_main_object_records(
+            "\n".join(
+                [
+                    "0001:00000000 wxEntry wxbase33u.lib(main.obj)",
+                    "0001:00000008 wxEntryCleanup wxbase33u:main.obj",
+                    "0001:00000010 Py_Main pythoncore.lib(main.obj)",
+                    r"0001:00000020 custom_entry C:\build\main.obj",
+                    "0001:00000030 impostor notwxbase33u:main.obj",
+                    "0001:00000040 mixed wxbase33u.lib(main.obj) pythoncore.lib(main.obj)",
+                ]
+            ),
+            {("wxbase33u.lib", "main.obj")},
+        )
+        self.assertEqual(
+            allowed,
+            [
+                "0001:00000000 wxEntry wxbase33u.lib(main.obj)",
+                "0001:00000008 wxEntryCleanup wxbase33u:main.obj",
+            ],
+        )
+        self.assertEqual(
+            forbidden,
+            [
+                "0001:00000010 Py_Main pythoncore.lib(main.obj)",
+                r"0001:00000020 custom_entry C:\build\main.obj",
+                "0001:00000030 impostor notwxbase33u:main.obj",
+                "0001:00000040 mixed wxbase33u.lib(main.obj) pythoncore.lib(main.obj)",
+            ],
+        )
+
+    def test_trusted_object_origin_rejects_ambiguous_link_inputs(self) -> None:
+        trusted = {("owned.lib", "main.obj")}
+        pack = self.root / "pack" / "owned.lib"
+        runtime = self.root / "runtime" / "owned.lib"
+
+        verifier._validate_trusted_object_link_inputs(
+            trusted,
+            pack_libraries=[pack],
+            runtime_libraries=[],
+            system_libraries=["user32.lib"],
+        )
+        with self.assertRaisesRegex(RuntimeError, "owned.lib.*runtime SDK"):
+            verifier._validate_trusted_object_link_inputs(
+                trusted,
+                pack_libraries=[pack],
+                runtime_libraries=[runtime],
+                system_libraries=[],
+            )
+        with self.assertRaisesRegex(RuntimeError, "owned.lib.*system libraries"):
+            verifier._validate_trusted_object_link_inputs(
+                trusted,
+                pack_libraries=[pack],
+                runtime_libraries=[],
+                system_libraries=["OWNED.LIB"],
+            )
+        with self.assertRaisesRegex(RuntimeError, "exactly one selected pack archive"):
+            verifier._validate_trusted_object_link_inputs(
+                trusted,
+                pack_libraries=[],
+                runtime_libraries=[],
+                system_libraries=[],
+            )
+
     def test_composition_and_namespace_parents_are_inferred(self) -> None:
         runtime = {
             "frozen_module_names": ["importlib"],
