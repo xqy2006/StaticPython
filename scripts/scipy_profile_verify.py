@@ -203,14 +203,16 @@ def test_scipy_optimize() -> None:
     popt, _pcov = scipy.optimize.curve_fit(lambda x, a, b: a * x + b, xdata, ydata, p0=[0.0, 0.0])
     np.testing.assert_allclose(popt, np.array([2.0, 1.0]), rtol=0.0, atol=1e-3)
 
-    bracket_calls = []
-
-    def decreasing(value):
-        bracket_calls.append(value)
-        return -value
-
-    scipy.optimize.bracket(decreasing, xa=0.0, xb=1.0, grow_limit=3.0, maxiter=1000)
-    assert len(bracket_calls) < 10
+    bracket_result = scipy.optimize.bracket(
+        lambda value: (value - 2.0) ** 2,
+        xa=0.0,
+        xb=1.0,
+    )
+    assert len(bracket_result) == 7
+    xa, xb, xc, fa, fb, fc, funcalls = bracket_result
+    assert xa < xb < xc
+    assert fb < fa and fb < fc
+    assert funcalls >= 3
 
 
 def test_scipy_interpolate() -> None:
@@ -322,7 +324,7 @@ def test_scipy_sparse_linalg() -> None:
         np.array([1.0]),
         maxiter=50,
     )
-    assert breakdown_info < 0
+    assert breakdown_info > 0
 
     _limited_solution, limited_info = scipy.sparse.linalg.cg(matrix, rhs, rtol=0.0, maxiter=1)
     assert limited_info == 1

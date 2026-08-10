@@ -379,6 +379,7 @@ def bracket(func, xa=0.0, xb=1.0, args=(), grow_limit=110.0, maxiter=1000):
     xb = float(xb)
     fa = float(func(xa, *args))
     fb = float(func(xb, *args))
+    funcalls = 2
     if fb > fa:
         xa, xb = xb, xa
         fa, fb = fb, fa
@@ -392,19 +393,21 @@ def bracket(func, xa=0.0, xb=1.0, args=(), grow_limit=110.0, maxiter=1000):
     factor = 1.618033988749895
     xc = xb + factor * step
     fc = float(func(xc, *args))
+    funcalls += 1
     iteration = 0
     while not (fb < fa and fb < fc):
         xa, fa = xb, fb
         xb, fb = xc, fc
         step *= factor
         if abs(step) > max_step:
-            break
+            raise RuntimeError("No valid bracket was found within grow_limit")
         xc = xb + step
         fc = float(func(xc, *args))
+        funcalls += 1
         iteration += 1
         if iteration >= maxiter:
-            break
-    return xa, xb, xc, fa, fb, fc
+            raise RuntimeError("No valid bracket was found before the iteration limit")
+    return xa, xb, xc, fa, fb, fc, funcalls
 
 
 def _golden_search(func, left, right, args, tol, maxiter):
