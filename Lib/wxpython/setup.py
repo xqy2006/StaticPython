@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -53,31 +54,48 @@ WXPYTHON_MODULE_LIBRARIES = [
     *(f"wx.{module}.lib" for module in WXPYTHON_ETG_MODULES),
 ]
 
-WXWIDGETS_STATIC_LIBRARIES = [
-    "wxbase32u.lib",
-    "wxbase32u_net.lib",
-    "wxbase32u_xml.lib",
+WXWIDGETS_BASE_LIBRARY_COMPONENTS = ("", "_net", "_xml")
+WXWIDGETS_MSW_LIBRARY_COMPONENTS = (
+    "adv",
+    "aui",
+    "core",
+    "gl",
+    "html",
+    "media",
+    "propgrid",
+    "qa",
+    "ribbon",
+    "richtext",
+    "stc",
+    "webview",
+    "xrc",
+)
+WXWIDGETS_UNVERSIONED_STATIC_LIBRARIES = (
     "wxexpat.lib",
     "wxjpeg.lib",
-    "wxmsw32u_adv.lib",
-    "wxmsw32u_aui.lib",
-    "wxmsw32u_core.lib",
-    "wxmsw32u_gl.lib",
-    "wxmsw32u_html.lib",
-    "wxmsw32u_media.lib",
-    "wxmsw32u_propgrid.lib",
-    "wxmsw32u_qa.lib",
-    "wxmsw32u_ribbon.lib",
-    "wxmsw32u_richtext.lib",
-    "wxmsw32u_stc.lib",
-    "wxmsw32u_webview.lib",
-    "wxmsw32u_xrc.lib",
     "wxpng.lib",
     "wxregexu.lib",
     "wxscintilla.lib",
     "wxtiff.lib",
     "wxzlib.lib",
-]
+)
+
+
+def _wxwidgets_static_libraries(version_suffix: str) -> list[str]:
+    if re.fullmatch(r"[0-9]{2}", version_suffix) is None:
+        raise RuntimeError(f"invalid wxWidgets library version suffix: {version_suffix!r}")
+    return [
+        *[f"wxbase{version_suffix}u{component}.lib" for component in WXWIDGETS_BASE_LIBRARY_COMPONENTS],
+        "wxexpat.lib",
+        "wxjpeg.lib",
+        *[f"wxmsw{version_suffix}u_{component}.lib" for component in WXWIDGETS_MSW_LIBRARY_COMPONENTS],
+        *WXWIDGETS_UNVERSIONED_STATIC_LIBRARIES[2:],
+    ]
+
+
+# The integration's pinned release is wxPython 4.2.5/wxWidgets 3.2. Source
+# preparation updates this list from wx/version.h for every discovered release.
+WXWIDGETS_STATIC_LIBRARIES = _wxwidgets_static_libraries("32")
 
 WXPYTHON_SYSTEM_LIBRARIES = [
     "kernel32.lib",
@@ -107,7 +125,6 @@ WXPYTHON_SYSTEM_LIBRARIES = [
     "opengl32.lib",
     "glu32.lib",
 ]
-
 
 def _project_guid(name: str) -> str:
     return "{" + str(uuid.uuid5(WXPYTHON_GUID_NAMESPACE, name)).upper() + "}"
@@ -444,6 +461,46 @@ def _wxwidgets_library_dir(context) -> Path:
     return _wxwidgets_source_dir(context) / "lib" / "vc_x64_lib"
 
 
+def _wxwidgets_library_version_suffix(context) -> str:
+    version_header = _wxwidgets_source_dir(context) / "include" / "wx" / "version.h"
+    if not version_header.is_file():
+        raise RuntimeError(f"wxWidgets version header is missing: {version_header}")
+    text = version_header.read_text(encoding="utf-8", errors="strict")
+
+    def macro(name: str) -> int:
+        matches = re.findall(
+            rf"^\s*#\s*define\s+{re.escape(name)}\s+([0-9]+)\b",
+            text,
+            re.MULTILINE,
+        )
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"wxWidgets version header must define {name} exactly once; found {len(matches)}"
+            )
+        return int(matches[0])
+
+    major = macro("wxMAJOR_VERSION")
+    minor = macro("wxMINOR_VERSION")
+    if not (0 <= major <= 9 and 0 <= minor <= 9):
+        raise RuntimeError(f"unsupported wxWidgets library version {major}.{minor}")
+    return f"{major}{minor}"
+
+
+def _synchronize_wxwidgets_link_metadata(context) -> list[str]:
+    version_suffix = _wxwidgets_library_version_suffix(context)
+    libraries = _wxwidgets_static_libraries(version_suffix)
+    LIBRARY_INTEGRATION.python_link_dependencies_release_x64 = [
+        *WXPYTHON_MODULE_LIBRARIES,
+        *libraries,
+        *WXPYTHON_SYSTEM_LIBRARIES,
+    ]
+    LIBRARY_INTEGRATION.trusted_object_origins = [
+        {"library": f"wxbase{version_suffix}u.lib", "object": "main.obj"},
+    ]
+    context.log(f"using wxWidgets {version_suffix[0]}.{version_suffix[1]} static library names")
+    return libraries
+
+
 def _force_wxwidgets_static_runtime(context) -> None:
     changed = 0
     for project in (_wxwidgets_source_dir(context) / "build" / "msw").glob("*.vcxproj"):
@@ -460,12 +517,12 @@ def _force_wxwidgets_static_runtime(context) -> None:
         context.log(f"forced wxWidgets static runtime in {changed} project(s)")
 
 
-def _copy_wxwidgets_libraries(context) -> None:
+def _copy_wxwidgets_libraries(context, libraries: list[str]) -> None:
     library_dir = _wxwidgets_library_dir(context)
     output_dir = get_pcbuild_output_dir(context.source_root, context.platform)
     output_dir.mkdir(parents=True, exist_ok=True)
     missing: list[str] = []
-    for library in WXWIDGETS_STATIC_LIBRARIES:
+    for library in libraries:
         source = library_dir / library
         if not source.exists():
             missing.append(library)
@@ -478,8 +535,9 @@ def _copy_wxwidgets_libraries(context) -> None:
 def prepare_wxpython_artifacts(context) -> None:
     _patch_wxwidgets_setup(context)
     _patch_static_link_sources(context)
+    libraries = _synchronize_wxwidgets_link_metadata(context)
     output_dir = get_pcbuild_output_dir(context.source_root, context.platform)
-    if all((output_dir / library).exists() for library in WXWIDGETS_STATIC_LIBRARIES):
+    if all((output_dir / library).exists() for library in libraries):
         context.log(f"using existing wxWidgets static libraries at {output_dir.relative_to(context.source_root)}")
         return
 
@@ -505,7 +563,7 @@ def prepare_wxpython_artifacts(context) -> None:
         cwd=solution.parent,
         timeout=60 * 60,
     )
-    _copy_wxwidgets_libraries(context)
+    _copy_wxwidgets_libraries(context, libraries)
 
 
 def _find_wxwidgets_solution(wxwidgets_root: Path) -> Path:
@@ -523,6 +581,10 @@ LIBRARY_INTEGRATION = pypi_library(
     name="wxpython",
     project_name="wxPython",
     release_version=WXPYTHON_VERSION,
+    # The first experimental pack is deliberately scoped to the generated
+    # source layout validated by this integration. Older stable releases use
+    # legacy/empty wx_vc*.sln files and are a separate history-backfill task.
+    minimum_release_version=WXPYTHON_VERSION,
     license_expression="wxWindows",
     source_mapping={
         "wx": "Lib/wx",
@@ -586,6 +648,9 @@ LIBRARY_INTEGRATION = pypi_library(
         *WXWIDGETS_STATIC_LIBRARIES,
         *WXPYTHON_SYSTEM_LIBRARIES,
     ],
+    trusted_object_origins=[
+        {"library": "wxbase32u.lib", "object": "main.obj"},
+    ],
     # wxWidgets' gdiplus.obj provides dynamically resolved GDI+ entry points.
     # Suppress the SDK import library when another selected pack requests it,
     # otherwise both providers define the same Gdip*/Gdiplus* symbols.
@@ -600,6 +665,8 @@ LIBRARY_INTEGRATION = pypi_library(
                 "import importlib, wx; "
                 "mods=('wx.siplib','wx._core','wx.adv','wx.html','wx.stc','wx.xrc'); "
                 "assert all(importlib.import_module(name) is not None for name in mods); "
+                "core=importlib.import_module('wx.core'); "
+                "assert core.__file__.startswith('staticpython-resource:///Lib/wx/'); "
                 "assert wx.VERSION[:2] >= (4, 2); "
                 "assert all(hasattr(wx, name) for name in ('App','Frame','Button'))"
             ),

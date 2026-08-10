@@ -777,22 +777,50 @@ def _wait_for_expected_numpy_outputs(context, timeout_seconds: float = 5.0) -> l
     return missing
 
 
-def _compile_numpy_core(context) -> None:
-    env = _numpy_build_env(context)
+def _numpy_ninja_targets(context) -> list[str]:
+    return [
+        "numpy/_core/npymath.lib",
+        numpy_module_target_name(context),
+        numpy_linalg_target_name(context),
+        *[
+            numpy_project_target_name(context, project_name)
+            for project_name in NUMPY_EXTRA_BUILTIN_PROJECT_NAMES
+        ],
+    ]
+
+
+def _missing_numpy_projects(context) -> list[str]:
+    return [
+        project_name
+        for project_name in (
+            NUMPY_CORE_PROJECT_NAME,
+            NUMPY_LINALG_PROJECT_NAME,
+            *NUMPY_EXTRA_BUILTIN_PROJECT_NAMES,
+        )
+        if not any(numpy_project_object_dir(context, project_name).glob("*.obj"))
+    ]
+
+
+def _run_numpy_ninja(
+    context,
+    env: dict[str, str],
+    *,
+    targets: list[str],
+    jobs: int | None = None,
+) -> subprocess.CompletedProcess[str]:
     command = [
         "ninja",
         "-C",
         str(numpy_build_dir(context)),
         "-k",
         "0",
-        "numpy/_core/npymath.lib",
-        numpy_module_target_name(context),
-        numpy_linalg_target_name(context),
-        *[numpy_project_target_name(context, project_name) for project_name in NUMPY_EXTRA_BUILTIN_PROJECT_NAMES],
     ]
+    if jobs is not None:
+        command.extend(["-j", str(jobs)])
+    command.extend(targets)
     display = subprocess.list2cmdline(command)
     context.log(f"RUN {display}")
-    completed = subprocess.run(
+    return subprocess.run(
         command,
         cwd=str(numpy_source_root(context)),
         env=env,
@@ -800,6 +828,15 @@ def _compile_numpy_core(context) -> None:
         text=True,
         encoding="utf-8",
         errors="replace",
+    )
+
+
+def _compile_numpy_core(context) -> None:
+    env = _numpy_build_env(context)
+    completed = _run_numpy_ninja(
+        context,
+        env,
+        targets=_numpy_ninja_targets(context),
     )
     if completed.returncode == 0:
         return
@@ -810,6 +847,58 @@ def _compile_numpy_core(context) -> None:
             "reusing the successfully compiled objects and static archives."
         )
         return
+
+    pending_projects = _missing_numpy_projects(context)
+    if pending_projects:
+        context.log(
+            "NumPy Meson batch compile left missing objects for: "
+            + ", ".join(pending_projects)
+            + "; retrying those projects sequentially with -j 1"
+        )
+        retry_failures: list[
+            tuple[str, subprocess.CompletedProcess[str], list[str]]
+        ] = []
+        for project_name in pending_projects:
+            project_completed = _run_numpy_ninja(
+                context,
+                env,
+                targets=[numpy_project_target_name(context, project_name)],
+                jobs=1,
+            )
+            project_missing = [
+                f"{numpy_project_object_dir(context, project_name).name}/*.obj"
+            ]
+            if any(numpy_project_object_dir(context, project_name).glob("*.obj")):
+                project_missing = []
+            if project_missing:
+                retry_failures.append(
+                    (project_name, project_completed, project_missing)
+                )
+                continue
+            if project_completed.returncode != 0:
+                context.log(
+                    "NumPy Meson retry for "
+                    f"{project_name} returned non-zero after producing the required "
+                    "objects; reusing the generated objects."
+                )
+
+        missing_outputs = _wait_for_expected_numpy_outputs(context)
+        if not missing_outputs:
+            context.log(
+                "NumPy Meson sequential retry produced the remaining required "
+                "objects; continuing with builtin static archives."
+            )
+            return
+        if retry_failures:
+            project_name, project_completed, project_missing = retry_failures[0]
+            raise RuntimeError(
+                "NumPy Meson compile failed after sequential retry.\n"
+                f"failed project: {project_name}\n"
+                f"missing outputs: {', '.join(project_missing)}\n"
+                f"stdout:\n{project_completed.stdout[-12000:]}\n"
+                f"stderr:\n{project_completed.stderr[-12000:]}"
+            )
+
     raise RuntimeError(
         "NumPy Meson compile failed before the required artifacts were generated.\n"
         f"missing outputs: {', '.join(missing_outputs)}\n"

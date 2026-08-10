@@ -1622,6 +1622,50 @@ def _integration_suppressed_system_libraries(integration) -> list[str]:
     return list(dict.fromkeys(suppressed))
 
 
+def _integration_trusted_object_origins(
+    integration,
+    native_records: list[dict],
+) -> list[dict]:
+    declarations = integration.trusted_object_origins
+    if not isinstance(declarations, list):
+        raise RuntimeError(f"pack {integration.name} trusted_object_origins must be a list")
+    owned_libraries = {
+        record["logical_name"].casefold(): record["logical_name"]
+        for record in native_records
+    }
+    origins: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for declaration in declarations:
+        if not isinstance(declaration, dict) or set(declaration) != {"library", "object"}:
+            raise RuntimeError(
+                f"pack {integration.name} trusted object origins must contain only library and object"
+            )
+        library = declaration.get("library")
+        object_name = declaration.get("object")
+        if (
+            not isinstance(library, str)
+            or re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*\.lib", library, re.IGNORECASE) is None
+        ):
+            raise RuntimeError(f"pack {integration.name} has an invalid trusted object library: {library!r}")
+        owned_library = owned_libraries.get(library.casefold())
+        if owned_library is None:
+            raise RuntimeError(
+                f"pack {integration.name} trusted object library is not owned by the pack: {library}"
+            )
+        if not isinstance(object_name, str) or object_name.casefold() != "main.obj":
+            raise RuntimeError(
+                f"pack {integration.name} trusted object must currently be the exact basename main.obj"
+            )
+        key = (owned_library.casefold(), "main.obj")
+        if key in seen:
+            raise RuntimeError(
+                f"pack {integration.name} repeats trusted object origin {owned_library}(main.obj)"
+            )
+        seen.add(key)
+        origins.append({"library": owned_library, "object": "main.obj"})
+    return origins
+
+
 def _integration_source_hash(source_root: Path, integration) -> tuple[str, list[dict]]:
     hasher = hashlib.sha256()
     records: list[dict] = []
@@ -1785,6 +1829,7 @@ def export_library_pack(
     frozen_records = _integration_frozen_modules(source_root, integration)
     native_records, wholearchive, system_libraries = _integration_native_libraries(source_root, platform, integration)
     suppressed_system_libraries = _integration_suppressed_system_libraries(integration)
+    trusted_object_origins = _integration_trusted_object_origins(integration, native_records)
     resource_files = collect_runtime_resource_files(source_root, [integration])
     source_tree_hash, source_file_records = _integration_source_hash(source_root, integration)
     license_files, license_status = _integration_license_files(source_root, integration)
@@ -1931,6 +1976,7 @@ def export_library_pack(
             "wholearchive": wholearchive,
             "system_libraries": system_libraries,
             "suppressed_system_libraries": suppressed_system_libraries,
+            "trusted_object_origins": trusted_object_origins,
             "link_order": [record["logical_name"] for record in native_records],
             "toolchain": {
                 "platform_toolset": "v143",
@@ -4521,6 +4567,84 @@ def build_python(
     )
 
 
+def build_pack_static_libraries(
+    source_root: Path,
+    configuration: str,
+    platform: str,
+    integrations: list,
+    version_info: tuple[int, int, int],
+    version_mm: str,
+    version_full: str,
+    build_workers: int | None = None,
+) -> None:
+    """Build only native projects owned by selected third-party packs."""
+    pcbuild = source_root / "PCbuild"
+    run_pre_build_hooks(
+        integrations,
+        make_library_hook_context(
+            source_root,
+            version_info,
+            version_mm,
+            version_full,
+            configuration,
+            platform,
+        ),
+    )
+    # Runtime/core libraries come from the separately audited runtime SDK.
+    # An empty manifest prevents this candidate build from rebuilding the
+    # CPython core project set while preserving integration-owned projects.
+    stage_static_libraries(source_root, platform, {}, integrations)
+    projects = iter_static_library_projects(source_root, {}, integrations)
+    log(f"building {len(projects)} pack-owned static library project(s)")
+    for target in projects:
+        run(
+            [
+                resolve_msbuild_exe(),
+                str(pcbuild / target),
+                *msbuild_args(
+                    configuration,
+                    platform,
+                    "BuildProjectReferences=false",
+                    workers=build_workers,
+                ),
+            ],
+            cwd=source_root,
+        )
+    log("pack-only build intentionally skipped pythoncore.vcxproj and python.vcxproj")
+
+
+def verify_pack_only_with_runtime_sdk(
+    source_root: Path,
+    runtime_sdk: Path,
+    provisional_packs: list[Path],
+    host_python: str,
+    build_workers: int | None,
+) -> dict:
+    report_path = source_root / "PCbuild" / "staticpython-pack-verify-report.json"
+    work_dir = source_root / "PCbuild" / "staticpython-pack-verify"
+    command = [
+        host_python,
+        str(REPO_ROOT / "scripts" / "verify_pack_with_runtime_sdk.py"),
+        "--runtime-sdk",
+        str(runtime_sdk),
+        "--repo-root",
+        str(REPO_ROOT),
+        "--work-dir",
+        str(work_dir),
+        "--report-json",
+        str(report_path),
+    ]
+    for pack in provisional_packs:
+        command.extend(["--pack", str(pack)])
+    if build_workers is not None:
+        command.extend(["--build-workers", str(build_workers)])
+    run(command, cwd=REPO_ROOT)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(report, dict) or report.get("status") != "passed":
+        raise RuntimeError("runtime SDK pack verification did not produce a passed report")
+    return report
+
+
 def verify_built_python(
     source_root: Path,
     platform: str,
@@ -4650,6 +4774,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-verify", action="store_true")
     parser.add_argument(
+        "--pack-only",
+        action="store_true",
+        help=(
+            "Freeze and build only selected third-party pack projects, without pythoncore or python.exe. "
+            "Requires --output-pack-dir and, unless --skip-verify is used, --pack-runtime-sdk."
+        ),
+    )
+    parser.add_argument(
+        "--pack-runtime-sdk",
+        type=Path,
+        help=(
+            "Audited runtime-sdk ZIP or extracted directory used to link and execute provisional "
+            "packs in --pack-only mode before they can be exported as verification=passed."
+        ),
+    )
+    parser.add_argument(
         "--build-static-project",
         action="append",
         default=[],
@@ -4744,6 +4884,7 @@ def main() -> int:
     config = load_config(config_path)
     profile_name, profile = resolve_profile(config, args.profile)
     runtime_sdk_mode = profile.get("build_type") == "runtime-sdk"
+    pack_only_mode = bool(args.pack_only)
     if args.output_runtime_sdk_dir is not None and not runtime_sdk_mode:
         raise RuntimeError("--output-runtime-sdk-dir requires --profile runtime-sdk")
     if runtime_sdk_mode and args.output_dir is not None:
@@ -4752,6 +4893,30 @@ def main() -> int:
         raise RuntimeError("runtime-sdk contains no optional libraries; use a library profile with --output-pack-dir")
     if args.output_pack_name and args.output_pack_dir is None:
         raise RuntimeError("--output-pack-name requires --output-pack-dir")
+    if pack_only_mode and args.output_pack_dir is None:
+        raise RuntimeError("--pack-only requires --output-pack-dir")
+    if pack_only_mode and runtime_sdk_mode:
+        raise RuntimeError("--pack-only requires a library profile, not runtime-sdk")
+    if pack_only_mode and args.skip_build:
+        raise RuntimeError("--pack-only cannot be combined with --skip-build")
+    if args.pack_runtime_sdk is not None and not pack_only_mode:
+        raise RuntimeError("--pack-runtime-sdk is only valid with --pack-only")
+    if pack_only_mode and not args.skip_verify and args.pack_runtime_sdk is None:
+        raise RuntimeError("verified --pack-only builds require --pack-runtime-sdk")
+    if pack_only_mode and args.skip_verify and args.pack_runtime_sdk is not None:
+        raise RuntimeError("--pack-runtime-sdk cannot be combined with --skip-verify")
+    if pack_only_mode and any(
+        value is not None
+        for value in (
+            args.output_dir,
+            args.output_static_lib_dir,
+            args.output_runtime_sdk_dir,
+            args.prebuilt_static_lib_sdk,
+        )
+    ):
+        raise RuntimeError(
+            "--pack-only cannot export an executable or SDK and cannot consume a full static-library SDK"
+        )
     target_version = Version(version_full)
     core_version_overrides = profile.get("core_library_version_overrides")
     third_party_version_overrides = profile.get("third_party_library_version_overrides")
@@ -4887,28 +5052,41 @@ def main() -> int:
                 )
                 maybe_restore_getpath_header(source_root, version_info)
                 verify_runtime_resource_modules_frozen(source_root)
-            log("splitting frozen module bytecode data for MSVC")
-            split_frozen_modules(source_root)
-            log("building custom static libraries and python.exe")
-            build_python(
-                source_root,
-                args.configuration,
-                args.platform,
-                manifest,
-                integrations,
-                version_info,
-                version_mm,
-                version_full,
-                set(args.build_static_project) if args.build_static_project else None,
-                args.build_static_project_from,
-                use_prebuilt_static_libraries,
-                build_workers,
-                runtime_sdk=runtime_sdk_mode,
-            )
-            if not runtime_sdk_mode:
+            if pack_only_mode:
+                log("building only third-party pack-owned static libraries")
+                build_pack_static_libraries(
+                    source_root,
+                    args.configuration,
+                    args.platform,
+                    third_party_integrations,
+                    version_info,
+                    version_mm,
+                    version_full,
+                    build_workers,
+                )
+            else:
+                log("splitting frozen module bytecode data for MSVC")
+                split_frozen_modules(source_root)
+                log("building custom static libraries and python.exe")
+                build_python(
+                    source_root,
+                    args.configuration,
+                    args.platform,
+                    manifest,
+                    integrations,
+                    version_info,
+                    version_mm,
+                    version_full,
+                    set(args.build_static_project) if args.build_static_project else None,
+                    args.build_static_project_from,
+                    use_prebuilt_static_libraries,
+                    build_workers,
+                    runtime_sdk=runtime_sdk_mode,
+                )
+            if not runtime_sdk_mode and not pack_only_mode:
                 built_exe = get_pcbuild_output_dir(source_root, args.platform) / "python.exe"
 
-        if not runtime_sdk_mode and not args.skip_build and not args.skip_verify:
+        if not runtime_sdk_mode and not pack_only_mode and not args.skip_build and not args.skip_verify:
             log("running post-build profile verification")
             verification_report_path = source_root / "PCbuild" / "staticpython-verify-report.json"
             built_exe = verify_built_python(
@@ -4955,6 +5133,24 @@ def main() -> int:
                 third_party_integrations,
                 args.output_pack_name,
             )
+            if pack_only_mode and not args.skip_verify:
+                with tempfile.TemporaryDirectory(prefix="staticpython-provisional-packs-") as temporary:
+                    provisional_packs = export_library_packs(
+                        source_root,
+                        Path(temporary),
+                        version_info,
+                        version_full,
+                        args.platform,
+                        third_party_integrations,
+                        verification_status="not-run",
+                    )
+                    verification_report = verify_pack_only_with_runtime_sdk(
+                        source_root,
+                        args.pack_runtime_sdk.resolve(),
+                        provisional_packs,
+                        args.host_python,
+                        build_workers,
+                    )
             export_library_packs(
                 source_root,
                 args.output_pack_dir.resolve(),

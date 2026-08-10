@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.machinery
 import importlib.resources
 import base64
 import json
@@ -15,6 +16,7 @@ import unittest
 import zlib
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -366,6 +368,90 @@ class RuntimeResourceTests(unittest.TestCase):
             os.listdir("staticpython-resource://demo_pkg/data"),
             ["config.schema", "config.yaml", "empty.bin", "marker.pyi", "shared.txt"],
         )
+
+    def test_custom_frozen_module_receives_virtual_file_metadata(self) -> None:
+        spec = importlib.machinery.ModuleSpec(
+            "demo_pkg.reader",
+            importlib.machinery.FrozenImporter,
+            origin="frozen",
+        )
+        spec.loader_state = SimpleNamespace(filename=None, origname="demo_pkg.reader")
+        with mock.patch.object(importlib.machinery.FrozenImporter, "find_spec", return_value=spec):
+            result = self.runtime._StaticPythonFrozenFileFinder.find_spec("demo_pkg.reader")
+
+        self.assertIs(result, spec)
+        self.assertEqual(
+            spec.loader_state.filename,
+            "staticpython-resource:///Lib/demo_pkg/reader.py",
+        )
+        module = importlib.machinery.FrozenImporter.create_module(spec)
+        self.assertEqual(module.__file__, spec.loader_state.filename)
+        data_path = os.path.join(os.path.dirname(module.__file__), "data", "config.yaml")
+        self.assertEqual(Path(data_path).read_text(encoding="utf-8"), "status: ok\n")
+
+    def test_custom_frozen_package_receives_virtual_file_and_path(self) -> None:
+        spec = importlib.machinery.ModuleSpec(
+            "demo_pkg",
+            importlib.machinery.FrozenImporter,
+            origin="frozen",
+            is_package=True,
+        )
+        spec.loader_state = SimpleNamespace(filename=None, origname="demo_pkg")
+        with mock.patch.object(importlib.machinery.FrozenImporter, "find_spec", return_value=spec):
+            result = self.runtime._StaticPythonFrozenFileFinder.find_spec("demo_pkg")
+
+        self.assertIs(result, spec)
+        self.assertEqual(
+            spec.loader_state.filename,
+            "staticpython-resource:///Lib/demo_pkg/__init__.py",
+        )
+        self.assertEqual(
+            spec.submodule_search_locations,
+            ["staticpython-resource:///Lib/demo_pkg"],
+        )
+
+    def test_custom_frozen_module_replaces_synthetic_stdlib_filename(self) -> None:
+        spec = importlib.machinery.ModuleSpec(
+            "demo_pkg.reader",
+            importlib.machinery.FrozenImporter,
+            origin="frozen",
+        )
+        spec.loader_state = SimpleNamespace(
+            filename=r"C:\external-python\Lib\demo_pkg\reader.py",
+            origname="demo_pkg.reader",
+        )
+        with mock.patch.object(importlib.machinery.FrozenImporter, "find_spec", return_value=spec):
+            result = self.runtime._StaticPythonFrozenFileFinder.find_spec("demo_pkg.reader")
+
+        self.assertIs(result, spec)
+        self.assertEqual(
+            spec.loader_state.filename,
+            "staticpython-resource:///Lib/demo_pkg/reader.py",
+        )
+
+    def test_stdlib_frozen_location_is_not_replaced(self) -> None:
+        spec = importlib.machinery.ModuleSpec(
+            "os",
+            importlib.machinery.FrozenImporter,
+            origin="frozen",
+        )
+        spec.loader_state = SimpleNamespace(filename=None, origname="os")
+        with mock.patch.object(importlib.machinery.FrozenImporter, "find_spec", return_value=spec):
+            result = self.runtime._StaticPythonFrozenFileFinder.find_spec("os")
+
+        self.assertIsNone(result)
+        self.assertIsNone(spec.loader_state.filename)
+
+    def test_frozen_file_finder_installation_is_ordered_and_reversible(self) -> None:
+        finder = self.runtime._StaticPythonFrozenFileFinder
+        frozen_importer = importlib.machinery.FrozenImporter
+        self.assertIn(finder, sys.meta_path)
+        self.assertLess(sys.meta_path.index(finder), sys.meta_path.index(frozen_importer))
+
+        self.runtime.uninstall()
+        self.assertNotIn(finder, sys.meta_path)
+        self.runtime.install()
+        self.assertEqual(sum(candidate is finder for candidate in sys.meta_path), 1)
 
     def test_relative_paths_are_resolved_from_calling_package(self) -> None:
         reader = importlib.import_module("demo_pkg.reader")
