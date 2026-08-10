@@ -22,6 +22,7 @@ SCHEMA_VERSION = 1
 DEFAULT_PURE_BATCH_SIZE = 16
 DEFAULT_NATIVE_BATCH_SIZE = 1
 DEFAULT_MAX_JOBS_PER_RUN = 256
+DEFAULT_MAX_RUN_SHARDS = 256
 
 
 def _canonical_sha256(payload: object) -> str:
@@ -67,7 +68,18 @@ def integration_build_kinds(config: dict) -> dict[str, str]:
     return kinds
 
 
-def candidate_combinations(contract: dict) -> list[dict]:
+def candidate_combinations(
+    contract: dict,
+    *,
+    smoke_library: str | None = None,
+    smoke_python_series: str | None = None,
+) -> list[dict]:
+    if (smoke_library is None) != (smoke_python_series is None):
+        raise RuntimeError("smoke library and Python series must be provided together")
+    if smoke_python_series is not None and not re.fullmatch(
+        r"3\.(11|12|13|14|15)", smoke_python_series
+    ):
+        raise RuntimeError(f"invalid smoke-test Python series: {smoke_python_series!r}")
     combinations: list[dict] = []
     libraries = contract.get("libraries")
     if not isinstance(libraries, dict):
@@ -100,7 +112,7 @@ def candidate_combinations(contract: dict) -> list[dict]:
                         "source": source,
                     }
                 )
-    return sorted(
+    combinations = sorted(
         combinations,
         key=lambda item: (
             item["library"].casefold(),
@@ -108,6 +120,28 @@ def candidate_combinations(contract: dict) -> list[dict]:
             libs.Version(item["version"]),
         ),
     )
+    if smoke_library is None:
+        return combinations
+    matching = [
+        combination
+        for combination in combinations
+        if combination["library"].casefold() == smoke_library.casefold()
+        and combination["python_version"].startswith(f"{smoke_python_series}.")
+    ]
+    if not matching:
+        raise RuntimeError(
+            f"smoke-test library {smoke_library} has no candidate for CPython "
+            f"{smoke_python_series}"
+        )
+    return [
+        max(
+            matching,
+            key=lambda item: (
+                libs.Version(item["version"]),
+                libs.Version(item["python_version"]),
+            ),
+        )
+    ]
 
 
 def prepare_history_batches(
@@ -117,18 +151,31 @@ def prepare_history_batches(
     pure_batch_size: int = DEFAULT_PURE_BATCH_SIZE,
     native_batch_size: int = DEFAULT_NATIVE_BATCH_SIZE,
     max_jobs_per_run: int = DEFAULT_MAX_JOBS_PER_RUN,
+    max_run_shards: int = DEFAULT_MAX_RUN_SHARDS,
+    smoke_library: str | None = None,
+    smoke_python_series: str | None = None,
 ) -> dict:
     if pure_batch_size < 1 or native_batch_size < 1:
         raise ValueError("batch sizes must be positive")
     if not 1 <= max_jobs_per_run <= 256:
         raise ValueError("max_jobs_per_run must be between 1 and 256")
+    if not 1 <= max_run_shards <= 256:
+        raise ValueError("max_run_shards must be between 1 and 256")
     contract_sha = contract.get("contract_sha256")
     if not isinstance(contract_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", contract_sha):
         raise RuntimeError("contract has no valid contract_sha256")
 
-    combinations = candidate_combinations(contract)
+    combinations = candidate_combinations(
+        contract,
+        smoke_library=smoke_library,
+        smoke_python_series=smoke_python_series,
+    )
     recorded_candidate_count = contract.get("status_counts", {}).get("candidate")
-    if isinstance(recorded_candidate_count, int) and recorded_candidate_count != len(combinations):
+    if (
+        smoke_library is None
+        and isinstance(recorded_candidate_count, int)
+        and recorded_candidate_count != len(combinations)
+    ):
         raise RuntimeError(
             "contract candidate count does not match candidate records: "
             f"{recorded_candidate_count} != {len(combinations)}"
@@ -179,6 +226,12 @@ def prepare_history_batches(
             )
 
     run_count = math.ceil(len(batches) / max_jobs_per_run) if batches else 0
+    if run_count > max_run_shards:
+        raise RuntimeError(
+            f"history planner needs {run_count} run shards, exceeding the GitHub Actions "
+            f"matrix limit of {max_run_shards}; increase explicit batch sizes without "
+            "dropping combinations"
+        )
     for index, batch in enumerate(batches):
         batch["batch_index"] = index
         # Adjacent batches normally belong to the same library. Spread them
@@ -195,6 +248,27 @@ def prepare_history_batches(
             raise RuntimeError(
                 f"history planner produced {largest_shard} jobs in one run shard"
             )
+    run_shards: list[dict] = []
+    for shard_index in range(run_count):
+        shard_batches = [
+            batch for batch in batches if batch["run_shard_index"] == shard_index
+        ]
+        shard_identity = {
+            "contract_sha256": contract_sha.lower(),
+            "shard_index": shard_index,
+            "batch_sha256s": [batch["batch_sha256"] for batch in shard_batches],
+        }
+        run_shards.append(
+            {
+                "shard_index": shard_index,
+                "batch_count": len(shard_batches),
+                "combination_count": sum(
+                    batch["combination_count"] for batch in shard_batches
+                ),
+                "batch_sha256s": shard_identity["batch_sha256s"],
+                "shard_sha256": _canonical_sha256(shard_identity),
+            }
+        )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "kind": "staticpython-library-history-batches",
@@ -203,6 +277,12 @@ def prepare_history_batches(
             "pure_python_versions_per_job": pure_batch_size,
             "native_versions_per_job": native_batch_size,
             "max_jobs_per_run": max_jobs_per_run,
+            "max_run_shards": max_run_shards,
+        },
+        "selection": {
+            "mode": "smoke" if smoke_library is not None else "full-history",
+            "smoke_library": smoke_library,
+            "smoke_python_series": smoke_python_series,
         },
         "combination_count": len(combinations),
         "batch_count": len(batches),
@@ -211,6 +291,7 @@ def prepare_history_batches(
             kind: sum(batch["combination_count"] for batch in batches if batch["build_kind"] == kind)
             for kind in ("pure-python", "native")
         },
+        "run_shards": run_shards,
         "batches": batches,
     }
     payload["manifest_sha256"] = _canonical_sha256(payload)
@@ -227,6 +308,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pure-batch-size", type=int, default=DEFAULT_PURE_BATCH_SIZE)
     parser.add_argument("--native-batch-size", type=int, default=DEFAULT_NATIVE_BATCH_SIZE)
     parser.add_argument("--max-jobs-per-run", type=int, default=DEFAULT_MAX_JOBS_PER_RUN)
+    parser.add_argument("--max-run-shards", type=int, default=DEFAULT_MAX_RUN_SHARDS)
+    parser.add_argument("--smoke-library")
+    parser.add_argument("--smoke-python-series")
     return parser.parse_args()
 
 
@@ -245,6 +329,9 @@ def main() -> int:
         pure_batch_size=args.pure_batch_size,
         native_batch_size=args.native_batch_size,
         max_jobs_per_run=args.max_jobs_per_run,
+        max_run_shards=args.max_run_shards,
+        smoke_library=args.smoke_library,
+        smoke_python_series=args.smoke_python_series,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(

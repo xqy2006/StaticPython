@@ -102,7 +102,9 @@ class LibraryIntegration:
     builtin_module_registrations: list[dict] = field(default_factory=list)
     staged_static_libraries_release_x64: list[dict] = field(default_factory=list)
     python_link_dependencies_release_x64: list[str] = field(default_factory=list)
+    suppressed_system_libraries_release_x64: list[str] = field(default_factory=list)
     python_link_wholearchive_release_x64: list[str] = field(default_factory=list)
+    trusted_object_origins: list[dict] = field(default_factory=list)
     top_level_import_names: list[str] = field(default_factory=list)
     dependency_constraints: dict[str, str] = field(default_factory=dict)
     conflicts: list[str] = field(default_factory=list)
@@ -1641,7 +1643,9 @@ def pypi_library(
     builtin_module_registrations: list[dict] | None = None,
     staged_static_libraries_release_x64: list[dict] | None = None,
     python_link_dependencies_release_x64: list[str] | None = None,
+    suppressed_system_libraries_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
+    trusted_object_origins: list[dict] | None = None,
     top_level_import_names: list[str] | None = None,
     dependency_constraints: dict[str, str] | None = None,
     conflicts: list[str] | None = None,
@@ -1694,7 +1698,9 @@ def pypi_library(
         builtin_module_registrations=list(builtin_module_registrations or []),
         staged_static_libraries_release_x64=list(staged_static_libraries_release_x64 or []),
         python_link_dependencies_release_x64=list(python_link_dependencies_release_x64 or []),
+        suppressed_system_libraries_release_x64=list(suppressed_system_libraries_release_x64 or []),
         python_link_wholearchive_release_x64=list(python_link_wholearchive_release_x64 or []),
+        trusted_object_origins=list(trusted_object_origins or []),
         top_level_import_names=list(top_level_import_names or python_packages or [name]),
         dependency_constraints=dict(dependency_constraints or {}),
         conflicts=list(conflicts or []),
@@ -1738,7 +1744,9 @@ def github_library(
     builtin_module_registrations: list[dict] | None = None,
     staged_static_libraries_release_x64: list[dict] | None = None,
     python_link_dependencies_release_x64: list[str] | None = None,
+    suppressed_system_libraries_release_x64: list[str] | None = None,
     python_link_wholearchive_release_x64: list[str] | None = None,
+    trusted_object_origins: list[dict] | None = None,
     top_level_import_names: list[str] | None = None,
     dependency_constraints: dict[str, str] | None = None,
     conflicts: list[str] | None = None,
@@ -1791,7 +1799,9 @@ def github_library(
         builtin_module_registrations=list(builtin_module_registrations or []),
         staged_static_libraries_release_x64=list(staged_static_libraries_release_x64 or []),
         python_link_dependencies_release_x64=list(python_link_dependencies_release_x64 or []),
+        suppressed_system_libraries_release_x64=list(suppressed_system_libraries_release_x64 or []),
         python_link_wholearchive_release_x64=list(python_link_wholearchive_release_x64 or []),
+        trusted_object_origins=list(trusted_object_origins or []),
         top_level_import_names=list(top_level_import_names or python_packages or [name]),
         dependency_constraints=dict(dependency_constraints or {}),
         conflicts=list(conflicts or []),
@@ -2557,6 +2567,16 @@ def collect_staged_static_libraries(integrations: list[LibraryIntegration]) -> l
 def collect_python_link_dependencies(integrations: list[LibraryIntegration]) -> list[str]:
     return _unique(
         [dependency for integration in integrations for dependency in integration.python_link_dependencies_release_x64]
+    )
+
+
+def collect_suppressed_system_libraries(integrations: list[LibraryIntegration]) -> list[str]:
+    return _unique(
+        [
+            library
+            for integration in integrations
+            for library in integration.suppressed_system_libraries_release_x64
+        ]
     )
 
 
