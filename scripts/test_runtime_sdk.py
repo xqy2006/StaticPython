@@ -1245,6 +1245,9 @@ struct _inittab _PyImport_Inittab[] = {
             "version": "25.1.0",
             "cpython_abi": "cp313",
             "staticpython_commit": commit,
+            "trusted_object_origins": [
+                {"library": "attrs.lib", "object": "main.obj"},
+            ],
             "verification": {"status": "not-run"},
             "license": {"status": "complete"},
         }
@@ -1265,6 +1268,10 @@ struct _inittab _PyImport_Inittab[] = {
         pack = index["packs"]["attrs"]["25.1.0"]["cp313"]
         self.assertEqual(pack["release_family"], "a-f")
         self.assertIn("/staticpython-packs-deadbeef-a-f/attrs.zip", pack["url"])
+        self.assertEqual(
+            pack["metadata"]["trusted_object_origins"],
+            [{"library": "attrs.lib", "object": "main.obj"}],
+        )
 
     def test_release_index_keeps_only_resolver_metadata(self) -> None:
         runtime_metadata = {
@@ -1299,6 +1306,9 @@ struct _inittab _PyImport_Inittab[] = {
             ],
             "libraries": ["demo.lib"],
             "suppressed_system_libraries": ["gdiplus.lib"],
+            "trusted_object_origins": [
+                {"library": "demo.lib", "object": "main.obj"},
+            ],
             "source_files": [{"path": "demo/data.json", "sha256": "b" * 64}],
             "smoke_tests": [{"kind": "import", "module": "demo"}],
             "files": [{"path": "lib/demo.lib", "sha256": "c" * 64}],
@@ -1308,6 +1318,17 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertEqual(projected["sources"], pack_metadata["sources"])
         self.assertEqual(projected["libraries"], ["demo.lib"])
         self.assertEqual(projected["suppressed_system_libraries"], ["gdiplus.lib"])
+        self.assertEqual(
+            projected["trusted_object_origins"],
+            [{"library": "demo.lib", "object": "main.obj"}],
+        )
+        self.assertEqual(
+            build_release_index.pack_index_metadata(
+                {"trusted_object_origins": []},
+                pack_path,
+            )["trusted_object_origins"],
+            [],
+        )
         self.assertNotIn("source_files", projected)
         self.assertNotIn("smoke_tests", projected)
         self.assertNotIn("files", projected)

@@ -99,6 +99,7 @@ PACK_INDEX_METADATA_FIELDS = (
     "wholearchive",
     "system_libraries",
     "suppressed_system_libraries",
+    "trusted_object_origins",
     "link_order",
     "toolchain",
     "license",
