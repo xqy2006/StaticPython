@@ -1,0 +1,248 @@
+name: Reusable library history shard
+
+on:
+  workflow_call:
+    inputs:
+      plan_artifact:
+        required: true
+        type: string
+      manifest_key:
+        required: true
+        type: string
+      contract_sha256:
+        required: true
+        type: string
+      manifest_sha256:
+        required: true
+        type: string
+      artifact_suffix:
+        required: true
+        type: string
+      shard_index:
+        required: true
+        type: number
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  STATICPYTHON_HISTORY_BUILD_WORKERS: "2"
+
+jobs:
+  plan-shard:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_batches: ${{ steps.plan.outputs.has_batches }}
+      shard_sha256: ${{ steps.plan.outputs.shard_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install shard planning dependencies
+        run: python -m pip install packaging
+
+      - name: Download immutable weekly plan
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.plan_artifact }}
+          path: .tmp/history-plan
+
+      - name: Validate and materialize one shard matrix
+        id: plan
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\library_history_evidence.py prepare-shard `
+            --contract .tmp\history-plan\library-version-contract.json `
+            --manifest .tmp\history-plan\library-history-manifest.json `
+            --shard-index ${{ inputs.shard_index }} `
+            --plan-artifact "${{ inputs.plan_artifact }}" `
+            --artifact-suffix "${{ inputs.artifact_suffix }}" `
+            --plan-output .tmp\shard-plan\library-history-shard-plan.v1.json `
+            --matrix-output .tmp\shard-plan\library-history-shard-matrix.json `
+            --github-output $env:GITHUB_OUTPUT
+
+      - name: Assert caller hashes match the immutable plan
+        shell: pwsh
+        run: |
+          $manifest = Get-Content -LiteralPath .tmp\history-plan\library-history-manifest.json -Raw | ConvertFrom-Json
+          if ($manifest.contract_sha256 -ne "${{ inputs.contract_sha256 }}") {
+            throw "Caller contract SHA-256 does not match the downloaded plan"
+          }
+          if ($manifest.manifest_sha256 -ne "${{ inputs.manifest_sha256 }}") {
+            throw "Caller manifest SHA-256 does not match the downloaded plan"
+          }
+
+  build-batches:
+    needs: plan-shard
+    if: ${{ needs.plan-shard.outputs.has_batches == 'true' }}
+    runs-on: windows-2022
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.plan-shard.outputs.matrix) }}
+    steps:
+      - name: Define immutable batch evidence paths
+        shell: pwsh
+        run: |
+          "HISTORY_RESULT_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-history-result-${{ matrix.batch_id }}')" >> $env:GITHUB_ENV
+          "HISTORY_BATCH_ARTIFACT=library-history-batch-${{ inputs.manifest_key }}-s${{ inputs.shard_index }}-${{ matrix.batch_id }}" >> $env:GITHUB_ENV
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install history build dependencies
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install packaging
+          choco install strawberryperl -y --no-progress
+
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Download immutable weekly plan
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.plan_artifact }}
+          path: .tmp/history-plan
+
+      - name: Download exact runtime SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.runtime_artifact }}
+          path: .tmp/runtime-sdk
+
+      - name: Build and verify every version in this batch
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $runtimeSdk = @(Get-ChildItem -LiteralPath .tmp\runtime-sdk -Filter *.zip -File)
+          if ($runtimeSdk.Count -ne 1) {
+            throw "Expected exactly one runtime SDK ZIP, found $($runtimeSdk.Count)"
+          }
+          $buildRoot = Join-Path $env:RUNNER_TEMP "library-history-build-${{ matrix.batch_id }}"
+          $sourceCache = Join-Path $env:GITHUB_WORKSPACE "downloads"
+          python .\scripts\run_library_history_batch.py `
+            --contract .tmp\history-plan\library-version-contract.json `
+            --manifest .tmp\history-plan\library-history-manifest.json `
+            --batch-id "${{ matrix.batch_id }}" `
+            --runtime-sdk $runtimeSdk[0].FullName `
+            --build-root $buildRoot `
+            --source-cache $sourceCache `
+            --result-root $env:HISTORY_RESULT_ROOT `
+            --build-workers $env:STATICPYTHON_HISTORY_BUILD_WORKERS `
+            --repository "${{ github.repository }}" `
+            --run-id "${{ github.run_id }}" `
+            --run-attempt "${{ github.run_attempt }}" `
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" `
+            --source-commit "${{ github.sha }}" `
+            --source-ref "${{ github.ref }}" `
+            --event-name "${{ github.event_name }}" `
+            --artifact $env:HISTORY_BATCH_ARTIFACT
+
+      - name: Upload immutable batch evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.HISTORY_BATCH_ARTIFACT }}
+          path: |
+            ${{ env.HISTORY_RESULT_ROOT }}/library-history-batch-evidence.v1.json
+            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/config.json
+            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/pack-metadata.json
+            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/staticpython-pack-verify-report.json
+            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/combination-evidence.v1.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  finalize-shard:
+    needs: [plan-shard, build-batches]
+    if: ${{ always() && needs.plan-shard.result == 'success' }}
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Define immutable shard evidence artifact
+        shell: pwsh
+        run: |
+          "HISTORY_SHARD_ARTIFACT=library-history-shard-${{ inputs.manifest_key }}-s${{ inputs.shard_index }}" >> $env:GITHUB_ENV
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install evidence dependencies
+        run: python -m pip install packaging
+
+      - name: Download immutable weekly plan
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.plan_artifact }}
+          path: .tmp/history-plan
+
+      - name: Download batch evidence for this shard
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: library-history-batch-${{ inputs.manifest_key }}-s${{ inputs.shard_index }}-*
+          path: .tmp/batch-evidence
+
+      - name: Finalize immutable shard evidence
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\library_history_evidence.py finalize-shard `
+            --contract .tmp\history-plan\library-version-contract.json `
+            --manifest .tmp\history-plan\library-history-manifest.json `
+            --evidence-root .tmp\batch-evidence `
+            --shard-index ${{ inputs.shard_index }} `
+            --output .tmp\shard-evidence\library-history-shard-evidence.v1.json `
+            --repository "${{ github.repository }}" `
+            --run-id "${{ github.run_id }}" `
+            --run-attempt "${{ github.run_attempt }}" `
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" `
+            --source-commit "${{ github.sha }}" `
+            --source-ref "${{ github.ref }}" `
+            --event-name "${{ github.event_name }}" `
+            --artifact $env:HISTORY_SHARD_ARTIFACT
+
+      - name: Upload immutable shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.HISTORY_SHARD_ARTIFACT }}
+          path: .tmp/shard-evidence/library-history-shard-evidence.v1.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce shard evidence gate
+        if: always()
+        shell: pwsh
+        run: |
+          $path = ".tmp\shard-evidence\library-history-shard-evidence.v1.json"
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Shard finalization did not produce evidence"
+          }
+          $evidence = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+          if ($evidence.status -ne "passed") {
+            $codes = @($evidence.blockers | ForEach-Object { $_.code }) -join ", "
+            throw "History shard is not promotable: $codes"
+          }

@@ -17,6 +17,7 @@ if str(SCRIPT_ROOT) not in sys.path:
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import library_history_evidence as history_evidence
 import library_version_contract as version_contract
 
 
@@ -24,6 +25,10 @@ SCHEMA_VERSION = 1
 INDEX_KIND = "staticpython-library-contract-index"
 EVIDENCE_KIND = "staticpython-library-contract-promotion-evidence"
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+DEFERRED_REASON = "weekly-history-shards"
+MATRIX_LIMIT = 256
+MAX_CANDIDATES_PER_BATCH = 2
+SAFE_ARTIFACT_SLUG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 
 
 def _canonical_sha256(payload: dict) -> str:
@@ -147,6 +152,47 @@ def _load_previous_catalog(root: Path) -> tuple[dict | None, dict | None]:
     return index, contract
 
 
+def _matching_history_validation(root: Path, candidate: dict) -> dict | None:
+    index, support = history_evidence._load_previous_support_catalog(root)
+    active = index.get("active")
+    if not isinstance(active, dict) or not isinstance(support, dict):
+        return None
+    candidate_sha = candidate.get("contract_sha256")
+    if active.get("contract_sha256") != candidate_sha:
+        return None
+    # Legacy support records without an immutable active directory receive a
+    # deliberately narrower compatibility check in the history loader. They
+    # remain useful as last-known-good context, but are not sufficient proof
+    # for adopting a deferred discovery contract.
+    if not isinstance(active.get("directory"), str) or not active["directory"]:
+        return None
+    if support.get("selection", {}).get("mode") != "full-history":
+        return None
+    contract_path = history_evidence._safe_relative(
+        root,
+        active.get("contract"),
+        "history-validated contract path",
+    )
+    history_contract = history_evidence.load_object(
+        contract_path,
+        "history-validated contract",
+    )
+    if history_contract != candidate:
+        raise RuntimeError(
+            "history support contract payload does not match the exact candidate contract"
+        )
+    return {
+        "contract_sha256": candidate_sha,
+        "index_sha256": index.get("index_sha256"),
+        "manifest_sha256": active.get("manifest_sha256"),
+        "support_sha256": active.get("support_sha256"),
+        "evidence_sha256": active.get("evidence_sha256"),
+        "verified_combination_count": active.get("verified_combination_count"),
+        "selection": support.get("selection"),
+        "provenance": active.get("provenance"),
+    }
+
+
 def _legacy_active(contract: dict) -> dict:
     return {
         "contract_sha256": contract["contract_sha256"],
@@ -207,6 +253,82 @@ def _validation_reports(root: Path | None) -> tuple[dict[tuple[str, str, str], d
     return reports, duplicates
 
 
+def _matrix_artifacts(matrix: dict, matrix_records: list[dict]) -> dict[str, str]:
+    """Bind every candidate to the exact Actions artifact that carries its report."""
+    include_by_slug: dict[str, dict] = {}
+    for record in matrix_records:
+        slug = record.get("slug")
+        if not isinstance(slug, str) or SAFE_ARTIFACT_SLUG_PATTERN.fullmatch(slug) is None:
+            raise RuntimeError(f"validation matrix record has an invalid artifact slug: {record!r}")
+        if slug in include_by_slug:
+            raise RuntimeError(f"validation matrix contains duplicate candidate slug: {slug}")
+        include_by_slug[slug] = record
+
+    raw_batches = matrix.get("batches")
+    if raw_batches is None:
+        # Compatibility for evidence produced before candidates were grouped into
+        # bounded jobs. In that layout each candidate had its own artifact.
+        return {slug: f"library-contract-{slug}" for slug in include_by_slug}
+    if not isinstance(raw_batches, list):
+        raise RuntimeError("validation matrix batches must be an array")
+
+    artifact_by_candidate: dict[str, str] = {}
+    seen_batch_slugs: set[str] = set()
+    for batch in raw_batches:
+        if not isinstance(batch, dict):
+            raise RuntimeError("validation matrix batch records must be objects")
+        batch_slug = batch.get("slug")
+        if (
+            not isinstance(batch_slug, str)
+            or SAFE_ARTIFACT_SLUG_PATTERN.fullmatch(batch_slug) is None
+        ):
+            raise RuntimeError(f"validation matrix batch has an invalid artifact slug: {batch!r}")
+        if batch_slug in seen_batch_slugs:
+            raise RuntimeError(f"validation matrix contains duplicate batch slug: {batch_slug}")
+        seen_batch_slugs.add(batch_slug)
+
+        candidate_count = batch.get("candidate_count")
+        if (
+            not isinstance(candidate_count, int)
+            or isinstance(candidate_count, bool)
+            or not 1 <= candidate_count <= MAX_CANDIDATES_PER_BATCH
+        ):
+            raise RuntimeError(f"validation matrix batch has an invalid candidate count: {batch!r}")
+        candidates_json = batch.get("candidates_json")
+        if not isinstance(candidates_json, str) or not candidates_json:
+            raise RuntimeError("validation matrix batch has no candidates_json payload")
+        try:
+            candidates = json.loads(candidates_json)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("validation matrix batch candidates_json is invalid") from exc
+        if not isinstance(candidates, list) or len(candidates) != candidate_count:
+            raise RuntimeError("validation matrix batch candidate count does not match its payload")
+
+        artifact = f"library-contract-{batch_slug}"
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                raise RuntimeError("validation matrix batch candidates must be objects")
+            candidate_slug = candidate.get("slug")
+            if not isinstance(candidate_slug, str) or candidate_slug not in include_by_slug:
+                raise RuntimeError("validation matrix batch contains an unknown candidate slug")
+            if candidate != include_by_slug[candidate_slug]:
+                raise RuntimeError(
+                    f"validation matrix batch payload differs from include record: {candidate_slug}"
+                )
+            if candidate_slug in artifact_by_candidate:
+                raise RuntimeError(
+                    f"validation matrix candidate appears in multiple batches: {candidate_slug}"
+                )
+            artifact_by_candidate[candidate_slug] = artifact
+
+    missing = sorted(set(include_by_slug) - set(artifact_by_candidate))
+    if missing:
+        raise RuntimeError(
+            "validation matrix batches omit candidate artifacts: " + ", ".join(missing)
+        )
+    return artifact_by_candidate
+
+
 def _validate_matrix_and_reports(
     delta: dict,
     matrix: dict | None,
@@ -214,6 +336,8 @@ def _validate_matrix_and_reports(
 ) -> tuple[dict, list[dict], list[dict]]:
     blockers: list[dict] = []
     matrix_records: list[dict] = []
+    artifact_by_candidate: dict[str, str] = {}
+    raw_deferred = None
     if matrix is None:
         if delta.get("new_candidates") and not (delta.get("drifted_candidates") or delta.get("regressions")):
             blockers.append({"code": "missing-validation-matrix", "count": 1})
@@ -224,6 +348,8 @@ def _validate_matrix_and_reports(
         if any(not isinstance(record, dict) for record in include):
             raise RuntimeError("validation matrix records must be objects")
         matrix_records = list(include)
+        artifact_by_candidate = _matrix_artifacts(matrix, matrix_records)
+        raw_deferred = matrix.get("deferred")
 
     delta_candidates = delta.get("new_candidates")
     if not isinstance(delta_candidates, list):
@@ -238,7 +364,44 @@ def _validate_matrix_and_reports(
         for record in matrix_records
         if record.get("validation_reason") == "new-candidate"
     }
-    if delta_identities != matrix_new_identities and not (
+    deferred = None
+    if raw_deferred is not None:
+        matrix_limit = (
+            raw_deferred.get("matrix_limit") if isinstance(raw_deferred, dict) else None
+        )
+        max_candidates_per_batch = (
+            raw_deferred.get("max_candidates_per_batch")
+            if isinstance(raw_deferred, dict)
+            else None
+        )
+        incremental_candidate_limit = (
+            raw_deferred.get("incremental_candidate_limit")
+            if isinstance(raw_deferred, dict)
+            else None
+        )
+        valid_deferred = (
+            isinstance(raw_deferred, dict)
+            and raw_deferred.get("reason") == DEFERRED_REASON
+            and raw_deferred.get("candidate_count") == len(delta_candidates)
+            and raw_deferred.get("candidate_count") == len(delta_identities)
+            and raw_deferred.get("contract_sha256") == delta.get("current_contract_sha256")
+            and isinstance(matrix_limit, int)
+            and not isinstance(matrix_limit, bool)
+            and 0 < matrix_limit <= MATRIX_LIMIT
+            and isinstance(max_candidates_per_batch, int)
+            and not isinstance(max_candidates_per_batch, bool)
+            and 0 < max_candidates_per_batch <= MAX_CANDIDATES_PER_BATCH
+            and isinstance(incremental_candidate_limit, int)
+            and not isinstance(incremental_candidate_limit, bool)
+            and incremental_candidate_limit == matrix_limit * max_candidates_per_batch
+            and not matrix_new_identities
+            and len(delta_candidates) > incremental_candidate_limit
+        )
+        if valid_deferred:
+            deferred = dict(raw_deferred)
+        else:
+            blockers.append({"code": "invalid-history-deferral", "count": 1})
+    if deferred is None and delta_identities != matrix_new_identities and not (
         matrix is None and (delta.get("drifted_candidates") or delta.get("regressions"))
     ):
         blockers.append(
@@ -266,6 +429,7 @@ def _validate_matrix_and_reports(
     verified_new: list[dict] = []
     for matrix_record in matrix_records:
         identity = _matrix_identity(matrix_record)
+        matrix_slug = matrix_record["slug"]
         key = identity[:3]
         if key in expected_keys:
             blockers.append(
@@ -285,7 +449,7 @@ def _validate_matrix_and_reports(
             "python_version": matrix_record.get("python_version"),
             "source_sha256": identity[3],
             "validation_reason": matrix_record.get("validation_reason"),
-            "artifact": f"library-contract-{matrix_record.get('slug', '<missing>')}",
+            "artifact": artifact_by_candidate[matrix_slug],
         }
         if report is None:
             missing.append(identity_record)
@@ -328,6 +492,7 @@ def _validate_matrix_and_reports(
         "failed": failed,
         "unexpected": unexpected,
         "passed": passed,
+        "deferred": deferred,
     }
     return validation, verified_new, blockers
 
@@ -349,6 +514,7 @@ def promote_catalog(
     validation_root: Path | None = None,
     previous_catalog_root: Path | None = None,
     legacy_baseline_contract_path: Path | None = None,
+    history_support_catalog_root: Path | None = None,
     mode: str = "preview",
     provenance: dict | None = None,
 ) -> dict:
@@ -405,6 +571,15 @@ def promote_catalog(
         validation_root,
     )
     blockers.extend(validation_blockers)
+    history_validation = None
+    if (
+        validation.get("deferred") is not None
+        and history_support_catalog_root is not None
+    ):
+        history_validation = _matching_history_validation(
+            history_support_catalog_root,
+            candidate,
+        )
 
     bootstrap = previous_contract is None and bool(delta.get("baseline"))
     if previous_contract is None and not bootstrap:
@@ -434,6 +609,9 @@ def promote_catalog(
     if blockers:
         decision_status = "frozen"
         gate_status = "failed"
+    elif validation.get("deferred") is not None and history_validation is None:
+        decision_status = "deferred"
+        gate_status = "passed"
     elif previous_sha == candidate_sha:
         decision_status = "unchanged"
         gate_status = "passed"
@@ -468,6 +646,7 @@ def promote_catalog(
         "supplied_delta_sha256": _canonical_sha256(supplied_delta),
         "calculated_delta_sha256": _canonical_sha256(calculated_delta),
         "validation": validation,
+        "history_validation": history_validation,
         "decision": decision,
     }
     evidence["evidence_sha256"] = _canonical_sha256(evidence)
@@ -488,6 +667,8 @@ def promote_catalog(
     if decision_status == "promoted":
         if bootstrap:
             promotion_basis = "discovery-baseline"
+        elif history_validation is not None:
+            promotion_basis = "weekly-history-validation"
         elif verified_new:
             promotion_basis = "incremental-validation"
         elif new_unbuildable:
@@ -499,6 +680,7 @@ def promote_catalog(
             "contract": "active/library-version-contract.json",
             "promotion_basis": promotion_basis,
             "verified_combinations": _merge_verified(previous_verified, verified_new),
+            "history_validation": history_validation,
             "provenance": provenance,
         }
         active_contract = candidate
@@ -510,6 +692,8 @@ def promote_catalog(
             "promotion_basis": (
                 "discovery-baseline"
                 if bootstrap
+                else "weekly-history-validation"
+                if history_validation is not None
                 else "incremental-validation"
                 if verified_new
                 else "unbuildable-evidence-update"
@@ -517,6 +701,7 @@ def promote_catalog(
                 else "contract-metadata-update"
             ),
             "verified_combinations": _merge_verified(previous_verified, verified_new),
+            "history_validation": history_validation,
             "provenance": provenance,
         }
 
@@ -570,6 +755,8 @@ def build_summary(index: dict, evidence: dict) -> str:
     delta = evidence["delta"]
     active = index.get("active")
     proposed = index.get("proposed_active")
+    deferred = validation.get("deferred")
+    history_validation = evidence.get("history_validation")
     lines = [
         "## StaticPython library contract promotion",
         "",
@@ -578,6 +765,8 @@ def build_summary(index: dict, evidence: dict) -> str:
         f"- Active: `{active.get('contract_sha256') if isinstance(active, dict) else '<none>'}`",
         f"- Proposed active: `{proposed.get('contract_sha256') if isinstance(proposed, dict) else '<none>'}`",
         f"- Validation: `{validation['passed_count']}/{validation['expected_count']}` passed",
+        f"- Deferred to weekly history shards: `{deferred.get('candidate_count', 0) if isinstance(deferred, dict) else 0}`",
+        f"- Matching full-history validation: `{bool(history_validation)}`",
         f"- New evidence-backed unbuildable records: `{len(delta['new_unbuildable'])}`",
         f"- Source drift records: `{len(delta['drifted_candidates'])}`",
         f"- Regression records: `{len(delta['regressions'])}`",
@@ -600,6 +789,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delta", type=Path, required=True)
     parser.add_argument("--matrix", type=Path)
     parser.add_argument("--validation-root", type=Path)
+    parser.add_argument("--history-support-catalog", type=Path)
     previous = parser.add_mutually_exclusive_group()
     previous.add_argument("--previous-catalog", type=Path)
     previous.add_argument("--legacy-baseline-contract", type=Path)
@@ -634,6 +824,7 @@ def main() -> int:
         validation_root=args.validation_root,
         previous_catalog_root=args.previous_catalog,
         legacy_baseline_contract_path=args.legacy_baseline_contract,
+        history_support_catalog_root=args.history_support_catalog,
         mode=args.mode,
         provenance=provenance,
     )

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import hashlib
 import importlib.util
-import shutil
 import sys
 import tempfile
 import unittest
@@ -585,6 +584,98 @@ struct _inittab _PyImport_Inittab[] = {
             [f"{name}.lib" for name in selected_names],
         )
 
+    def test_wxpython_pack_declares_gdiplus_provider_and_behavior_smokes(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_wxpython_pack_test",
+            REPO_ROOT / "Lib" / "wxpython" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        integration = module.LIBRARY_INTEGRATION
+        self.assertEqual(integration.release_version, "4.2.5")
+        self.assertEqual(integration.minimum_release_version, "4.2.5")
+        self.assertEqual(integration.license_expression, "wxWindows")
+        self.assertEqual(
+            integration.suppressed_system_libraries_release_x64,
+            ["gdiplus.lib"],
+        )
+        self.assertEqual(
+            integration.trusted_object_origins,
+            [{"library": "wxbase32u.lib", "object": "main.obj"}],
+        )
+        self.assertEqual(
+            [
+                name
+                for name in module.WXPYTHON_SYSTEM_LIBRARIES
+                if not build.is_windows_system_library(name)
+                and not build.is_windows_sdk_library(name)
+            ],
+            [],
+        )
+        self.assertEqual(
+            [test["name"] for test in integration.smoke_tests],
+            ["wx-native-modules", "wx-window-lifecycle"],
+        )
+
+    def test_wxpython_link_metadata_tracks_bundled_wxwidgets_version(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_wxpython_versioned_libraries_test",
+            REPO_ROOT / "Lib" / "wxpython" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        header = self.root / "wxpython_builtin" / "wxWidgets" / "include" / "wx" / "version.h"
+        header.parent.mkdir(parents=True)
+        header.write_text(
+            "#define wxMAJOR_VERSION 3\n#define wxMINOR_VERSION 3\n",
+            encoding="utf-8",
+        )
+        messages: list[str] = []
+        context = SimpleNamespace(source_root=self.root, log=messages.append)
+        libraries = module._synchronize_wxwidgets_link_metadata(context)
+
+        self.assertIn("wxbase33u.lib", libraries)
+        self.assertIn("wxmsw33u_core.lib", libraries)
+        self.assertNotIn("wxbase32u.lib", libraries)
+        self.assertEqual(
+            module.LIBRARY_INTEGRATION.trusted_object_origins,
+            [{"library": "wxbase33u.lib", "object": "main.obj"}],
+        )
+        self.assertEqual(
+            module.LIBRARY_INTEGRATION.python_link_dependencies_release_x64,
+            [
+                *module.WXPYTHON_MODULE_LIBRARIES,
+                *libraries,
+                *module.WXPYTHON_SYSTEM_LIBRARIES,
+            ],
+        )
+        self.assertEqual(messages, ["using wxWidgets 3.3 static library names"])
+
+    def test_wxpython_version_header_drift_fails_closed(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_wxpython_version_header_drift_test",
+            REPO_ROOT / "Lib" / "wxpython" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        header = self.root / "wxpython_builtin" / "wxWidgets" / "include" / "wx" / "version.h"
+        header.parent.mkdir(parents=True)
+        header.write_text(
+            "#define wxMAJOR_VERSION 3\n"
+            "#define wxMAJOR_VERSION 4\n"
+            "#define wxMINOR_VERSION 3\n",
+            encoding="utf-8",
+        )
+        context = SimpleNamespace(source_root=self.root, log=lambda _message: None)
+        with self.assertRaisesRegex(RuntimeError, "wxMAJOR_VERSION exactly once"):
+            module._synchronize_wxwidgets_link_metadata(context)
+
     def test_native_wheels_are_never_source_inputs(self) -> None:
         files = [
             {
@@ -748,9 +839,17 @@ struct _inittab _PyImport_Inittab[] = {
             python_packages=["demo"],
             top_level_import_names=["demo"],
             materialized_paths=["Lib/demo"],
+            suppressed_system_libraries_release_x64=["GdiPlus.lib"],
+            python_link_dependencies_release_x64=["demo-native.lib"],
+            trusted_object_origins=[
+                {"library": "demo-native.lib", "object": "MAIN.OBJ"},
+            ],
             license_expression="MIT",
             license_files=["Lib/demo/LICENSE.txt"],
         )
+        native_output = self.root / "PCbuild" / "amd64"
+        native_output.mkdir(parents=True)
+        (native_output / "demo-native.lib").write_bytes(b"library")
         output = self.root / "dist"
         archive_path = build.export_library_pack(
             self.root,
@@ -775,6 +874,11 @@ struct _inittab _PyImport_Inittab[] = {
             self.assertIn("Lib/demo/data.json", [item["path"] for item in metadata["resources"]])
             self.assertEqual(metadata["license"]["status"], "complete")
             self.assertEqual(metadata["verification"]["status"], "passed")
+            self.assertEqual(metadata["suppressed_system_libraries"], ["gdiplus.lib"])
+            self.assertEqual(
+                metadata["trusted_object_origins"],
+                [{"library": "demo-native.lib", "object": "main.obj"}],
+            )
             self.assertEqual(
                 metadata["verification"]["smoke_tests"],
                 [{"name": "import-demo", "kind": "import", "status": "passed"}],
@@ -782,6 +886,44 @@ struct _inittab _PyImport_Inittab[] = {
             self.assertIn('"demo"', descriptor)
             self.assertIn("staticpython_pack_demo_resource_", descriptor)
             self.assertNotIn('_Py_M__other', descriptor)
+
+    def test_system_library_suppression_resolves_pack_link_collisions(self) -> None:
+        consumer = libs.LibraryIntegration(
+            name="consumer",
+            python_link_dependencies_release_x64=["gdiplus.lib", "user32.lib"],
+        )
+        provider = libs.LibraryIntegration(
+            name="provider",
+            suppressed_system_libraries_release_x64=["GDIPLUS.LIB"],
+        )
+        dependencies = build.iter_python_link_dependencies(
+            self.root,
+            {"python_link_dependencies_release_x64": []},
+            [consumer, provider],
+        )
+        self.assertEqual(dependencies, ["user32.lib"])
+
+        provider.suppressed_system_libraries_release_x64 = ["private.lib"]
+        with self.assertRaisesRegex(RuntimeError, "only name Windows system libraries"):
+            build.iter_python_link_dependencies(
+                self.root,
+                {"python_link_dependencies_release_x64": []},
+                [consumer, provider],
+            )
+
+    def test_trusted_object_origin_must_name_a_pack_owned_library(self) -> None:
+        integration = libs.LibraryIntegration(
+            name="demo",
+            trusted_object_origins=[
+                {"library": "outside.lib", "object": "main.obj"},
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeError, "not owned by the pack"):
+            build._integration_trusted_object_origins(
+                integration,
+                [{"logical_name": "owned.lib"}],
+            )
+
 
     def test_prepare_hooks_finalize_custom_pypi_license_metadata(self) -> None:
         source_root = self.root / "source"
@@ -1307,6 +1449,9 @@ struct _inittab _PyImport_Inittab[] = {
             "version": "25.1.0",
             "cpython_abi": "cp313",
             "staticpython_commit": commit,
+            "trusted_object_origins": [
+                {"library": "attrs.lib", "object": "main.obj"},
+            ],
             "verification": {"status": "not-run"},
             "license": {"status": "complete"},
         }
@@ -1327,6 +1472,87 @@ struct _inittab _PyImport_Inittab[] = {
         pack = index["packs"]["attrs"]["25.1.0"]["cp313"]
         self.assertEqual(pack["release_family"], "a-f")
         self.assertIn("/staticpython-packs-deadbeef-a-f/attrs.zip", pack["url"])
+        self.assertEqual(
+            pack["metadata"]["trusted_object_origins"],
+            [{"library": "attrs.lib", "object": "main.obj"}],
+        )
+
+    def test_release_index_keeps_only_resolver_metadata(self) -> None:
+        runtime_metadata = {
+            "runtime_abi": "staticpython-pack-v1-cp313",
+            "link_libraries": ["pythoncore.lib"],
+            "verification": {"status": "passed"},
+            "files": [{"path": "lib/pythoncore.lib", "sha256": "a" * 64}],
+        }
+        self.assertEqual(
+            build_release_index.runtime_index_metadata(runtime_metadata),
+            {
+                "runtime_abi": "staticpython-pack-v1-cp313",
+                "link_libraries": ["pythoncore.lib"],
+                "verification": {"status": "passed"},
+            },
+        )
+
+        pack_path = self.root / "demo.zip"
+        pack_metadata = {
+            "name": "demo",
+            "version": "1.0",
+            "sources": ["src/pack.c", "src/resources/resource_000001.c"],
+            "resources": [
+                {
+                    "path": "demo/data.json",
+                    "symbol": "staticpython_pack_demo_resource_1",
+                    "source": "src/resources/resource_000001.c",
+                    "size": 42,
+                    "compressed_size": 21,
+                    "sha256": "b" * 64,
+                }
+            ],
+            "libraries": ["demo.lib"],
+            "suppressed_system_libraries": ["gdiplus.lib"],
+            "trusted_object_origins": [
+                {"library": "demo.lib", "object": "main.obj"},
+            ],
+            "source_files": [{"path": "demo/data.json", "sha256": "b" * 64}],
+            "smoke_tests": [{"kind": "import", "module": "demo"}],
+            "files": [{"path": "lib/demo.lib", "sha256": "c" * 64}],
+        }
+        projected = build_release_index.pack_index_metadata(pack_metadata, pack_path)
+        self.assertEqual(projected["resources"], [{"path": "demo/data.json"}])
+        self.assertEqual(projected["sources"], pack_metadata["sources"])
+        self.assertEqual(projected["libraries"], ["demo.lib"])
+        self.assertEqual(projected["suppressed_system_libraries"], ["gdiplus.lib"])
+        self.assertEqual(
+            projected["trusted_object_origins"],
+            [{"library": "demo.lib", "object": "main.obj"}],
+        )
+        self.assertEqual(
+            build_release_index.pack_index_metadata(
+                {"trusted_object_origins": []},
+                pack_path,
+            )["trusted_object_origins"],
+            [],
+        )
+        self.assertNotIn("source_files", projected)
+        self.assertNotIn("smoke_tests", projected)
+        self.assertNotIn("files", projected)
+        self.assertEqual(
+            pack_metadata["resources"][0]["symbol"],
+            "staticpython_pack_demo_resource_1",
+        )
+
+    def test_release_index_rejects_resource_without_virtual_path(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "invalid resource record"):
+            build_release_index.pack_index_metadata(
+                {"resources": [{"source": "src/resources/resource_000001.c"}]},
+                self.root / "demo.zip",
+            )
+
+    def test_release_index_serialization_is_compact_and_newline_terminated(self) -> None:
+        self.assertEqual(
+            build_release_index.serialize_index({"schema_version": 1, "values": [1, 2]}),
+            '{"schema_version":1,"values":[1,2]}\n',
+        )
 
     def test_release_index_requires_every_pack_for_every_target_abi(self) -> None:
         packs = {"demo": {"1.0": {"cp311": {}}}}

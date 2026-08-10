@@ -39,6 +39,8 @@ jobs:
         run: python .\scripts\test_runtime_resources.py
       - name: Runtime SDK and pack tests
         run: python .\scripts\test_runtime_sdk.py
+      - name: Full-profile dependency drift patch tests
+        run: python .\scripts\test_full_profile_drift_patches.py
       - name: Release publication tests
         run: python .\scripts\test_publish_release_assets.py
 

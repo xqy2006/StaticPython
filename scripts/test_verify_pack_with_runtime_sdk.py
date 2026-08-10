@@ -76,13 +76,14 @@ def _pack_metadata(root: Path, runtime: dict, *, name: str = "demo") -> dict:
         "cpython_tag": runtime["cpython_tag"],
         "staticpython_commit": runtime["staticpython_commit"],
         "platform": runtime["platform"],
-        "toolchain": runtime["toolchain"],
+        "toolchain": json.loads(json.dumps(runtime["toolchain"])),
         "descriptor_symbol": f"StaticPython_Pack_{name}",
         "sources": ["src/pack.c"],
         "libraries": [],
         "wholearchive": [],
         "system_libraries": [],
         "suppressed_system_libraries": [],
+        "trusted_object_origins": [],
         "dependencies": [],
         "conflicts": [],
         "frozen_modules": [f"{name}.child"],
@@ -151,6 +152,113 @@ class VerifyPackWithRuntimeSDKTests(unittest.TestCase):
         (runtime_root / "include" / "Python.h").write_text("/* Tamper */\n", encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "SHA-256"):
             verifier.validate_runtime_sdk(runtime_root)
+
+    def test_vscmd_servicing_drift_does_not_change_toolchain_abi(self) -> None:
+        _runtime_root, runtime = self._make_runtime()
+        pack_root, metadata = self._make_pack(runtime)
+        metadata["toolchain"]["vscmd_version"] = "17.14.37"
+        (pack_root / verifier.PACK_METADATA_PATH).write_text(
+            json.dumps(metadata), encoding="utf-8"
+        )
+        self.assertEqual(verifier.validate_pack(pack_root, runtime)["name"], "demo")
+
+        metadata["toolchain"]["vc_tools_version"] = "14.45.00000"
+        (pack_root / verifier.PACK_METADATA_PATH).write_text(
+            json.dumps(metadata), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(RuntimeError, "toolchain ABI"):
+            verifier.validate_pack(pack_root, runtime)
+
+    def test_trusted_object_origin_must_be_exact_and_pack_owned(self) -> None:
+        _runtime_root, runtime = self._make_runtime()
+        pack_root, metadata = self._make_pack(runtime)
+        (pack_root / "lib").mkdir()
+        (pack_root / "lib" / "owned.lib").write_bytes(b"library")
+        metadata["libraries"] = ["owned.lib"]
+        metadata["trusted_object_origins"] = [
+            {"library": "owned.lib", "object": "main.obj"},
+        ]
+        metadata["files"] = [
+            record
+            for record in _file_records(pack_root)
+            if record["path"] != verifier.PACK_METADATA_PATH
+        ]
+        (pack_root / verifier.PACK_METADATA_PATH).write_text(json.dumps(metadata), encoding="utf-8")
+        self.assertEqual(
+            verifier.validate_pack(pack_root, runtime)["trusted_object_origins"],
+            [{"library": "owned.lib", "object": "main.obj"}],
+        )
+
+        metadata["trusted_object_origins"] = [
+            {"library": "outside.lib", "object": "main.obj"},
+        ]
+        (pack_root / verifier.PACK_METADATA_PATH).write_text(json.dumps(metadata), encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "trusted object library is missing"):
+            verifier.validate_pack(pack_root, runtime)
+
+    def test_main_object_audit_allows_only_declared_archive_origin(self) -> None:
+        allowed, forbidden = verifier._classify_main_object_records(
+            "\n".join(
+                [
+                    "0001:00000000 wxEntry wxbase33u.lib(main.obj)",
+                    "0001:00000008 wxEntryCleanup wxbase33u:main.obj",
+                    "0001:00000010 Py_Main pythoncore.lib(main.obj)",
+                    r"0001:00000020 custom_entry C:\build\main.obj",
+                    "0001:00000030 impostor notwxbase33u:main.obj",
+                    "0001:00000040 mixed wxbase33u.lib(main.obj) pythoncore.lib(main.obj)",
+                ]
+            ),
+            {("wxbase33u.lib", "main.obj")},
+        )
+        self.assertEqual(
+            allowed,
+            [
+                "0001:00000000 wxEntry wxbase33u.lib(main.obj)",
+                "0001:00000008 wxEntryCleanup wxbase33u:main.obj",
+            ],
+        )
+        self.assertEqual(
+            forbidden,
+            [
+                "0001:00000010 Py_Main pythoncore.lib(main.obj)",
+                r"0001:00000020 custom_entry C:\build\main.obj",
+                "0001:00000030 impostor notwxbase33u:main.obj",
+                "0001:00000040 mixed wxbase33u.lib(main.obj) pythoncore.lib(main.obj)",
+            ],
+        )
+
+    def test_trusted_object_origin_rejects_ambiguous_link_inputs(self) -> None:
+        trusted = {("owned.lib", "main.obj")}
+        pack = self.root / "pack" / "owned.lib"
+        runtime = self.root / "runtime" / "owned.lib"
+
+        verifier._validate_trusted_object_link_inputs(
+            trusted,
+            pack_libraries=[pack],
+            runtime_libraries=[],
+            system_libraries=["user32.lib"],
+        )
+        with self.assertRaisesRegex(RuntimeError, "owned.lib.*runtime SDK"):
+            verifier._validate_trusted_object_link_inputs(
+                trusted,
+                pack_libraries=[pack],
+                runtime_libraries=[runtime],
+                system_libraries=[],
+            )
+        with self.assertRaisesRegex(RuntimeError, "owned.lib.*system libraries"):
+            verifier._validate_trusted_object_link_inputs(
+                trusted,
+                pack_libraries=[pack],
+                runtime_libraries=[],
+                system_libraries=["OWNED.LIB"],
+            )
+        with self.assertRaisesRegex(RuntimeError, "exactly one selected pack archive"):
+            verifier._validate_trusted_object_link_inputs(
+                trusted,
+                pack_libraries=[],
+                runtime_libraries=[],
+                system_libraries=[],
+            )
 
     def test_composition_and_namespace_parents_are_inferred(self) -> None:
         runtime = {
