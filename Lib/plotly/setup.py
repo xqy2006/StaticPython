@@ -12,6 +12,145 @@ from libs import (
 )
 
 
+def patch_plotly_data_source(text: str) -> str:
+    if not text:
+        return text
+    import_guard = (
+        "try:\n"
+        "    from plotly._staticpython_package_data import DATASETS as _STATICPYTHON_DATASETS\n"
+        "except Exception:\n"
+        "    _STATICPYTHON_DATASETS = {}\n\n"
+    )
+    if "_STATICPYTHON_DATASETS" not in text:
+        if text.startswith('"""'):
+            end = text.find('"""\n', 3)
+            if end != -1:
+                insert_at = end + 4
+                text = text[:insert_at] + "\nimport gzip\nimport io\nimport json\nimport os\n\n" + import_guard + text[insert_at:]
+        elif text.startswith("'''"):
+            end = text.find("'''\n", 3)
+            if end != -1:
+                insert_at = end + 4
+                text = text[:insert_at] + "\nimport gzip\nimport io\nimport json\nimport os\n\n" + import_guard + text[insert_at:]
+        elif "import os\n" in text:
+            text = text.replace("import os\n", "import gzip\nimport io\nimport json\nimport os\n" + import_guard, 1)
+        else:
+            text = "import gzip\nimport io\nimport json\nimport os\n\n" + import_guard + text
+
+    if (
+        "def _get_dataset(d, return_type):" in text
+        and "dataset_bytes = _STATICPYTHON_DATASETS.get(dataset_name)" not in text
+    ):
+        text = replace_function_block_once(
+            text,
+            "_get_dataset",
+            'def _get_dataset(d, return_type):\n'
+            '    """Load an embedded dataset through the requested dataframe backend."""\n'
+            '    dataset_name = d + ".csv.gz"\n\n'
+            '    if return_type not in AVAILABLE_BACKENDS:\n'
+            '        msg = (\n'
+            '            f"Unsupported return_type. Found {return_type}, expected one "\n'
+            '            f"of {AVAILABLE_BACKENDS}"\n'
+            '        )\n'
+            '        raise NotImplementedError(msg)\n\n'
+            '    try:\n'
+            '        if return_type == "pyarrow":\n'
+            '            module_to_load = "pyarrow.csv"\n'
+            '        elif return_type == "modin":\n'
+            '            module_to_load = "modin.pandas"\n'
+            '        else:\n'
+            '            module_to_load = return_type\n'
+            '        backend = import_module(module_to_load)\n'
+            '    except ModuleNotFoundError:\n'
+            '        msg = f"return_type={return_type}, but {return_type} is not installed"\n'
+            '        raise ModuleNotFoundError(msg)\n\n'
+            '    dataset_bytes = _STATICPYTHON_DATASETS.get(dataset_name)\n'
+            '    if dataset_bytes is not None:\n'
+            '        dataset_source = io.BytesIO(gzip.decompress(dataset_bytes))\n'
+            '    else:\n'
+            '        dataset_source = os.path.join(\n'
+            '            os.path.dirname(os.path.dirname(__file__)),\n'
+            '            "package_data",\n'
+            '            "datasets",\n'
+            '            dataset_name,\n'
+            '        )\n\n'
+            '    try:\n'
+            '        return backend.read_csv(dataset_source)\n'
+            '    except Exception as e:\n'
+            '        msg = f"Unable to read \'{d}\' dataset due to: {e}"\n'
+            '        raise Exception(msg).with_traceback(e.__traceback__)\n\n',
+            label="plotly multi-backend dataset loader",
+            next_name=None,
+        )
+    elif "def _get_dataset(d):" in text and "dataset_candidates = [" not in text:
+        text = replace_function_block_once(
+            text,
+            "_get_dataset",
+            'def _get_dataset(d):\n'
+            '    import pandas\n\n'
+            '    dataset_name = d + ".csv.gz"\n'
+            '    dataset_bytes = _STATICPYTHON_DATASETS.get(dataset_name)\n'
+            '    if dataset_bytes is not None:\n'
+            '        return pandas.read_csv(io.BytesIO(gzip.decompress(dataset_bytes)))\n\n'
+            '    dataset_candidates = [\n'
+            '        os.path.join(\n'
+            '            os.path.dirname(os.path.dirname(__file__)),\n'
+            '            "package_data",\n'
+            '            "datasets",\n'
+            '            dataset_name,\n'
+            '        ),\n'
+            '        os.path.join(os.path.dirname(__file__), dataset_name),\n'
+            '    ]\n'
+            '    for filepath in dataset_candidates:\n'
+            '        if os.path.exists(filepath):\n'
+            '            return pandas.read_csv(filepath)\n'
+            '    raise FileNotFoundError(dataset_name)\n\n',
+            label="plotly dataset loader fallback",
+            next_name=None,
+        )
+    elif (
+        "def _get_dataset(" in text
+        and "dataset_bytes = _STATICPYTHON_DATASETS.get(dataset_name)" not in text
+        and "dataset_candidates = [" not in text
+    ):
+        raise RuntimeError("unsupported plotly _get_dataset signature")
+
+    if "def election_geojson():" in text and 'geojson_bytes = _STATICPYTHON_DATASETS.get("election.geojson.gz")' not in text:
+        text = replace_function_block_once(
+            text,
+            "election_geojson",
+            'def election_geojson():\n'
+            '    """\n'
+            'Each feature represents an electoral district in the 2013 Montreal mayoral election.\n\n'
+            'Returns:\n'
+            '    A GeoJSON-formatted `dict`.\n'
+            '    """\n'
+            '    geojson_name = "election.geojson.gz"\n'
+            '    geojson_bytes = _STATICPYTHON_DATASETS.get(geojson_name)\n'
+            '    if geojson_bytes is not None:\n'
+            '        with gzip.GzipFile(fileobj=io.BytesIO(geojson_bytes), mode="r") as f:\n'
+            '            return json.loads(f.read().decode("utf-8"))\n\n'
+            '    dataset_candidates = [\n'
+            '        os.path.join(\n'
+            '            os.path.dirname(os.path.dirname(__file__)),\n'
+            '            "package_data",\n'
+            '            "datasets",\n'
+            '            geojson_name,\n'
+            '        ),\n'
+            '        os.path.join(os.path.dirname(__file__), geojson_name),\n'
+            '    ]\n'
+            '    for filepath in dataset_candidates:\n'
+            '        if os.path.exists(filepath):\n'
+            '            with gzip.GzipFile(filepath, "r") as f:\n'
+            '                return json.loads(f.read().decode("utf-8"))\n'
+            '    raise FileNotFoundError(geojson_name)\n\n',
+            label="plotly election geojson loader fallback",
+            next_name=None,
+        )
+
+    return text
+
+
 def patch_plotly_sources(context):
     package_data_dir = context.source_root / "Lib" / "plotly" / "package_data"
     if not package_data_dir.exists():
@@ -362,94 +501,12 @@ def patch_plotly_sources(context):
         allow_all_missing=True,
     )
 
-    def patch_data(text):
-        if not text:
-            return text
-        import_guard = (
-            "try:\n"
-            "    from plotly._staticpython_package_data import DATASETS as _STATICPYTHON_DATASETS\n"
-            "except Exception:\n"
-            "    _STATICPYTHON_DATASETS = {}\n\n"
-        )
-        if "_STATICPYTHON_DATASETS" not in text:
-            if text.startswith('"""'):
-                end = text.find('"""\n', 3)
-                if end != -1:
-                    insert_at = end + 4
-                    text = text[:insert_at] + "\nimport gzip\nimport io\nimport json\nimport os\n\n" + import_guard + text[insert_at:]
-            elif text.startswith("'''"):
-                end = text.find("'''\n", 3)
-                if end != -1:
-                    insert_at = end + 4
-                    text = text[:insert_at] + "\nimport gzip\nimport io\nimport json\nimport os\n\n" + import_guard + text[insert_at:]
-            elif "import os\n" in text:
-                text = text.replace("import os\n", "import gzip\nimport io\nimport json\nimport os\n" + import_guard, 1)
-            else:
-                text = "import gzip\nimport io\nimport json\nimport os\n\n" + import_guard + text
-
-        if "def _get_dataset(d):" in text and "dataset_candidates = [" not in text:
-            text = replace_function_block_once(
-                text,
-                "_get_dataset",
-                'def _get_dataset(d):\n'
-                '    import pandas\n\n'
-                '    dataset_name = d + ".csv.gz"\n'
-                '    dataset_bytes = _STATICPYTHON_DATASETS.get(dataset_name)\n'
-                '    if dataset_bytes is not None:\n'
-                '        return pandas.read_csv(io.BytesIO(gzip.decompress(dataset_bytes)))\n\n'
-                '    dataset_candidates = [\n'
-                '        os.path.join(\n'
-                '            os.path.dirname(os.path.dirname(__file__)),\n'
-                '            "package_data",\n'
-                '            "datasets",\n'
-                '            dataset_name,\n'
-                '        ),\n'
-                '        os.path.join(os.path.dirname(__file__), dataset_name),\n'
-                '    ]\n'
-                '    for filepath in dataset_candidates:\n'
-                '        if os.path.exists(filepath):\n'
-                '            return pandas.read_csv(filepath)\n'
-                '    raise FileNotFoundError(dataset_name)\n\n',
-                label="plotly dataset loader fallback",
-                next_name=None,
-            )
-
-        if "def election_geojson():" in text and 'geojson_bytes = _STATICPYTHON_DATASETS.get("election.geojson.gz")' not in text:
-            text = replace_function_block_once(
-                text,
-                "election_geojson",
-                'def election_geojson():\n'
-                '    """\n'
-                'Each feature represents an electoral district in the 2013 Montreal mayoral election.\n\n'
-                'Returns:\n'
-                '    A GeoJSON-formatted `dict`.\n'
-                '    """\n'
-                '    geojson_name = "election.geojson.gz"\n'
-                '    geojson_bytes = _STATICPYTHON_DATASETS.get(geojson_name)\n'
-                '    if geojson_bytes is not None:\n'
-                '        with gzip.GzipFile(fileobj=io.BytesIO(geojson_bytes), mode="r") as f:\n'
-                '            return json.loads(f.read().decode("utf-8"))\n\n'
-                '    dataset_candidates = [\n'
-                '        os.path.join(\n'
-                '            os.path.dirname(os.path.dirname(__file__)),\n'
-                '            "package_data",\n'
-                '            "datasets",\n'
-                '            geojson_name,\n'
-                '        ),\n'
-                '        os.path.join(os.path.dirname(__file__), geojson_name),\n'
-                '    ]\n'
-                '    for filepath in dataset_candidates:\n'
-                '        if os.path.exists(filepath):\n'
-                '            with gzip.GzipFile(filepath, "r") as f:\n'
-                '                return json.loads(f.read().decode("utf-8"))\n'
-                '    raise FileNotFoundError(geojson_name)\n\n',
-                label="plotly election geojson loader fallback",
-                next_name=None,
-            )
-
-        return text
-
-    transform_source_text(context, "Lib/plotly/data/__init__.py", patch_data, allow_missing=True)
+    transform_source_text(
+        context,
+        "Lib/plotly/data/__init__.py",
+        patch_plotly_data_source,
+        allow_missing=True,
+    )
 
     def patch_validator_cache(text):
         if "_validators.json" not in text:
