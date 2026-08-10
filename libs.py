@@ -432,11 +432,11 @@ def ensure_package_markers(text: str, package_name: str) -> str:
     bom = "\ufeff" if text.startswith("\ufeff") else ""
     text = text.lstrip("\ufeff")
     if package_line in text and legacy_path_line in text:
-        return text.replace(legacy_path_line, path_block, 1)
+        return bom + text.replace(legacy_path_line, path_block, 1)
     if package_line in text:
         newline = "\r\n" if "\r\n" in text else "\n"
         formatted_path_block = path_block.replace("\n", newline)
-        return text.replace(
+        return bom + text.replace(
             package_line,
             f"{package_line}{newline}{newline}{formatted_path_block}",
             1,

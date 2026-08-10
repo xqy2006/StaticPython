@@ -51,6 +51,24 @@ class EnsurePackageMarkersTests(unittest.TestCase):
         self.assertIn("__package__ = 'example'\r\n", transformed)
         self.assertEqual(ensure_package_markers(transformed, "example"), transformed)
 
+    def test_preserves_bom_when_upgrading_legacy_markers(self) -> None:
+        source = "\ufeff__package__ = 'example'\n__path__ = [__name__]\n"
+
+        transformed = ensure_package_markers(source, "example")
+
+        self.assertTrue(transformed.startswith("\ufeff"))
+        self.assertNotIn("__path__ = [__name__]", transformed)
+        self.assertEqual(ensure_package_markers(transformed, "example"), transformed)
+
+    def test_preserves_bom_when_adding_missing_path_marker(self) -> None:
+        source = "\ufeff__package__ = 'example'\nVALUE = 1\n"
+
+        transformed = ensure_package_markers(source, "example")
+
+        self.assertTrue(transformed.startswith("\ufeff"))
+        self.assertIn("__path__ = [_staticpython_os.path.dirname(__file__)]", transformed)
+        self.assertEqual(ensure_package_markers(transformed, "example"), transformed)
+
 
 if __name__ == "__main__":
     unittest.main()
