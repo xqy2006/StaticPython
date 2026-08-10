@@ -27,6 +27,7 @@ from libs import (
     collect_overlay_entries,
     collect_python_link_dependencies,
     collect_python_link_wholearchive,
+    collect_suppressed_system_libraries,
     collect_staged_static_libraries,
     collect_static_library_projects,
     load_integration_definitions,
@@ -168,6 +169,7 @@ WINDOWS_SDK_LIBRARY_NAMES = {
     "oleacc.lib",
     "setupapi.lib",
     "windowscodecs.lib",
+    "wininet.lib",
 }
 
 ET.register_namespace("", MSBUILD_NS)
@@ -612,7 +614,7 @@ def set_frozen_data_compile_options(clcompile: ET.Element) -> None:
         "AdditionalOptions",
         condition=MSBUILD_RELEASE_X64_CONDITION,
     )
-    additional_options.text = "/GL- %(AdditionalOptions)"
+    additional_options.text = "/bigobj /GL- %(AdditionalOptions)"
     optimization = ensure_direct_child(
         clcompile,
         "Optimization",
@@ -847,9 +849,26 @@ def iter_python_link_dependencies(source_root: Path, manifest: dict, integration
     combined = list(
         dict.fromkeys([*manifest["python_link_dependencies_release_x64"], *collect_python_link_dependencies(integrations)])
     )
+    suppressed = {
+        normalize_library_name(name)
+        for name in collect_suppressed_system_libraries(integrations)
+    }
+    invalid_suppressions = sorted(
+        name
+        for name in suppressed
+        if not is_windows_system_library(name) and not is_windows_sdk_library(name)
+    )
+    if invalid_suppressions:
+        raise RuntimeError(
+            "link suppressions may only name Windows system libraries: "
+            + ", ".join(invalid_suppressions)
+        )
     if (source_root / "PCbuild" / "zlib-ng.vcxproj").exists():
         combined.append("zlib-ng$(PyDebugExt).lib")
     for dependency in combined:
+        if normalize_library_name(dependency) in suppressed:
+            log(f"suppress python system link dependency {dependency}")
+            continue
         stem = Path(dependency).stem
         if dependency.lower().endswith(".lib") and stem in all_project_stems and stem not in available_project_stems:
             log(
@@ -1590,6 +1609,68 @@ def _integration_native_libraries(source_root: Path, platform: str, integration)
     return records, list(dict.fromkeys(wholearchive)), list(dict.fromkeys(system_libraries))
 
 
+def _integration_suppressed_system_libraries(integration) -> list[str]:
+    suppressed = [
+        normalize_library_name(name)
+        for name in integration.suppressed_system_libraries_release_x64
+    ]
+    invalid = sorted(
+        name
+        for name in suppressed
+        if not is_windows_system_library(name) and not is_windows_sdk_library(name)
+    )
+    if invalid:
+        raise RuntimeError(
+            f"pack {integration.name} suppresses non-system libraries: "
+            + ", ".join(invalid)
+        )
+    return list(dict.fromkeys(suppressed))
+
+
+def _integration_trusted_object_origins(
+    integration,
+    native_records: list[dict],
+) -> list[dict]:
+    declarations = integration.trusted_object_origins
+    if not isinstance(declarations, list):
+        raise RuntimeError(f"pack {integration.name} trusted_object_origins must be a list")
+    owned_libraries = {
+        record["logical_name"].casefold(): record["logical_name"]
+        for record in native_records
+    }
+    origins: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for declaration in declarations:
+        if not isinstance(declaration, dict) or set(declaration) != {"library", "object"}:
+            raise RuntimeError(
+                f"pack {integration.name} trusted object origins must contain only library and object"
+            )
+        library = declaration.get("library")
+        object_name = declaration.get("object")
+        if (
+            not isinstance(library, str)
+            or re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*\.lib", library, re.IGNORECASE) is None
+        ):
+            raise RuntimeError(f"pack {integration.name} has an invalid trusted object library: {library!r}")
+        owned_library = owned_libraries.get(library.casefold())
+        if owned_library is None:
+            raise RuntimeError(
+                f"pack {integration.name} trusted object library is not owned by the pack: {library}"
+            )
+        if not isinstance(object_name, str) or object_name.casefold() != "main.obj":
+            raise RuntimeError(
+                f"pack {integration.name} trusted object must currently be the exact basename main.obj"
+            )
+        key = (owned_library.casefold(), "main.obj")
+        if key in seen:
+            raise RuntimeError(
+                f"pack {integration.name} repeats trusted object origin {owned_library}(main.obj)"
+            )
+        seen.add(key)
+        origins.append({"library": owned_library, "object": "main.obj"})
+    return origins
+
+
 def _integration_source_hash(source_root: Path, integration) -> tuple[str, list[dict]]:
     hasher = hashlib.sha256()
     records: list[dict] = []
@@ -1752,6 +1833,8 @@ def export_library_pack(
         raise RuntimeError(f"pack {integration.name} does not have a resolved release version")
     frozen_records = _integration_frozen_modules(source_root, integration)
     native_records, wholearchive, system_libraries = _integration_native_libraries(source_root, platform, integration)
+    suppressed_system_libraries = _integration_suppressed_system_libraries(integration)
+    trusted_object_origins = _integration_trusted_object_origins(integration, native_records)
     resource_files = collect_runtime_resource_files(source_root, [integration])
     source_tree_hash, source_file_records = _integration_source_hash(source_root, integration)
     license_files, license_status = _integration_license_files(source_root, integration)
@@ -1933,6 +2016,8 @@ def export_library_pack(
             "libraries": [record["logical_name"] for record in native_records],
             "wholearchive": wholearchive,
             "system_libraries": system_libraries,
+            "suppressed_system_libraries": suppressed_system_libraries,
+            "trusted_object_origins": trusted_object_origins,
             "link_order": [record["logical_name"] for record in native_records],
             "toolchain": {
                 "platform_toolset": "v143",

@@ -242,7 +242,8 @@ jobs:
             "--contract", $contractPath,
             "--delta", $deltaPath,
             "--matrix-output", $matrixPath,
-            "--summary-output", $summaryPath
+            "--summary-output", $summaryPath,
+            "--defer-overflow-to-history"
           )
           if ("${{ github.event_name }}" -eq "pull_request") {
             $matrixArgs += @(
@@ -251,15 +252,27 @@ jobs:
             )
           }
           python @matrixArgs
-          $matrix = (Get-Content -LiteralPath $matrixPath -Raw).Trim()
-          $parsedMatrix = ConvertFrom-Json $matrix
-          $candidateRecords = @($parsedMatrix.include | Where-Object { $null -ne $_ })
-          $includeCount = $candidateRecords.Count
+          $matrixDocument = Get-Content -LiteralPath $matrixPath -Raw | ConvertFrom-Json
+          $dispatchMatrix = [ordered]@{
+            include = @($matrixDocument.batches | ForEach-Object {
+              [ordered]@{
+                slug = $_.slug
+                candidate_count = $_.candidate_count
+              }
+            })
+          }
+          $candidateRecords = @(
+            foreach ($batch in @($matrixDocument.batches)) {
+              @($batch.candidates_json | ConvertFrom-Json)
+            }
+          )
           $runtimeVersions = @(
             $candidateRecords |
               ForEach-Object { [string]$_.python_version } |
               Sort-Object -Unique
           )
+          $matrix = ConvertTo-Json -InputObject $dispatchMatrix -Depth 4 -Compress
+          $includeCount = @($dispatchMatrix.include).Count
           $hasCandidates = ($includeCount -gt 0).ToString().ToLowerInvariant()
           $contract = Get-Content -LiteralPath $contractPath -Raw | ConvertFrom-Json
           "matrix=$matrix" >> $env:GITHUB_OUTPUT
@@ -335,34 +348,59 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 10
-      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.matrix).include }}
     env:
-      CONTRACT_LIBRARY: ${{ matrix.library }}
-      CONTRACT_PROJECT_NAME: ${{ matrix.project_name }}
-      CONTRACT_VERSION: ${{ matrix.version }}
-      CONTRACT_PYTHON_VERSION: ${{ matrix.python_version }}
-      CONTRACT_SOURCE_FILENAME: ${{ matrix.source_filename }}
-      CONTRACT_SOURCE_URL: ${{ matrix.source_url }}
-      CONTRACT_SOURCE_SHA256: ${{ matrix.source_sha256 }}
+      CONTRACT_BATCH_SLUG: ${{ matrix.slug }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download immutable contract matrix
+        uses: actions/download-artifact@v4
+        with:
+          name: library-version-contract
+          path: .tmp/contract
+
+      - name: Load exact candidate batch
+        shell: pwsh
+        run: |
+          $matrixPath = Join-Path $env:GITHUB_WORKSPACE ".tmp\contract\library-version-matrix.json"
+          if (-not (Test-Path -LiteralPath $matrixPath -PathType Leaf)) {
+            throw "Downloaded contract artifact has no library-version-matrix.json"
+          }
+          $matrix = Get-Content -LiteralPath $matrixPath -Raw | ConvertFrom-Json
+          $matches = @($matrix.batches | Where-Object slug -eq $env:CONTRACT_BATCH_SLUG)
+          if ($matches.Count -ne 1) {
+            throw "Expected exactly one contract batch named $env:CONTRACT_BATCH_SLUG"
+          }
+          $batch = $matches[0]
+          $candidates = @($batch.candidates_json | ConvertFrom-Json)
+          if (
+            $candidates.Count -lt 1 -or
+            $candidates.Count -gt 2 -or
+            $candidates.Count -ne [int]$batch.candidate_count
+          ) {
+            throw "Contract batch candidate count does not match its manifest"
+          }
+          "CONTRACT_BATCH_JSON=$($batch.candidates_json)" >> $env:GITHUB_ENV
 
       - name: Define isolated contract paths
         shell: pwsh
         run: |
-          "CONTRACT_BUILD_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-contract-${{ matrix.slug }}')" >> $env:GITHUB_ENV
-          "CONTRACT_RESULT_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-contract-result-${{ matrix.slug }}')" >> $env:GITHUB_ENV
+          "CONTRACT_BATCH_BUILD_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-contract-build-${{ matrix.slug }}')" >> $env:GITHUB_ENV
+          "CONTRACT_BATCH_RESULT_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-contract-result-${{ matrix.slug }}')" >> $env:GITHUB_ENV
           "CONTRACT_SOURCE_CACHE=$(Join-Path $env:GITHUB_WORKSPACE 'downloads')" >> $env:GITHUB_ENV
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Download exact contract runtime SDK
+      - name: Download exact contract runtime SDKs
         uses: actions/download-artifact@v4
         with:
-          name: contract-runtime-sdk-${{ matrix.python_version }}
-          path: ${{ runner.temp }}/contract-runtime-sdk-${{ matrix.python_version }}
+          pattern: contract-runtime-sdk-*
+          path: ${{ runner.temp }}/contract-runtime-sdks
+          merge-multiple: false
 
       - name: Install build dependencies
         shell: pwsh
@@ -379,74 +417,146 @@ jobs:
         with:
           arch: amd64
 
-      - name: Generate one-library historical build profile
+      - name: Build and verify candidate batch
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force $env:CONTRACT_RESULT_ROOT | Out-Null
-          python .\scripts\build_library_contract_config.py `
-            --library $env:CONTRACT_LIBRARY `
-            --version $env:CONTRACT_VERSION `
-            --output-config "$env:CONTRACT_RESULT_ROOT\config.json"
-
-      - name: Stage exact locked PyPI source
-        shell: pwsh
-        run: |
-          python .\scripts\library_contract_build.py stage `
-            --download-root $env:CONTRACT_SOURCE_CACHE `
-            --project-name $env:CONTRACT_PROJECT_NAME `
-            --version $env:CONTRACT_VERSION `
-            --filename $env:CONTRACT_SOURCE_FILENAME `
-            --url $env:CONTRACT_SOURCE_URL `
-            --sha256 $env:CONTRACT_SOURCE_SHA256
-
-      - name: Build, link and run behavior smoke tests
-        shell: pwsh
-        run: |
-          $packDir = "$env:CONTRACT_RESULT_ROOT\packs"
-          $runtimeSdk = @(
-            Get-ChildItem `
-              -LiteralPath "$env:RUNNER_TEMP\contract-runtime-sdk-${{ matrix.python_version }}" `
-              -Filter *.zip `
-              -File
-          )
-          if ($runtimeSdk.Count -ne 1) {
-            throw "Expected exactly one contract runtime SDK, found $($runtimeSdk.Count)"
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $candidates = @($env:CONTRACT_BATCH_JSON | ConvertFrom-Json)
+          $failures = [System.Collections.Generic.List[string]]::new()
+          $batchBuildRootPath = [IO.Path]::GetFullPath($env:CONTRACT_BATCH_BUILD_ROOT)
+          $runtimeSdkRoot = Join-Path $env:RUNNER_TEMP "contract-runtime-sdks"
+          $candidateOrdinal = 0
+          foreach ($candidate in $candidates) {
+            $candidateOrdinal += 1
+            $candidateDirectory = "candidate-{0:D3}" -f $candidateOrdinal
+            $buildRoot = Join-Path $env:CONTRACT_BATCH_BUILD_ROOT $candidateDirectory
+            $resultRoot = Join-Path $env:CONTRACT_BATCH_RESULT_ROOT $candidateDirectory
+            $identity = "$($candidate.library) $($candidate.version) / CPython $($candidate.python_version)"
+            $buildRootPath = $null
+            $safeBuildRoot = $false
+            $reportPath = Join-Path `
+              $buildRoot `
+              "cpython-$($candidate.python_version)\PCbuild\staticpython-pack-verify-report.json"
+            try {
+              $buildRootPath = [IO.Path]::GetFullPath($buildRoot)
+              $relativeBuildRoot = [IO.Path]::GetRelativePath(
+                $batchBuildRootPath,
+                $buildRootPath
+              )
+              if (
+                $relativeBuildRoot -eq "." -or
+                $relativeBuildRoot -eq ".." -or
+                $relativeBuildRoot.StartsWith("..\") -or
+                $relativeBuildRoot.StartsWith("../") -or
+                [IO.Path]::IsPathRooted($relativeBuildRoot)
+              ) {
+                throw "Candidate build root escapes the isolated batch directory"
+              }
+              $safeBuildRoot = $true
+              New-Item -ItemType Directory -Force $resultRoot | Out-Null
+              python .\scripts\build_library_contract_config.py `
+                --library $candidate.library `
+                --version $candidate.version `
+                --output-config (Join-Path $resultRoot "config.json")
+              python .\scripts\library_contract_build.py stage `
+                --download-root $env:CONTRACT_SOURCE_CACHE `
+                --project-name $candidate.project_name `
+                --version $candidate.version `
+                --filename $candidate.source_filename `
+                --url $candidate.source_url `
+                --sha256 $candidate.source_sha256
+              $packDir = Join-Path $resultRoot "packs"
+              $runtimeSdkDirectory = Join-Path `
+                $runtimeSdkRoot `
+                "contract-runtime-sdk-$($candidate.python_version)"
+              $runtimeSdk = @(
+                Get-ChildItem -LiteralPath $runtimeSdkDirectory -Filter *.zip -File
+              )
+              if ($runtimeSdk.Count -ne 1) {
+                throw "$identity expected exactly one contract runtime SDK, found $($runtimeSdk.Count)"
+              }
+              New-Item -ItemType Directory -Force $packDir | Out-Null
+              python .\build.py `
+                --cpython-version $candidate.python_version `
+                --download-root $buildRoot `
+                --config (Join-Path $resultRoot "config.json") `
+                --profile library-contract `
+                --pack-only `
+                --pack-runtime-sdk $runtimeSdk[0].FullName `
+                --build-workers $env:STATICPYTHON_CONTRACT_BUILD_WORKERS `
+                --output-pack-dir $packDir `
+                --output-pack-name $candidate.library
+              $pack = @(Get-ChildItem -LiteralPath $packDir -Filter *.zip -File)
+              if ($pack.Count -ne 1) {
+                throw "$identity expected exactly one final contract pack, found $($pack.Count)"
+              }
+              python .\pack_evidence.py --report $reportPath --pack $pack[0].FullName
+              $sdkReport = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+              $verificationExe = [string]$sdkReport.executable
+              if (-not (Test-Path -LiteralPath $verificationExe -PathType Leaf)) {
+                throw "SDK-linked verification executable is missing: $verificationExe"
+              }
+              python .\scripts\library_contract_build.py verify `
+                --download-root $env:CONTRACT_SOURCE_CACHE `
+                --project-name $candidate.project_name `
+                --library $candidate.library `
+                --version $candidate.version `
+                --python-version $candidate.python_version `
+                --filename $candidate.source_filename `
+                --sha256 $candidate.source_sha256 `
+                --pack-dir $packDir `
+                --python-exe $verificationExe `
+                --report (Join-Path $resultRoot "library-contract-build-report.json")
+              if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+                throw "StaticPython verification report is missing"
+              }
+              Copy-Item `
+                -LiteralPath $reportPath `
+                -Destination (Join-Path $resultRoot "staticpython-pack-verify-report.json") `
+                -Force
+            }
+            catch {
+              New-Item -ItemType Directory -Force $resultRoot | Out-Null
+              $message = "$identity failed: $($_.Exception.Message)"
+              $failures.Add($message)
+              Set-Content `
+                -LiteralPath (Join-Path $resultRoot "library-contract-batch-failure.txt") `
+                -Value $message `
+                -Encoding utf8
+              Write-Warning $message
+            }
+            finally {
+              if ($safeBuildRoot -and (Test-Path -LiteralPath $buildRootPath -PathType Container)) {
+                try {
+                  $savedVerifyReport = Join-Path $resultRoot "staticpython-pack-verify-report.json"
+                  if (
+                    (Test-Path -LiteralPath $reportPath -PathType Leaf) -and
+                    -not (Test-Path -LiteralPath $savedVerifyReport -PathType Leaf)
+                  ) {
+                    Copy-Item `
+                      -LiteralPath $reportPath `
+                      -Destination $savedVerifyReport `
+                      -Force
+                  }
+                  Remove-Item -LiteralPath $buildRootPath -Recurse -Force
+                }
+                catch {
+                  New-Item -ItemType Directory -Force $resultRoot | Out-Null
+                  $message = "$identity cleanup failed: $($_.Exception.Message)"
+                  $failures.Add($message)
+                  Add-Content `
+                    -LiteralPath (Join-Path $resultRoot "library-contract-batch-failure.txt") `
+                    -Value $message `
+                    -Encoding utf8
+                  Write-Warning $message
+                }
+              }
+            }
           }
-          New-Item -ItemType Directory -Force $packDir | Out-Null
-          python .\build.py `
-            --cpython-version $env:CONTRACT_PYTHON_VERSION `
-            --download-root $env:CONTRACT_BUILD_ROOT `
-            --config "$env:CONTRACT_RESULT_ROOT\config.json" `
-            --profile library-contract `
-            --pack-only `
-            --pack-runtime-sdk $runtimeSdk[0].FullName `
-            --build-workers $env:STATICPYTHON_CONTRACT_BUILD_WORKERS `
-            --output-pack-dir $packDir `
-            --output-pack-name $env:CONTRACT_LIBRARY
-
-      - name: Audit source, pack, behavior and PE dependencies
-        shell: pwsh
-        run: |
-          $reportPath = "$env:CONTRACT_BUILD_ROOT\cpython-$env:CONTRACT_PYTHON_VERSION\PCbuild\staticpython-pack-verify-report.json"
-          $pack = @(Get-ChildItem -LiteralPath "$env:CONTRACT_RESULT_ROOT\packs" -Filter *.zip -File)
-          if ($pack.Count -ne 1) { throw "Expected exactly one final contract pack, found $($pack.Count)" }
-          python .\pack_evidence.py --report $reportPath --pack $pack[0].FullName
-          $sdkReport = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-          $verificationExe = [string]$sdkReport.executable
-          if (-not (Test-Path -LiteralPath $verificationExe -PathType Leaf)) {
-            throw "SDK-linked verification executable is missing: $verificationExe"
+          if ($failures.Count -gt 0) {
+            throw ("$($failures.Count) candidate batch operation(s) failed:`n" + ($failures -join "`n"))
           }
-          python .\scripts\library_contract_build.py verify `
-            --download-root $env:CONTRACT_SOURCE_CACHE `
-            --project-name $env:CONTRACT_PROJECT_NAME `
-            --library $env:CONTRACT_LIBRARY `
-            --version $env:CONTRACT_VERSION `
-            --python-version $env:CONTRACT_PYTHON_VERSION `
-            --filename $env:CONTRACT_SOURCE_FILENAME `
-            --sha256 $env:CONTRACT_SOURCE_SHA256 `
-            --pack-dir "$env:CONTRACT_RESULT_ROOT\packs" `
-            --python-exe $verificationExe `
-            --report "$env:CONTRACT_RESULT_ROOT\library-contract-build-report.json"
 
       - name: Upload candidate evidence
         if: always()
@@ -454,10 +564,7 @@ jobs:
         with:
           name: library-contract-${{ matrix.slug }}
           path: |
-            ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/packs/*.zip
-            ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/library-contract-build-report.json
-            ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/config.json
-            ${{ runner.temp }}/library-contract-${{ matrix.slug }}/cpython-${{ matrix.python_version }}/PCbuild/staticpython-pack-verify-report.json
+            ${{ runner.temp }}/library-contract-result-${{ matrix.slug }}/**/*
           if-no-files-found: warn
           retention-days: 30
 
@@ -490,6 +597,63 @@ jobs:
           pattern: library-contract-*
           path: .tmp/validation
 
+      - name: Download matching full-history validation
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $candidatePath = Join-Path $env:GITHUB_WORKSPACE ".tmp\promotion-input\library-version-contract.json"
+          $matrixPath = Join-Path $env:GITHUB_WORKSPACE ".tmp\promotion-input\library-version-matrix.json"
+          if (-not (Test-Path -LiteralPath $matrixPath -PathType Leaf)) {
+            Write-Host "Candidate has no validation matrix; no history adoption is possible."
+            exit 0
+          }
+          $matrix = Get-Content -LiteralPath $matrixPath -Raw | ConvertFrom-Json
+          if ($null -eq $matrix.deferred) {
+            Write-Host "Candidate delta is not deferred; skipping weekly history catalog lookup."
+            exit 0
+          }
+          $candidateHash = [string](Get-Content -LiteralPath $candidatePath -Raw | ConvertFrom-Json).contract_sha256
+          $apiPath = "repos/${{ github.repository }}/actions/workflows/library-history-weekly.yml/runs?branch=master&status=completed&per_page=100"
+          $oldPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          $responseText = gh api $apiPath 2>$null
+          $apiExitCode = $LASTEXITCODE
+          $ErrorActionPreference = $oldPreference
+          if ($apiExitCode -ne 0 -or -not $responseText) {
+            Write-Host "No weekly history catalog is readable; oversized deltas will remain deferred."
+            exit 0
+          }
+          $runs = @(($responseText | ConvertFrom-Json).workflow_runs) |
+            Where-Object { $_.conclusion -eq "success" } |
+            Sort-Object id -Descending |
+            Select-Object -First 10
+          $lookupRoot = Join-Path $env:GITHUB_WORKSPACE ".tmp\history-support-lookup"
+          foreach ($priorRun in $runs) {
+            $artifacts = @((gh api "repos/${{ github.repository }}/actions/runs/$($priorRun.id)/artifacts?name=library-history-support-catalog&per_page=100" | ConvertFrom-Json).artifacts)
+            $artifact = $artifacts |
+              Where-Object { $_.name -eq "library-history-support-catalog" -and -not $_.expired } |
+              Select-Object -First 1
+            if (-not $artifact) { continue }
+            $downloadRoot = Join-Path $lookupRoot "catalog-$($priorRun.id)"
+            New-Item -ItemType Directory -Force $downloadRoot | Out-Null
+            gh run download $priorRun.id `
+              --repo "${{ github.repository }}" `
+              --name "library-history-support-catalog" `
+              --dir $downloadRoot
+            if ($LASTEXITCODE -ne 0) { continue }
+            $indexPath = Join-Path $downloadRoot "index.v1.json"
+            if (-not (Test-Path -LiteralPath $indexPath -PathType Leaf)) { continue }
+            $index = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
+            if ([string]$index.active.contract_sha256 -ne $candidateHash) { continue }
+            $destination = Join-Path $env:GITHUB_WORKSPACE ".tmp\history-support-catalog"
+            New-Item -ItemType Directory -Force $destination | Out-Null
+            Copy-Item -Path (Join-Path $downloadRoot "*") -Destination $destination -Recurse -Force
+            Write-Host "Using exact full-history validation from run $($priorRun.id) for contract $candidateHash"
+            break
+          }
+
       - name: Evaluate promotion and materialize catalog
         shell: pwsh
         run: |
@@ -502,6 +666,7 @@ jobs:
           $previousCatalog = Join-Path $inputRoot "previous-catalog"
           $legacyBaseline = Join-Path $inputRoot "previous-legacy-contract.json"
           $validationRoot = Join-Path $env:GITHUB_WORKSPACE ".tmp\validation"
+          $historySupportCatalog = Join-Path $env:GITHUB_WORKSPACE ".tmp\history-support-catalog"
           $mode = if (
             "${{ github.event_name }}" -eq "pull_request" -or
             "${{ github.ref_name }}" -ne "master"
@@ -526,6 +691,9 @@ jobs:
           }
           if (Test-Path -LiteralPath $validationRoot -PathType Container) {
             $promotionArgs += @("--validation-root", $validationRoot)
+          }
+          if (Test-Path -LiteralPath (Join-Path $historySupportCatalog "index.v1.json") -PathType Leaf) {
+            $promotionArgs += @("--history-support-catalog", $historySupportCatalog)
           }
           if (Test-Path -LiteralPath (Join-Path $previousCatalog "index.v1.json") -PathType Leaf) {
             $promotionArgs += @("--previous-catalog", $previousCatalog)

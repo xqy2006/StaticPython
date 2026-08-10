@@ -1,7 +1,6 @@
 import re
 
 from libs import (
-    replace_regex_once,
     replace_text_once,
     simple_library,
     source_path,
@@ -19,9 +18,96 @@ def _bytes_chunks_literal(data: bytes, *, chunk_size: int = 8192) -> str:
     return "\n".join(lines)
 
 
+def _insert_embedded_model_resources(
+    text: str,
+    resources: list[tuple[str, bytes]],
+) -> str:
+    markers = [f"{name} = " for name, _data in resources]
+    present = [marker in text for marker in markers]
+    if any(present):
+        if not all(present):
+            raise RuntimeError("partially patched chardet embedded model resources")
+        return text
+
+    constants = "".join(
+        f"{name} = {_bytes_chunks_literal(data)}\n\n" for name, data in resources
+    )
+    anchors = (
+        r'(?m)^_V2_MAGIC = b"CMD2"\n',
+        r"(?m)^NON_ASCII_BIGRAM_WEIGHT[^\n]*\n(?:#[^\n]*\n)*",
+    )
+    for pattern in anchors:
+        matches = list(re.finditer(pattern, text))
+        if len(matches) > 1:
+            raise RuntimeError(
+                "expected exactly one anchor in chardet embedded model resources; "
+                f"found {len(matches)} for {pattern}"
+            )
+        if len(matches) == 1:
+            match = matches[0]
+            return text[: match.end()] + constants + text[match.end() :]
+    raise RuntimeError("expected anchor not found in chardet embedded model resources")
+
+
+def _replace_resource_loader(
+    text: str,
+    *,
+    package: str,
+    filename: str,
+    target: str,
+    constant: str,
+    label: str,
+) -> str:
+    original_pattern = (
+        rf'(?m)^(?P<indent>[ \t]*)ref = importlib\.resources\.files\("{re.escape(package)}"\)'
+        rf'\.joinpath\("{re.escape(filename)}"\)\n'
+        rf'(?P=indent){re.escape(target)} = ref\.read_bytes\(\)\n'
+    )
+    patched_pattern = rf"(?m)^[ \t]*{re.escape(target)} = {re.escape(constant)}\n"
+    original_matches = list(re.finditer(original_pattern, text))
+    patched_matches = list(re.finditer(patched_pattern, text))
+    if len(patched_matches) == 1 and not original_matches:
+        return text
+    if len(original_matches) != 1 or patched_matches:
+        raise RuntimeError(
+            f"expected exactly one {label}; found "
+            f"{len(original_matches)} original and {len(patched_matches)} patched"
+        )
+    match = original_matches[0]
+    indent = match.group("indent")
+    return text[: match.start()] + f"{indent}{target} = {constant}\n" + text[match.end() :]
+
+
+def _replace_rowmax_loader(text: str) -> str:
+    original = (
+        '    files = importlib.resources.files("chardet.models")\n'
+        "    try:\n"
+        '        data = files.joinpath("rowmax.bin").read_bytes()\n'
+        "        models_digest = hashlib.sha256(\n"
+        '            files.joinpath("models.bin").read_bytes()\n'
+        "        ).digest()\n"
+    )
+    patched = (
+        "    try:\n"
+        "        data = _STATICPYTHON_ROWMAX_BIN\n"
+        "        models_digest = hashlib.sha256(_STATICPYTHON_MODELS_BIN).digest()\n"
+    )
+    patched_count = text.count(patched)
+    original_count = text.count(original)
+    if patched_count == 1 and original_count == 0:
+        return text
+    if original_count != 1 or patched_count:
+        raise RuntimeError(
+            "expected exactly one chardet rowmax.bin loader; found "
+            f"{original_count} original and {patched_count} patched"
+        )
+    return text.replace(original, patched, 1)
+
+
 def patch_chardet_sources(context) -> None:
     models_path = source_path(context, "Lib/chardet/models/models.bin")
     idf_path = source_path(context, "Lib/chardet/models/idf.bin")
+    rowmax_path = source_path(context, "Lib/chardet/models/rowmax.bin")
     confusion_path = source_path(context, "Lib/chardet/models/confusion.bin")
 
     if not models_path.exists():
@@ -29,44 +115,38 @@ def patch_chardet_sources(context) -> None:
 
     models_bin = models_path.read_bytes()
     idf_bin = idf_path.read_bytes() if idf_path.exists() else None
+    rowmax_bin = rowmax_path.read_bytes() if rowmax_path.exists() else None
     confusion_bin = confusion_path.read_bytes() if confusion_path.exists() else None
 
     def patch_models(text: str) -> str:
-        constants = "_STATICPYTHON_MODELS_BIN = " + _bytes_chunks_literal(models_bin) + "\n\n"
+        resources = [("_STATICPYTHON_MODELS_BIN", models_bin)]
         if idf_bin is not None:
-            constants += "_STATICPYTHON_IDF_BIN = " + _bytes_chunks_literal(idf_bin) + "\n\n"
-        if "_STATICPYTHON_MODELS_BIN" not in text:
-            if '_V2_MAGIC = b"CMD2"\n\n' in text:
-                text = replace_text_once(
-                    text,
-                    '_V2_MAGIC = b"CMD2"\n\n',
-                    '_V2_MAGIC = b"CMD2"\n\n' + constants,
-                    label="chardet embedded model resources",
-                )
-            else:
-                updated, count = re.subn(
-                    r"(?m)^(?P<anchor>NON_ASCII_BIGRAM_WEIGHT[^\n]*\n(?:#.*\n)*)",
-                    lambda match: match.group("anchor") + "\n" + constants,
-                    text,
-                    count=1,
-                )
-                if count != 1:
-                    raise RuntimeError("expected anchor not found in chardet embedded model resources")
-                text = updated
-        text = replace_regex_once(
+            resources.append(("_STATICPYTHON_IDF_BIN", idf_bin))
+        if rowmax_bin is not None:
+            resources.append(("_STATICPYTHON_ROWMAX_BIN", rowmax_bin))
+        text = _insert_embedded_model_resources(text, resources)
+        text = _replace_resource_loader(
             text,
-            r'(?m)^(?P<indent>[ \t]*)ref = importlib\.resources\.files\("chardet\.models"\)\.joinpath\("models\.bin"\)\n(?P=indent)data = ref\.read_bytes\(\)\n',
-            "\\g<indent>data = _STATICPYTHON_MODELS_BIN\n",
+            package="chardet.models",
+            filename="models.bin",
+            target="data",
+            constant="_STATICPYTHON_MODELS_BIN",
             label="chardet models.bin loader",
         )
-        if idf_bin is None:
-            return text
-        return replace_regex_once(
-            text,
-            r'(?m)^(?P<indent>[ \t]*)ref = importlib\.resources\.files\("chardet\.models"\)\.joinpath\("idf\.bin"\)\n(?P=indent)data = ref\.read_bytes\(\)\n',
-            "\\g<indent>data = _STATICPYTHON_IDF_BIN\n",
-            label="chardet idf.bin loader",
-        )
+        if idf_bin is not None:
+            text = _replace_resource_loader(
+                text,
+                package="chardet.models",
+                filename="idf.bin",
+                target="data",
+                constant="_STATICPYTHON_IDF_BIN",
+                label="chardet idf.bin loader",
+            )
+        if rowmax_bin is not None:
+            text = _replace_rowmax_loader(text)
+        elif 'joinpath("rowmax.bin")' in text:
+            raise RuntimeError("chardet rowmax.bin loader has no matching source resource")
+        return text
 
     def patch_confusion(text: str) -> str:
         if confusion_bin is None:
@@ -81,10 +161,12 @@ def patch_chardet_sources(context) -> None:
             ),
             label="chardet embedded confusion resource",
         )
-        return replace_regex_once(
+        return _replace_resource_loader(
             text,
-            r'(?m)^(?P<indent>[ \t]*)ref = importlib\.resources\.files\("chardet\.models"\)\.joinpath\("confusion\.bin"\)\n(?P=indent)raw = ref\.read_bytes\(\)\n',
-            "\\g<indent>raw = _STATICPYTHON_CONFUSION_BIN\n",
+            package="chardet.models",
+            filename="confusion.bin",
+            target="raw",
+            constant="_STATICPYTHON_CONFUSION_BIN",
             label="chardet confusion.bin loader",
         )
 

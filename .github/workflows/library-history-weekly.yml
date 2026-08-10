@@ -62,13 +62,14 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           python .\scripts\test_prepare_library_history_batches.py
+          python .\scripts\test_prepare_library_contract_matrix.py
           python .\scripts\test_library_history_evidence.py
           python .\scripts\test_run_library_history_batch.py
           python .\scripts\test_build_library_contract_config.py
           python .\scripts\test_library_contract_build.py
           python .\scripts\test_verify_pack_with_runtime_sdk.py
 
-      - name: Download active version contract
+      - name: Download previous last-known-good version contract
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -116,14 +117,14 @@ jobs:
             if (-not (Test-Path -LiteralPath $activeContract -PathType Leaf)) {
               throw "Library contract catalog is missing its active contract"
             }
-            Copy-Item -LiteralPath $activeContract -Destination (Join-Path $planRoot "library-version-contract.json") -Force
+            Copy-Item -LiteralPath $activeContract -Destination (Join-Path $planRoot "previous-library-version-contract.json") -Force
             [ordered]@{
               workflow = "library-version-discovery.yml"
               run_id = [string]$priorRun.id
               run_url = [string]$priorRun.html_url
               artifact = "library-contract-catalog"
               selection = "active-last-known-good"
-            } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $planRoot "contract-source.v1.json") -Encoding utf8
+            } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $planRoot "previous-contract-source.v1.json") -Encoding utf8
             $resolved = $true
             break
           }
@@ -145,14 +146,14 @@ jobs:
               if (-not (Test-Path -LiteralPath $legacyContract -PathType Leaf)) {
                 throw "Legacy contract artifact from run $($priorRun.id) has no contract JSON"
               }
-              Copy-Item -LiteralPath $legacyContract -Destination (Join-Path $planRoot "library-version-contract.json") -Force
+              Copy-Item -LiteralPath $legacyContract -Destination (Join-Path $planRoot "previous-library-version-contract.json") -Force
               [ordered]@{
                 workflow = "library-version-discovery.yml"
                 run_id = [string]$priorRun.id
                 run_url = [string]$priorRun.html_url
                 artifact = "library-version-contract"
                 selection = "legacy-discovery-baseline"
-              } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $planRoot "contract-source.v1.json") -Encoding utf8
+              } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $planRoot "previous-contract-source.v1.json") -Encoding utf8
               $resolved = $true
               break
             }
@@ -160,6 +161,74 @@ jobs:
           if (-not $resolved) {
             throw "No live active catalog or legacy successful contract artifact is available"
           }
+
+      - name: Resolve latest CPython 3.11 through 3.15 tags
+        id: history-versions
+        shell: pwsh
+        run: |
+          $tags = @(git ls-remote --tags --refs https://github.com/python/cpython.git "v3.*" |
+            ForEach-Object {
+              if ($_ -match "refs/tags/v((3)\.(11|12|13|14|15)\.([0-9]+)(?:(a|b|rc)([0-9]+))?)$") {
+                $phaseRank = switch ($matches[5]) { "a" { 1 } "b" { 2 } "rc" { 3 } default { 4 } }
+                [PSCustomObject]@{
+                  Version = $matches[1]
+                  Series = "3.$($matches[3])"
+                  Major = [int]$matches[2]
+                  Minor = [int]$matches[3]
+                  Micro = [int]$matches[4]
+                  PhaseRank = $phaseRank
+                  PhaseSerial = if ($matches[6]) { [int]$matches[6] } else { 0 }
+                }
+              }
+            })
+          if (-not $tags) { throw "Could not resolve CPython tags" }
+          $versions = foreach ($series in @("3.11", "3.12", "3.13", "3.14", "3.15")) {
+            $latest = $tags | Where-Object Series -eq $series |
+              Sort-Object Major, Minor, Micro, PhaseRank, PhaseSerial | Select-Object -Last 1
+            if (-not $latest) { throw "Could not resolve CPython $series" }
+            $latest.Version
+          }
+          "versions=$(ConvertTo-Json -InputObject @($versions) -Compress)" >> $env:GITHUB_OUTPUT
+
+      - name: Discover current source version contract
+        shell: pwsh
+        env:
+          CPYTHON_VERSIONS_JSON: ${{ steps.history-versions.outputs.versions }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $planRoot = Join-Path $env:GITHUB_WORKSPACE ".tmp\history-plan"
+          $contractPath = Join-Path $planRoot "library-version-contract.json"
+          $deltaPath = Join-Path $planRoot "library-version-delta.json"
+          $previousPath = Join-Path $planRoot "previous-library-version-contract.json"
+          $contractArgs = @(
+            ".\scripts\library_version_contract.py",
+            "--output", $contractPath,
+            "--delta-output", $deltaPath
+          )
+          @($env:CPYTHON_VERSIONS_JSON | ConvertFrom-Json) | ForEach-Object {
+            $contractArgs += @("--python-version", $_)
+          }
+          if (Test-Path -LiteralPath $previousPath -PathType Leaf) {
+            $contractArgs += @("--previous", $previousPath)
+          }
+          python @contractArgs
+          $delta = Get-Content -LiteralPath $deltaPath -Raw | ConvertFrom-Json
+          if (@($delta.drifted_candidates).Count -gt 0 -or @($delta.regressions).Count -gt 0) {
+            throw "Current history contract contains source drift or a candidate regression"
+          }
+          $previousSourcePath = Join-Path $planRoot "previous-contract-source.v1.json"
+          $previousSource = if (Test-Path -LiteralPath $previousSourcePath -PathType Leaf) {
+            Get-Content -LiteralPath $previousSourcePath -Raw | ConvertFrom-Json
+          } else { $null }
+          [ordered]@{
+            workflow = "library-history-weekly.yml"
+            run_id = "${{ github.run_id }}"
+            run_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            selection = "current-source-discovery"
+            source_commit = "${{ github.sha }}"
+            source_ref = "${{ github.ref }}"
+            previous_contract_source = $previousSource
+          } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $planRoot "contract-source.v1.json") -Encoding utf8
 
       - name: Download previous last-known-good history support
         shell: pwsh
@@ -288,6 +357,7 @@ jobs:
           name: ${{ steps.plan.outputs.plan_artifact }}
           path: |
             .tmp/history-plan/library-version-contract.json
+            .tmp/history-plan/library-version-delta.json
             .tmp/history-plan/contract-source.v1.json
             .tmp/history-plan/library-history-manifest.json
           if-no-files-found: error

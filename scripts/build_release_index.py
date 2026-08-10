@@ -41,6 +41,77 @@ TOOLCHAIN_ABI_FIELDS = (
     "runtime_library",
 )
 
+# runtime-index.v1.json is a resolver and linker catalog, not a second copy of
+# every asset's audit manifest.  Keep this projection explicit so adding a new
+# build-relevant pack field requires a deliberate index contract change.  The
+# complete metadata remains inside the immutable ZIP named by each record's
+# SHA-256.
+RUNTIME_INDEX_METADATA_FIELDS = (
+    "schema_version",
+    "kind",
+    "runtime_abi",
+    "cpython_version",
+    "cpython_abi",
+    "platform",
+    "profile_name",
+    "staticpython_commit",
+    "cpython_commit",
+    "cpython_tag",
+    "cpython_source",
+    "toolchain",
+    "base_pack_symbol",
+    "pack_registration_function",
+    "include_directory",
+    "library_directory",
+    "core_library",
+    "runtime_library",
+    "link_libraries",
+    "system_libraries",
+    "builtin_module_registrations",
+    "builtin_module_names",
+    "frozen_module_names",
+    "stdlib_top_level_import_names",
+    "libraries",
+    "verification",
+)
+PACK_INDEX_METADATA_FIELDS = (
+    "schema_version",
+    "kind",
+    "name",
+    "version",
+    "project_name",
+    "source_provider",
+    "source_resolver",
+    "source_tree_sha256",
+    "staticpython_commit",
+    "cpython_version",
+    "cpython_commit",
+    "cpython_tag",
+    "cpython_source",
+    "cpython_abi",
+    "runtime_abi",
+    "platform",
+    "descriptor_symbol",
+    "descriptor_source",
+    "sources",
+    "frozen_modules",
+    "top_level_import_names",
+    "builtin_modules",
+    "resources",
+    "dependencies",
+    "dependency_constraints",
+    "conflicts",
+    "libraries",
+    "wholearchive",
+    "system_libraries",
+    "suppressed_system_libraries",
+    "trusted_object_origins",
+    "link_order",
+    "toolchain",
+    "license",
+    "verification",
+)
+
 
 def pack_family(name: str) -> str:
     return staticpython_pack_release_family(name)
@@ -198,6 +269,36 @@ def validate_pack_promotion_reports(
     return covered
 
 
+def _metadata_projection(metadata: dict, fields: tuple[str, ...]) -> dict:
+    return {field: metadata[field] for field in fields if field in metadata}
+
+
+def runtime_index_metadata(metadata: dict) -> dict:
+    """Return the runtime metadata needed before the SDK is downloaded."""
+    return _metadata_projection(metadata, RUNTIME_INDEX_METADATA_FIELDS)
+
+
+def pack_index_metadata(metadata: dict, path: Path) -> dict:
+    """Return resolver/link metadata while leaving full audit data in pack.json."""
+    projected = _metadata_projection(metadata, PACK_INDEX_METADATA_FIELDS)
+    resources = metadata.get("resources")
+    if resources is None:
+        return projected
+    if not isinstance(resources, list):
+        raise RuntimeError(f"pack asset {path.name} has invalid resources metadata")
+    resource_paths = []
+    for record in resources:
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("path"), str)
+            or not record["path"]
+        ):
+            raise RuntimeError(f"pack asset {path.name} has an invalid resource record")
+        resource_paths.append({"path": record["path"]})
+    projected["resources"] = resource_paths
+    return projected
+
+
 def _is_full_commit(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{40}", value) is not None
 
@@ -349,7 +450,12 @@ def build_index(
             raise RuntimeError(f"runtime asset {path.name} is not verified")
         if require_verified:
             _validate_verified_provenance(metadata, path)
-        runtimes[abi] = _asset_record(path, metadata, repository, runtime_tag)
+        runtimes[abi] = _asset_record(
+            path,
+            runtime_index_metadata(metadata),
+            repository,
+            runtime_tag,
+        )
 
     missing_targets = sorted(set(TARGET_ABIS) - set(runtimes))
     if require_all_targets and missing_targets:
@@ -407,7 +513,12 @@ def build_index(
         family = pack_family(name)
         tag = f"{pack_tag_prefix}-{family}"
         family_pack_counts[family] = family_pack_counts.get(family, 0) + 1
-        record = _asset_record(path, metadata, repository, tag)
+        record = _asset_record(
+            path,
+            pack_index_metadata(metadata, path),
+            repository,
+            tag,
+        )
         record["release_family"] = family
         if require_verified:
             evidence = dict(promotion_evidence[path])
@@ -493,6 +604,11 @@ def build_index(
     }
 
 
+def serialize_index(index: dict) -> str:
+    """Serialize the machine-consumed catalog without whitespace amplification."""
+    return json.dumps(index, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build an immutable StaticPython runtime-index.v1.json")
     parser.add_argument("--asset-root", type=Path, required=True)
@@ -530,7 +646,11 @@ def main() -> int:
         expected_pack_names=expected_pack_names,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+    args.output.write_text(
+        serialize_index(index),
+        encoding="utf-8",
+        newline="\n",
+    )
     print(f"wrote {args.output}")
     return 0
 
