@@ -174,6 +174,43 @@ def main() -> int:
             ),
         )
 
+    partial_sources = {
+        "legacy task alias partial patch": (
+            LEGACY_WIDE_ALIAS_ANCHOR
+            + "    asyncio.tasks._py_register_task = asyncio.tasks._c_register_task\n",
+            "0.9.1",
+        ),
+        "modern task alias partial patch": (
+            MODERN_ALIAS_ANCHOR
+            + "    asyncio.tasks._py_register_task = asyncio.tasks._c_register_task\n",
+            "1.5.9",
+        ),
+        "all_tasks partial patch": (
+            compact_source + "    if future in asyncio.all_tasks(self):\n",
+            "0.9.2",
+        ),
+        "nested loop guard partial patch": (
+            loop_check_source + "    cls._check_running = _check_running\n",
+            "1.2.3",
+        ),
+        "task helper partial patch": (
+            CANONICAL_SOURCE
+            + "    task_current = getattr(asyncio.tasks, '_py_current_task', None)\n",
+            "1.6.0",
+        ),
+        "current task partial patch": (
+            CANONICAL_SOURCE + "                task_swap(self, None)\n",
+            "1.6.0",
+        ),
+    }
+    for label, (source, version) in partial_sources.items():
+        expect_runtime_error(
+            label,
+            lambda source=source, version=version: (
+                module._patch_nest_asyncio_runtime(source, version)
+            ),
+        )
+
     duplicate_sources = (
         ("legacy wide duplicate", LEGACY_WIDE_ALIAS_ANCHOR * 2, "0.9.1"),
         (

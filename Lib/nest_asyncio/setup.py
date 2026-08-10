@@ -21,7 +21,14 @@ LEGACY_LOOP_CHECK_MAX_VERSION = Version("1.3.0")
 TASK_SWAP_PATCH_MIN_VERSION = Version("1.6.0")
 
 
-def _replace_strictly_once(text: str, old: str, new: str, *, label: str) -> str:
+def _replace_strictly_once(
+    text: str,
+    old: str,
+    new: str,
+    *,
+    label: str,
+    partial_markers: tuple[str, ...] = (),
+) -> str:
     old_count = text.count(old)
     new_count = text.count(new)
     if new_count == 1 and old_count == new.count(old):
@@ -29,6 +36,12 @@ def _replace_strictly_once(text: str, old: str, new: str, *, label: str) -> str:
     if new_count:
         raise RuntimeError(
             f"{label} patched snippet mismatch: expected 1, found {new_count}"
+        )
+    present_markers = [marker for marker in partial_markers if marker in text]
+    if present_markers:
+        raise RuntimeError(
+            f"{label} partial patch mismatch: found {len(present_markers)} "
+            "patched marker(s) without the complete replacement"
         )
     if old_count != 1:
         raise RuntimeError(f"{label} anchor mismatch: expected 1, found {old_count}")
@@ -166,6 +179,9 @@ def _patch_nest_asyncio_runtime(text: str, release_version: str | None) -> str:
             legacy_wide_alias_anchor,
             task_alias_patched,
             label="nest_asyncio 0.9.0-0.9.1 task bookkeeping aliases",
+            partial_markers=(
+                "asyncio.tasks._py_register_task = asyncio.tasks._c_register_task",
+            ),
         )
     elif version < MODERN_ALIAS_MIN_VERSION:
         text = _replace_strictly_once(
@@ -173,6 +189,9 @@ def _patch_nest_asyncio_runtime(text: str, release_version: str | None) -> str:
             legacy_compact_alias_anchor,
             task_alias_patched,
             label="nest_asyncio 0.9.2 task bookkeeping aliases",
+            partial_markers=(
+                "asyncio.tasks._py_register_task = asyncio.tasks._c_register_task",
+            ),
         )
     else:
         text = _replace_strictly_once(
@@ -180,6 +199,9 @@ def _patch_nest_asyncio_runtime(text: str, release_version: str | None) -> str:
             task_alias_anchor,
             task_alias_patched,
             label="nest_asyncio 0.9.3+ task bookkeeping aliases",
+            partial_markers=(
+                "asyncio.tasks._py_register_task = asyncio.tasks._c_register_task",
+            ),
         )
 
     if version == LEGACY_COMPACT_ALIAS_VERSION:
@@ -190,6 +212,7 @@ def _patch_nest_asyncio_runtime(text: str, release_version: str | None) -> str:
             all_tasks_anchor,
             all_tasks_patched,
             label="nest_asyncio 0.9.2 asyncio.all_tasks compatibility",
+            partial_markers=("if future in asyncio.all_tasks(self):",),
         )
 
     if LEGACY_LOOP_CHECK_MIN_VERSION <= version < LEGACY_LOOP_CHECK_MAX_VERSION:
@@ -210,6 +233,10 @@ def _patch_nest_asyncio_runtime(text: str, release_version: str | None) -> str:
             loop_check_anchor,
             loop_check_patched,
             label="nest_asyncio 1.1.0-1.2.3 nested loop guard",
+            partial_markers=(
+                "def _check_running(self):",
+                "cls._check_running = _check_running",
+            ),
         )
 
     if version < TASK_SWAP_PATCH_MIN_VERSION:
@@ -262,15 +289,34 @@ def _patch_nest_asyncio_runtime(text: str, release_version: str | None) -> str:
     )
 
     replacements = [
-        (task_helper_anchor, task_helper_patched, "nest_asyncio task helper capture"),
+        (
+            task_helper_anchor,
+            task_helper_patched,
+            "nest_asyncio task helper capture",
+            (
+                "task_current = getattr(asyncio.tasks, '_py_current_task', None)",
+                "task_swap = getattr(asyncio.tasks, '_py_swap_current_task', None)",
+            ),
+        ),
         (
             current_task_anchor,
             current_task_patched,
             "nest_asyncio current task preemption",
+            (
+                "Preempt the current task using the same bookkeeping",
+                "task_swap(self, None)",
+                "task_swap(self, curr_task)",
+            ),
         ),
     ]
-    for old, new, label in replacements:
-        text = _replace_strictly_once(text, old, new, label=label)
+    for old, new, label, partial_markers in replacements:
+        text = _replace_strictly_once(
+            text,
+            old,
+            new,
+            label=label,
+            partial_markers=partial_markers,
+        )
     return text
 
 
