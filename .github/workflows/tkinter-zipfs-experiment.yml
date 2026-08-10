@@ -29,7 +29,7 @@ on:
       cpython_version:
         description: Exact CPython patch release to validate
         required: true
-        default: "3.13.14"
+        default: "3.13.15"
         type: string
 
 permissions:
@@ -43,7 +43,7 @@ env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: "utf-8"
   STATICPYTHON_BUILD_WORKERS: "2"
-  VERIFY_CPYTHON_VERSION: ${{ inputs.cpython_version || '3.13.14' }}
+  VERIFY_CPYTHON_VERSION: ${{ inputs.cpython_version || '3.13.15' }}
 
 jobs:
   sdk-linked-tkinter:
