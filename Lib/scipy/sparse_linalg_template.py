@@ -98,14 +98,18 @@ def cg(A, b, x0=None, rtol=1e-5, atol=0.0, maxiter=None, M=None, callback=None):
     limit = max(float(rtol) * np.linalg.norm(rhs), float(atol))
     if maxiter is None:
         maxiter = max(rhs.size * 10, 1)
-    for iteration in range(int(maxiter)):
+    if np.linalg.norm(residual) <= limit:
+        return x, 0
+    iterations = 0
+    for _iteration in range(int(maxiter)):
         matvec = operator.matvec(direction)
         denominator = np.vdot(direction, matvec)
         if denominator == 0:
-            break
+            return x, -1
         alpha = rz_old / denominator
         x = x + alpha * direction
         residual = residual - alpha * matvec
+        iterations += 1
         if callback is not None:
             callback(x)
         if np.linalg.norm(residual) <= limit:
@@ -113,11 +117,11 @@ def cg(A, b, x0=None, rtol=1e-5, atol=0.0, maxiter=None, M=None, callback=None):
         z = residual.copy() if preconditioner is None else preconditioner.matvec(residual)
         rz_new = np.vdot(residual, z)
         if rz_old == 0:
-            break
+            return x, -1
         beta = rz_new / rz_old
         direction = z + beta * direction
         rz_old = rz_new
-    return x, int(maxiter)
+    return x, iterations
 
 
 def _select_indices(values, k, which):

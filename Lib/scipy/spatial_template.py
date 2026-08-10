@@ -117,12 +117,25 @@ class KDTree:
         from scipy import sparse
 
         other_tree = other if isinstance(other, KDTree) else KDTree(other)
-        dense = np.zeros((self.n, other_tree.n), dtype=np.float64)
+        rows = []
+        columns = []
+        values = []
         for i, point in enumerate(self.data):
             distances = _minkowski_distance(other_tree.data, point, p)
-            mask = distances <= float(max_distance)
-            dense[i, mask] = distances[mask]
-        matrix = sparse.coo_matrix(dense)
+            hits = np.flatnonzero(distances <= float(max_distance))
+            rows.extend([i] * int(hits.size))
+            columns.extend(int(hit) for hit in hits)
+            values.extend(float(distances[hit]) for hit in hits)
+        matrix = sparse.coo_matrix(
+            (
+                np.asarray(values, dtype=np.float64),
+                (
+                    np.asarray(rows, dtype=np.intp),
+                    np.asarray(columns, dtype=np.intp),
+                ),
+            ),
+            shape=(self.n, other_tree.n),
+        )
         if output_type == "coo_matrix":
             return matrix
         if output_type == "dict":

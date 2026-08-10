@@ -385,6 +385,10 @@ def bracket(func, xa=0.0, xb=1.0, args=(), grow_limit=110.0, maxiter=1000):
     step = xb - xa
     if step == 0.0:
         step = 1.0
+    grow_limit = float(grow_limit)
+    if not math.isfinite(grow_limit) or grow_limit <= 1.0:
+        raise ValueError("grow_limit must be finite and greater than 1")
+    max_step = grow_limit * abs(step)
     factor = 1.618033988749895
     xc = xb + factor * step
     fc = float(func(xc, *args))
@@ -393,7 +397,7 @@ def bracket(func, xa=0.0, xb=1.0, args=(), grow_limit=110.0, maxiter=1000):
         xa, fa = xb, fb
         xb, fb = xc, fc
         step *= factor
-        if abs(step) > abs(grow_limit * (step if step != 0.0 else 1.0)):
+        if abs(step) > max_step:
             break
         xc = xb + step
         fc = float(func(xc, *args))

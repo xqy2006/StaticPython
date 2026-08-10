@@ -7,8 +7,9 @@ from pathlib import Path
 
 def test_scipy_import() -> None:
     import scipy
+    from scipy.version import version as source_version
 
-    assert scipy.__version__ == "1.17.1"
+    assert scipy.__version__ == source_version
 
 
 def test_scipy_fft() -> None:
@@ -202,6 +203,15 @@ def test_scipy_optimize() -> None:
     popt, _pcov = scipy.optimize.curve_fit(lambda x, a, b: a * x + b, xdata, ydata, p0=[0.0, 0.0])
     np.testing.assert_allclose(popt, np.array([2.0, 1.0]), rtol=0.0, atol=1e-3)
 
+    bracket_calls = []
+
+    def decreasing(value):
+        bracket_calls.append(value)
+        return -value
+
+    scipy.optimize.bracket(decreasing, xa=0.0, xb=1.0, grow_limit=3.0, maxiter=1000)
+    assert len(bracket_calls) < 10
+
 
 def test_scipy_interpolate() -> None:
     import scipy.interpolate
@@ -306,6 +316,16 @@ def test_scipy_sparse_linalg() -> None:
     cg_solution, cg_info = scipy.sparse.linalg.cg(matrix, rhs, rtol=1e-10, maxiter=50)
     assert cg_info == 0
     np.testing.assert_allclose(cg_solution, np.linalg.solve(matrix.toarray(), rhs), rtol=0.0, atol=1e-8)
+
+    _breakdown_solution, breakdown_info = scipy.sparse.linalg.cg(
+        scipy.sparse.csr_matrix([[0.0]]),
+        np.array([1.0]),
+        maxiter=50,
+    )
+    assert breakdown_info < 0
+
+    _limited_solution, limited_info = scipy.sparse.linalg.cg(matrix, rhs, rtol=0.0, maxiter=1)
+    assert limited_info == 1
 
     values, vectors = scipy.sparse.linalg.eigsh(matrix, k=1)
     reference_values, reference_vectors = np.linalg.eigh(matrix.toarray())

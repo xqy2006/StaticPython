@@ -1457,6 +1457,9 @@ LIBRARY_INTEGRATION = pypi_library(
         "numpy",
         "pybind11",
     ],
+    dependency_constraints={
+        "numpy": ">=1.26.4,<2.7",
+    },
     source_mapping={
         **SCIPY_PYTHON_SOURCE_MAPPING,
         **SCIPY_NATIVE_SOURCE_MAPPING,
@@ -1498,6 +1501,8 @@ LIBRARY_INTEGRATION = pypi_library(
         "PCbuild/scipy.fft._pocketfft.pypocketfft.vcxproj",
     ],
     python_packages=["scipy"],
+    top_level_import_names=["scipy"],
+    license_expression="BSD-3-Clause",
     static_library_projects_release_x64=[
         "scipy._lib._ccallback_c.vcxproj",
         "scipy._lib._uarray._uarray.vcxproj",
@@ -1543,4 +1548,22 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     prepare_source_hooks=[prepare_scipy_project],
     post_patch_hooks=[prepare_scipy_generated_sources],
+    smoke_tests=[
+        {
+            "name": "phase-1-numerical-behavior",
+            "kind": "inline",
+            "code": (
+                "import numpy as np, scipy; "
+                "from scipy import fft, optimize, sparse; "
+                "from scipy.version import version as source_version; "
+                "assert scipy.__version__ == source_version; "
+                "values = np.array([1.0, 2.0, 3.0, 4.0]); "
+                "assert np.allclose(fft.ifft(fft.fft(values)).real, values); "
+                "root = optimize.root_scalar(lambda x: x*x-2.0, bracket=(0.0, 2.0)); "
+                "assert root.converged and abs(root.root - np.sqrt(2.0)) < 1e-8; "
+                "matrix = sparse.csr_matrix([[1.0, 0.0], [0.0, 2.0]]); "
+                "assert np.array_equal(matrix @ np.array([3.0, 4.0]), np.array([3.0, 8.0]))"
+            ),
+        }
+    ],
 )
