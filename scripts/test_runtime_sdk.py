@@ -522,6 +522,33 @@ class RuntimeSDKTests(unittest.TestCase):
         self.assertEqual(source.count("return x, iterations"), 3)
         self.assertNotIn("return x, -1", source)
 
+    def test_scipy_declares_bundled_array_api_licenses(self) -> None:
+        path = REPO_ROOT / "Lib" / "scipy" / "setup.py"
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_scipy_setup_test",
+            path,
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        integration = module.LIBRARY_INTEGRATION
+
+        self.assertEqual(integration.license_expression, "BSD-3-Clause AND MIT")
+        self.assertEqual(
+            [record["filename"] for record in integration.license_sources],
+            [
+                "LICENSE-array-api-compat.txt",
+                "LICENSE-array-api-extra.txt",
+            ],
+        )
+        self.assertEqual(
+            [record["sha256"] for record in integration.license_sources],
+            [
+                "4ffd978e3fa18d058d98c66771cfea7ed634aaf7023cf9612b8b55eee9a8f0fe",
+                "58494398fe147fdce76a68b2decd4c08ce3a1ea237b6d6785001c15f822c6ed6",
+            ],
+        )
+
     def test_pack_only_build_compiles_only_integration_owned_projects(self) -> None:
         pcbuild = self.root / "PCbuild"
         pcbuild.mkdir(parents=True)

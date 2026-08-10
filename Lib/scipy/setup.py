@@ -1502,7 +1502,25 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     python_packages=["scipy"],
     top_level_import_names=["scipy"],
-    license_expression="BSD-3-Clause",
+    license_expression="BSD-3-Clause AND MIT",
+    license_sources=[
+        {
+            "filename": "LICENSE-array-api-compat.txt",
+            "url": (
+                "https://raw.githubusercontent.com/data-apis/array-api-compat/"
+                "946ce4ad77968b94e93594c79653162426ec3224/LICENSE"
+            ),
+            "sha256": "4ffd978e3fa18d058d98c66771cfea7ed634aaf7023cf9612b8b55eee9a8f0fe",
+        },
+        {
+            "filename": "LICENSE-array-api-extra.txt",
+            "url": (
+                "https://raw.githubusercontent.com/data-apis/array-api-extra/"
+                "80240a296483c73f5e4b53218547b8225829c410/LICENSE"
+            ),
+            "sha256": "58494398fe147fdce76a68b2decd4c08ce3a1ea237b6d6785001c15f822c6ed6",
+        },
+    ],
     static_library_projects_release_x64=[
         "scipy._lib._ccallback_c.vcxproj",
         "scipy._lib._uarray._uarray.vcxproj",
