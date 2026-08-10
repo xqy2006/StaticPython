@@ -58,15 +58,19 @@ exposed as runtime resources.
 
 ## Current support and verification
 
-The initial implementation supports Windows x64 Release builds on CPython 3.12
-and newer because those sources contain Tcl 9 `Tcl_Size` compatibility. CPython
-3.11 is deliberately rejected until its `_tkinter` compatibility port is
-implemented and tested.
+The implementation targets Windows x64 Release builds on CPython 3.11 through
+3.15. CPython 3.12 and newer already contain Tcl 9 `Tcl_Size` compatibility;
+for CPython 3.11 the integration strictly and idempotently applies the upstream
+CPython gh-112672 backport (`ec139c8fae2064e5f1413dad0aadc1b83daf90d8`) before
+the no-extraction discovery patch. Missing, duplicated, partial, or drifted
+anchors fail the build.
 
 `.github/workflows/tkinter-zipfs-experiment.yml` builds an audited CPython
 runtime SDK, builds only the tkinter pack, links both into a provisional
-executable, runs Tcl and Tk/ttk behavior tests, and audits PE imports. The pack
-stays outside `full` and release shards until that dedicated workflow is green.
+executable, runs Tcl and Tk/ttk behavior tests, and audits PE imports for the
+latest tags in all five target series. A manual dispatch may select one exact
+tag for focused diagnosis. The pack stays outside `full` and release shards
+until that dedicated workflow is green.
 
 Local deterministic tests can be run with:
 

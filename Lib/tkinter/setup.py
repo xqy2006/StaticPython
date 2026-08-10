@@ -62,6 +62,91 @@ LIBTOMMATH_LICENSE = "licenses/tkinter/libtommath-LICENSE"
 INFOZIP_LICENSE = "licenses/tkinter/minizip-LICENSE.Info-Zip"
 CPYTHON_LICENSE = "LICENSE"
 
+TCL9_COMPAT_MARKER = (
+    "As suggested by "
+    "https://core.tcl-lang.org/tcl/wiki?name=Migrating+C+extensions+to+Tcl+9"
+)
+
+TCL9_COMPAT_REPLACEMENTS = (
+    (
+        "#define USE_DEPRECATED_TOMMATH_API 1\n"
+        "#endif\n\n"
+        "#if !(defined(MS_WINDOWS) || defined(__CYGWIN__))",
+        "#define USE_DEPRECATED_TOMMATH_API 1\n"
+        "#endif\n\n"
+        f"// {TCL9_COMPAT_MARKER}\n"
+        "#ifndef TCL_SIZE_MAX\n"
+        "typedef int Tcl_Size;\n"
+        "#define TCL_SIZE_MAX INT_MAX\n"
+        "#endif\n\n"
+        "#if !(defined(MS_WINDOWS) || defined(__CYGWIN__))",
+    ),
+    ("{\n    int len;\n#if USE_TCL_UNICODE", "{\n    Tcl_Size len;\n#if USE_TCL_UNICODE"),
+    (
+        "/**** Tkapp Object ****/\n\n#ifndef WITH_APPINIT",
+        "/**** Tkapp Object ****/\n\n"
+        "#if TK_MAJOR_VERSION >= 9\n"
+        "int Tcl_AppInit(Tcl_Interp *);\n"
+        "#endif\n\n"
+        "#ifndef WITH_APPINIT",
+    ),
+    (
+        "if (value->typePtr == tkapp->ByteArrayType) {\n        int size;\n"
+        "        char *data = (char*)Tcl_GetByteArrayFromObj(value, &size);",
+        "if (value->typePtr == tkapp->ByteArrayType) {\n        Tcl_Size size;\n"
+        "        char *data = (char*)Tcl_GetByteArrayFromObj(value, &size);",
+    ),
+    (
+        "if (value->typePtr == tkapp->ListType) {\n        int size;\n"
+        "        int i, status;",
+        "if (value->typePtr == tkapp->ListType) {\n        Tcl_Size i, size;\n"
+        "        int status;",
+    ),
+    (
+        "Tkapp_CallDeallocArgs(Tcl_Obj** objv, Tcl_Obj** objStore, int objc)\n"
+        "{\n    int i;",
+        "Tkapp_CallDeallocArgs(Tcl_Obj** objv, Tcl_Obj** objStore, Tcl_Size objc)\n"
+        "{\n    Tcl_Size i;",
+    ),
+    (
+        "Tkapp_CallArgs(PyObject *args, Tcl_Obj** objStore, int *pobjc)",
+        "Tkapp_CallArgs(PyObject *args, Tcl_Obj** objStore, Tcl_Size *pobjc)",
+    ),
+    ("    *pobjc = (int)objc;", "    *pobjc = (Tcl_Size)objc;"),
+    (
+        "    Tkapp_CallDeallocArgs(objv, objStore, (int)objc);",
+        "    Tkapp_CallDeallocArgs(objv, objStore, (Tcl_Size)objc);",
+    ),
+    (
+        "Tkapp_CallProc(Tkapp_CallEvent *e, int flags)\n"
+        "{\n    Tcl_Obj *objStore[ARGSZ];\n    Tcl_Obj **objv;\n    int objc;",
+        "Tkapp_CallProc(Tkapp_CallEvent *e, int flags)\n"
+        "{\n    Tcl_Obj *objStore[ARGSZ];\n    Tcl_Obj **objv;\n    Tcl_Size objc;",
+    ),
+    (
+        "Tkapp_Call(PyObject *selfptr, PyObject *args)\n"
+        "{\n    Tcl_Obj *objStore[ARGSZ];\n    Tcl_Obj **objv = NULL;\n"
+        "    int objc, i;",
+        "Tkapp_Call(PyObject *selfptr, PyObject *args)\n"
+        "{\n    Tcl_Obj *objStore[ARGSZ];\n    Tcl_Obj **objv = NULL;\n"
+        "    Tcl_Size objc;",
+    ),
+    (
+        "    else\n    {\n\n"
+        "        objv = Tkapp_CallArgs(args, objStore, &objc);",
+        "    else\n    {\n        int i;\n\n"
+        "        objv = Tkapp_CallArgs(args, objStore, &objc);",
+    ),
+    (
+        "{\n    char *list;\n    int argc;\n    const char **argv;\n"
+        "    PyObject *v;\n    int i;\n\n"
+        "    if (PyTclObject_Check(arg)) {\n        int objc;\n        Tcl_Obj **objv;",
+        "{\n    char *list;\n    Tcl_Size argc, i;\n    const char **argv;\n"
+        "    PyObject *v;\n\n"
+        "    if (PyTclObject_Check(arg)) {\n        Tcl_Size objc;\n        Tcl_Obj **objv;",
+    ),
+)
+
 TCLTK_SYSTEM_LIBRARIES = [
     "kernel32.lib",
     "advapi32.lib",
@@ -141,21 +226,48 @@ def _ensure_source_tree(
 
 
 def _require_supported_cpython(context) -> None:
-    if context.version_info < (3, 12, 0):
+    if context.version_info < (3, 11, 0):
         raise RuntimeError(
-            "experimental tkinter ZipFS currently requires CPython 3.12 or newer; "
-            "the CPython 3.11 _tkinter Tcl 9 compatibility port is not complete"
+            "experimental tkinter ZipFS requires CPython 3.11 or newer"
         )
     source = source_path(context, "Modules/_tkinter.c").read_text(
         encoding="utf-8",
         errors="strict",
     )
+    if context.version_info < (3, 12, 0):
+        _patch_tcl9_compat_text(source)
+        return
     missing = [marker for marker in ("Tcl_Size", "TCL_SIZE_MAX") if marker not in source]
     if missing:
         raise RuntimeError(
             "CPython _tkinter is missing required Tcl 9 compatibility markers: "
             + ", ".join(missing)
         )
+
+
+def _patch_tcl9_compat_text(text: str) -> str:
+    """Strictly backport CPython's gh-112672 Tcl 9 fix to the 3.11 source."""
+
+    patched_anchors = tuple(replacement for _, replacement in TCL9_COMPAT_REPLACEMENTS)
+    marker_present = TCL9_COMPAT_MARKER in text
+    patched_present = [replacement in text for replacement in patched_anchors]
+    if marker_present or any(patched_present):
+        if not marker_present or not all(patched_present):
+            raise RuntimeError("CPython 3.11 _tkinter Tcl 9 compatibility patch is partial")
+        stale = [anchor for anchor, _ in TCL9_COMPAT_REPLACEMENTS if anchor in text]
+        if stale:
+            raise RuntimeError("CPython 3.11 _tkinter Tcl 9 compatibility patch left stale anchors")
+        return text
+
+    for anchor, replacement in TCL9_COMPAT_REPLACEMENTS:
+        matches = text.count(anchor)
+        if matches != 1:
+            raise RuntimeError(
+                "CPython 3.11 _tkinter Tcl 9 compatibility anchor expected once, "
+                f"found {matches}: {anchor.splitlines()[0]!r}"
+            )
+        text = text.replace(anchor, replacement, 1)
+    return text
 
 
 def _write_archive_manifest_uuid(source_root: Path, commit: str, *, component: str) -> None:
@@ -293,7 +405,8 @@ def prepare_tcltk_sources(context) -> None:
 
 def _remove_c_function(text: str, function_name: str) -> tuple[str, bool]:
     pattern = re.compile(
-        rf"(?m)^static\s+PyObject\s*\*\s*\r?\n{re.escape(function_name)}\(void\)\s*\r?\n\{{"
+        rf"(?m)^static\s+PyObject\s*\*\s*\r?\n"
+        rf"{re.escape(function_name)}\((?:void)?\)\s*\r?\n\{{"
     )
     matches = list(pattern.finditer(text))
     if not matches:
@@ -493,8 +606,13 @@ def _patch_tkappinit_text(text: str) -> str:
 
 
 def patch_tkinter_sources(context) -> None:
+    def patch_tkinter(text: str) -> str:
+        if context.version_info < (3, 12, 0):
+            text = _patch_tcl9_compat_text(text)
+        return _patch_tkinter_text(text)
+
     targets = (
-        ("Modules/_tkinter.c", _patch_tkinter_text),
+        ("Modules/_tkinter.c", patch_tkinter),
         ("Modules/tkappinit.c", _patch_tkappinit_text),
     )
     for relative, transform in targets:

@@ -27,9 +27,9 @@ on:
   workflow_dispatch:
     inputs:
       cpython_version:
-        description: Exact CPython patch release to validate
-        required: true
-        default: "3.13.15"
+        description: Exact CPython patch release; leave empty for latest 3.11-3.15
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -43,12 +43,61 @@ env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: "utf-8"
   STATICPYTHON_BUILD_WORKERS: "2"
-  VERIFY_CPYTHON_VERSION: ${{ inputs.cpython_version || '3.13.15' }}
 
 jobs:
+  resolve-cpython-matrix:
+    runs-on: windows-2022
+    outputs:
+      versions: ${{ steps.resolve.outputs.versions }}
+    steps:
+      - name: Resolve requested or latest CPython 3.11 through 3.15 tags
+        id: resolve
+        shell: pwsh
+        run: |
+          $requested = "${{ inputs.cpython_version }}".Trim()
+          if ($requested) {
+            if ($requested -notmatch '^3\.(11|12|13|14|15)\.[0-9]+(?:(?:a|b|rc)[0-9]+)?$') {
+              throw "Unsupported CPython version: $requested"
+            }
+            $tag = git ls-remote --tags --refs https://github.com/python/cpython.git "refs/tags/v$requested"
+            if (-not $tag) { throw "CPython tag v$requested does not exist" }
+            $versions = @($requested)
+          } else {
+            $tags = @(git ls-remote --tags --refs https://github.com/python/cpython.git "v3.*" |
+              ForEach-Object {
+                if ($_ -match "refs/tags/v((3)\.(11|12|13|14|15)\.([0-9]+)(?:(a|b|rc)([0-9]+))?)$") {
+                  $phaseRank = switch ($matches[5]) { "a" { 1 } "b" { 2 } "rc" { 3 } default { 4 } }
+                  [PSCustomObject]@{
+                    Version = $matches[1]
+                    Series = "3.$($matches[3])"
+                    Major = [int]$matches[2]
+                    Minor = [int]$matches[3]
+                    Micro = [int]$matches[4]
+                    PhaseRank = $phaseRank
+                    PhaseSerial = if ($matches[6]) { [int]$matches[6] } else { 0 }
+                  }
+                }
+              })
+            if (-not $tags) { throw "Could not resolve CPython tags" }
+            $versions = foreach ($series in @("3.11", "3.12", "3.13", "3.14", "3.15")) {
+              $latest = $tags | Where-Object Series -eq $series |
+                Sort-Object Major, Minor, Micro, PhaseRank, PhaseSerial | Select-Object -Last 1
+              if (-not $latest) { throw "Could not resolve CPython $series" }
+              $latest.Version
+            }
+          }
+          "versions=$(ConvertTo-Json -InputObject @($versions) -Compress)" >> $env:GITHUB_OUTPUT
+
   sdk-linked-tkinter:
+    needs: resolve-cpython-matrix
     runs-on: windows-2022
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        cpython_version: ${{ fromJSON(needs.resolve-cpython-matrix.outputs.versions) }}
+    env:
+      VERIFY_CPYTHON_VERSION: ${{ matrix.cpython_version }}
     steps:
       - uses: actions/checkout@v4
 

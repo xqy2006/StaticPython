@@ -166,6 +166,25 @@ class TclTkZipfsTests(unittest.TestCase):
         self.assertIn("Tcl/Tk ZipFS SHA-256:", source)
         self.assertGreater(zip_path.stat().st_size, 100)
 
+    def test_cpython_311_tcl9_backport_is_strict_and_idempotent(self) -> None:
+        legacy = "\n/* next strict anchor */\n".join(
+            anchor for anchor, _ in tkinter_setup.TCL9_COMPAT_REPLACEMENTS
+        )
+        patched = tkinter_setup._patch_tcl9_compat_text(legacy)
+        self.assertIn(tkinter_setup.TCL9_COMPAT_MARKER, patched)
+        for anchor, replacement in tkinter_setup.TCL9_COMPAT_REPLACEMENTS:
+            self.assertNotIn(anchor, patched)
+            self.assertIn(replacement, patched)
+        self.assertEqual(tkinter_setup._patch_tcl9_compat_text(patched), patched)
+
+        partial = patched.replace("    Tcl_Size len;", "    int len;", 1)
+        with self.assertRaisesRegex(RuntimeError, "compatibility patch is partial"):
+            tkinter_setup._patch_tcl9_compat_text(partial)
+
+        ambiguous = legacy + "\n" + tkinter_setup.TCL9_COMPAT_REPLACEMENTS[0][0]
+        with self.assertRaisesRegex(RuntimeError, "expected once, found 2"):
+            tkinter_setup._patch_tcl9_compat_text(ambiguous)
+
     def test_cpython_discovery_patch_is_strict_and_idempotent(self) -> None:
         source = r'''#ifdef MS_WINDOWS
 #include <conio.h>
@@ -206,6 +225,11 @@ static void init_module(void) {
         self.assertNotIn("_get_tcl_lib_path", patched)
         self.assertEqual(patched.count("Tcl_FindExecutable(PyBytes_AS_STRING(cexe));"), 1)
         self.assertEqual(tkinter_setup._patch_tkinter_text(patched), patched)
+
+        legacy_signature = source.replace("_get_tcl_lib_path(void)", "_get_tcl_lib_path()")
+        legacy_patched = tkinter_setup._patch_tkinter_text(legacy_signature)
+        self.assertNotIn("_get_tcl_lib_path", legacy_patched)
+        self.assertNotIn("TCL_LIBRARY", legacy_patched)
 
         with self.assertRaisesRegex(RuntimeError, "no guarded TCL_LIBRARY"):
             tkinter_setup._patch_tkinter_text(
@@ -405,6 +429,15 @@ Tcl_AppInit(Tcl_Interp *interp)
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "tkinter-zipfs-experiment.yml"
         ).read_text(encoding="utf-8")
+        self.assertIn(
+            'foreach ($series in @("3.11", "3.12", "3.13", "3.14", "3.15"))',
+            workflow,
+        )
+        self.assertIn(
+            "cpython_version: ${{ fromJSON(needs.resolve-cpython-matrix.outputs.versions) }}",
+            workflow,
+        )
+        self.assertIn("VERIFY_CPYTHON_VERSION: ${{ matrix.cpython_version }}", workflow)
         build_step = workflow.split(
             "- name: Build static tkinter pack and verify against runtime SDK",
             1,
