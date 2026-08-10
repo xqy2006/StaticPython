@@ -12,14 +12,18 @@ from pathlib import Path
 from libs import pypi_library, source_path, write_source_text
 
 
-PYDANTIC_CORE_VERSION = "2.47.0"
+PYDANTIC_CORE_VERSION = "2.48.0"
 PYDANTIC_CORE_PYDANTIC_STABLE_VERSION = "2.46.4"
+PYDANTIC_CORE_PREVIOUS_VERSION = "2.47.0"
 PYDANTIC_CORE_SDIST_SHA256_BY_VERSION = {
     PYDANTIC_CORE_PYDANTIC_STABLE_VERSION: (
         "62f875393d7f270851f20523dd2e29f082bcc82292d66db2b64ea71f64b6e1c1"
     ),
-    PYDANTIC_CORE_VERSION: (
+    PYDANTIC_CORE_PREVIOUS_VERSION: (
         "422c1797a7864b2a9a996435aba92fe571fb80190f67a31edbc1ac040c7b51fe"
+    ),
+    PYDANTIC_CORE_VERSION: (
+        "8714f70dafdffea0a5596cc88eddbdc71f5856563947970dcbd0f1ced61ed05f"
     ),
 }
 RUST_TOOLCHAIN = "1.88.0"
@@ -538,6 +542,17 @@ LIBRARY_INTEGRATION = pypi_library(
             ],
         },
         {
+            "package": f"=={PYDANTIC_CORE_PREVIOUS_VERSION}",
+            "path": "pydantic_core_builtin/Cargo.toml",
+            "replacements": [
+                {
+                    "old": 'crate-type = ["cdylib", "rlib"]',
+                    "new": 'crate-type = ["staticlib", "rlib"]',
+                    "count": 1,
+                }
+            ],
+        },
+        {
             "package": f"=={PYDANTIC_CORE_VERSION}",
             "path": "pydantic_core_builtin/Cargo.toml",
             "replacements": [
@@ -558,7 +573,7 @@ LIBRARY_INTEGRATION = pypi_library(
             "kind": "inline",
             "code": (
                 "import pydantic_core as pc; "
-                "assert pc.__version__ in ('2.46.4', '2.47.0'); "
+                "assert pc.__version__ in ('2.46.4', '2.47.0', '2.48.0'); "
                 "validator=pc.SchemaValidator({'type':'int'}); "
                 "assert validator.validate_python('7') == 7; "
                 "assert pc.from_json(b'{\"ok\":true}') == {'ok': True}"

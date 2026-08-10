@@ -1658,6 +1658,19 @@
         "pydantic_core"
       ],
       "third_party_library_version_overrides": {
+        "pydantic_core": "2.48.0"
+      },
+      "verification": {
+        "enabled": false
+      }
+    },
+    "pydantic-core-2-47-experimental": {
+      "description": "Preserve the previously verified pydantic-core 2.47.0 Rust static pack while latest validation advances.",
+      "core_libraries": "all",
+      "third_party_libraries": [
+        "pydantic_core"
+      ],
+      "third_party_library_version_overrides": {
         "pydantic_core": "2.47.0"
       },
       "verification": {

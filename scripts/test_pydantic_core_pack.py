@@ -37,12 +37,13 @@ class PydanticCorePackTests(unittest.TestCase):
 
     def test_pack_contract_is_pinned_and_static(self) -> None:
         integration = self.module.LIBRARY_INTEGRATION
-        self.assertEqual(integration.release_version, "2.47.0")
+        self.assertEqual(integration.release_version, "2.48.0")
         self.assertEqual(
             integration.source_archive_sha256_by_version,
             {
                 "2.46.4": "62f875393d7f270851f20523dd2e29f082bcc82292d66db2b64ea71f64b6e1c1",
-                "2.47.0": "422c1797a7864b2a9a996435aba92fe571fb80190f67a31edbc1ac040c7b51fe"
+                "2.47.0": "422c1797a7864b2a9a996435aba92fe571fb80190f67a31edbc1ac040c7b51fe",
+                "2.48.0": "8714f70dafdffea0a5596cc88eddbdc71f5856563947970dcbd0f1ced61ed05f"
             },
         )
         self.assertEqual(integration.dependencies, ["typing_extensions"])
@@ -73,7 +74,7 @@ class PydanticCorePackTests(unittest.TestCase):
         )
         self.assertEqual(
             [rule["package"] for rule in integration.patch_rules],
-            ["==2.46.4", "==2.47.0"],
+            ["==2.46.4", "==2.47.0", "==2.48.0"],
         )
         for rule in integration.patch_rules:
             replacement = rule["replacements"][0]
@@ -121,10 +122,16 @@ class PydanticCorePackTests(unittest.TestCase):
             {"pydantic_core": "2.46.4"},
         )
         self.assertEqual(
-            profiles["pydantic-core-latest-experimental"][
+            profiles["pydantic-core-2-47-experimental"][
                 "third_party_library_version_overrides"
             ],
             {"pydantic_core": "2.47.0"},
+        )
+        self.assertEqual(
+            profiles["pydantic-core-latest-experimental"][
+                "third_party_library_version_overrides"
+            ],
+            {"pydantic_core": "2.48.0"},
         )
 
     def test_encoded_rustflags_preserve_paths_with_spaces(self) -> None:
@@ -280,6 +287,8 @@ class PydanticCorePackTests(unittest.TestCase):
         self.assertIn("$metadata.toolchain.rust.cargo_lock_sha256", workflow)
         self.assertIn("$metadata.toolchain.rust.package_count", workflow)
         self.assertIn("$incompleteRustLicenses.Count -ne 0", workflow)
+        self.assertIn('pydantic_core_version: "2.47.0"', workflow)
+        self.assertIn('pydantic_core_version: "2.48.0"', workflow)
 
     def test_workflow_audits_released_files_per_smoke_record(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml").read_text(

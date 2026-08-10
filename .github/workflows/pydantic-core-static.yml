@@ -94,6 +94,8 @@ jobs:
           - pydantic_core_version: "2.46.4"
             profile: pydantic-core-experimental
           - pydantic_core_version: "2.47.0"
+            profile: pydantic-core-2-47-experimental
+          - pydantic_core_version: "2.48.0"
             profile: pydantic-core-latest-experimental
     steps:
       - uses: actions/checkout@v4
