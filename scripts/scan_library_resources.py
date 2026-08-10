@@ -259,7 +259,7 @@ def read_config(path: Path, profile_name: str | None) -> tuple[str, dict[str, An
     profile = profiles.get(selected)
     if not isinstance(profile, dict):
         raise RuntimeError(f"profile {selected!r} was not found in {path}")
-    return selected, profile, data
+    return selected, data, profile
 
 
 def hook_closure_value(hook: object, name: str) -> Any:
@@ -679,7 +679,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = args.repo_root.resolve()
     config_path = args.config if args.config.is_absolute() else repo_root / args.config
-    profile_name, profile, config = read_config(config_path, args.profile)
+    profile_name, config, profile = read_config(config_path, args.profile)
     target_version = Version(args.python_version)
     selected_libraries = parse_libraries(args.libraries)
     if selected_libraries == "all":
