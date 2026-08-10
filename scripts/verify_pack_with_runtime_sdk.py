@@ -14,7 +14,7 @@ import tempfile
 import time
 import tokenize
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from zipfile import BadZipFile, ZipFile
 
 
@@ -27,6 +27,13 @@ from tools import resolve_tool_exe
 
 RUNTIME_METADATA_PATH = "metadata/runtime-sdk.v1.json"
 PACK_METADATA_PATH = "pack.json"
+TOOLCHAIN_ABI_FIELDS = (
+    "visual_studio_version",
+    "vc_tools_version",
+    "windows_sdk_version",
+    "platform_toolset",
+    "runtime_library",
+)
 REQUIRED_WINDOWS_SYSTEM_LIBRARIES = (
     "advapi32.lib",
     "shell32.lib",
@@ -361,10 +368,33 @@ def validate_pack(root: Path, runtime: dict) -> dict:
         "cpython_tag",
         "staticpython_commit",
         "platform",
-        "toolchain",
     ):
         if metadata.get(field) != runtime.get(field):
             raise RuntimeError(f"pack {owner} {field} does not match the runtime SDK")
+    pack_toolchain = metadata.get("toolchain")
+    runtime_toolchain = runtime.get("toolchain")
+    if not isinstance(pack_toolchain, dict) or not isinstance(runtime_toolchain, dict):
+        raise RuntimeError(f"pack {owner} has invalid toolchain metadata")
+    missing_toolchain_fields = [
+        field
+        for field in (*TOOLCHAIN_ABI_FIELDS, "vscmd_version")
+        if not isinstance(pack_toolchain.get(field), str) or not pack_toolchain[field]
+    ]
+    if missing_toolchain_fields:
+        raise RuntimeError(
+            f"pack {owner} toolchain metadata is missing: "
+            + ", ".join(missing_toolchain_fields)
+        )
+    mismatched_toolchain_fields = [
+        field
+        for field in TOOLCHAIN_ABI_FIELDS
+        if pack_toolchain.get(field) != runtime_toolchain.get(field)
+    ]
+    if mismatched_toolchain_fields:
+        raise RuntimeError(
+            f"pack {owner} toolchain ABI does not match the runtime SDK: "
+            + ", ".join(mismatched_toolchain_fields)
+        )
     verification = metadata.get("verification")
     if not isinstance(verification, dict) or verification.get("status") not in {"not-run", "passed"}:
         raise RuntimeError(f"pack {owner} has invalid verification state")
@@ -400,6 +430,30 @@ def validate_pack(root: Path, runtime: dict) -> dict:
         name = _validate_library_leaf(library, description=f"pack {owner} wholearchive library")
         if name.casefold() not in library_names:
             raise RuntimeError(f"pack {owner} wholearchive library is missing: {name}")
+    trusted_object_origins = metadata.get("trusted_object_origins", [])
+    if not isinstance(trusted_object_origins, list):
+        raise RuntimeError(f"pack {owner} trusted_object_origins must be a list")
+    seen_object_origins: set[tuple[str, str]] = set()
+    for record in trusted_object_origins:
+        if not isinstance(record, dict) or set(record) != {"library", "object"}:
+            raise RuntimeError(
+                f"pack {owner} trusted object origins must contain only library and object"
+            )
+        library = _validate_library_leaf(
+            record.get("library"),
+            description=f"pack {owner} trusted object library",
+        )
+        if library.casefold() not in library_names:
+            raise RuntimeError(f"pack {owner} trusted object library is missing: {library}")
+        object_name = record.get("object")
+        if not isinstance(object_name, str) or object_name.casefold() != "main.obj":
+            raise RuntimeError(
+                f"pack {owner} trusted object must currently be the exact basename main.obj"
+            )
+        key = (library.casefold(), object_name.casefold())
+        if key in seen_object_origins:
+            raise RuntimeError(f"pack {owner} repeats trusted object origin {library}({object_name})")
+        seen_object_origins.add(key)
     for key in ("system_libraries", "suppressed_system_libraries"):
         values = metadata.get(key, [])
         if not isinstance(values, list):
@@ -832,6 +886,57 @@ def _resolve_system_libraries(runtime: dict, packs: list[MaterializedPack]) -> l
     return resolved
 
 
+def _trusted_object_origins(packs: list[MaterializedPack]) -> set[tuple[str, str]]:
+    return {
+        (record["library"], record["object"])
+        for pack in packs
+        for record in pack.metadata.get("trusted_object_origins", [])
+    }
+
+
+def _validate_trusted_object_link_inputs(
+    trusted_object_origins: set[tuple[str, str]],
+    *,
+    pack_libraries: list[Path],
+    runtime_libraries: list[Path],
+    system_libraries: list[str],
+) -> None:
+    trusted_libraries = {
+        PureWindowsPath(library).name.casefold()
+        for library, object_name in trusted_object_origins
+        if object_name.casefold() == "main.obj"
+    }
+    if not trusted_libraries:
+        return
+
+    pack_names = [path.name.casefold() for path in pack_libraries]
+    missing_or_duplicated = sorted(
+        name for name in trusted_libraries if pack_names.count(name) != 1
+    )
+    if missing_or_duplicated:
+        raise RuntimeError(
+            "trusted object origins must identify exactly one selected pack archive: "
+            + ", ".join(missing_or_duplicated)
+        )
+
+    runtime_names = {path.name.casefold() for path in runtime_libraries}
+    system_names = {PureWindowsPath(name).name.casefold() for name in system_libraries}
+    collisions = []
+    for name in sorted(trusted_libraries):
+        sources = []
+        if name in runtime_names:
+            sources.append("runtime SDK")
+        if name in system_names:
+            sources.append("system libraries")
+        if sources:
+            collisions.append(f"{name} ({' and '.join(sources)})")
+    if collisions:
+        raise RuntimeError(
+            "trusted object origin basenames collide with non-pack linker inputs: "
+            + ", ".join(collisions)
+        )
+
+
 def build_harness(
     runtime_root: Path,
     runtime: dict,
@@ -912,6 +1017,14 @@ def build_harness(
         _safe_file(library_dir, name, description="runtime link library")
         for name in runtime["link_libraries"]
     ]
+    system_libraries = _resolve_system_libraries(runtime, packs)
+    trusted_object_origins = _trusted_object_origins(packs)
+    _validate_trusted_object_link_inputs(
+        trusted_object_origins,
+        pack_libraries=pack_libraries,
+        runtime_libraries=runtime_libraries,
+        system_libraries=system_libraries,
+    )
     executable = work_dir / "staticpython-pack-verify.exe"
     map_path = work_dir / "staticpython-pack-verify.map"
     pdb_path = work_dir / "staticpython-pack-verify.pdb"
@@ -937,7 +1050,7 @@ def build_harness(
         *[str(path) for path in pack_libraries],
         *[str(path) for path in runtime_libraries],
         *[f"/WHOLEARCHIVE:{path}" for path in wholearchive],
-        *_resolve_system_libraries(runtime, packs),
+        *system_libraries,
     ]
     link_response = _write_response(response_dir / "link.rsp", link_arguments)
     link_log = _run_tool([link, f"@{link_response}"], cwd=work_dir)
@@ -950,6 +1063,7 @@ def build_harness(
         "compile_logs": compile_logs,
         "link_log": link_log,
         "pdb": str(pdb_path),
+        "trusted_object_origins": sorted(trusted_object_origins),
     }
 
 
@@ -970,7 +1084,53 @@ def _dependency_names(dumpbin_output: str) -> list[str]:
     return sorted(set(names), key=str.casefold)
 
 
-def audit_executable(executable: Path, map_path: Path, dumpbin: str) -> dict:
+def _classify_main_object_records(
+    map_text: str,
+    trusted_object_origins: set[tuple[str, str]],
+) -> tuple[list[str], list[str]]:
+    main_object_pattern = re.compile(r"(?i)\bmain\.obj\b")
+    records = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
+    trusted = {
+        (PureWindowsPath(library).name.casefold(), object_name.casefold())
+        for library, object_name in trusted_object_origins
+        if isinstance(library, str) and isinstance(object_name, str)
+    }
+    allowed = []
+    forbidden = []
+    for record in records:
+        object_spans = [match.span() for match in main_object_pattern.finditer(record)]
+        token = record.split()[-1]
+        separator = token.rfind(":")
+        drive_separator = (
+            separator == 1
+            and len(token) > 2
+            and token[0].isalpha()
+            and token[2] in "\\/"
+        )
+        if separator >= 0 and not drive_separator:
+            library, object_name = token[:separator], token[separator + 1 :]
+        else:
+            parenthesized = re.fullmatch(r"(.+)\(([^()]*)\)", token)
+            if parenthesized is None:
+                library, object_name = "", ""
+            else:
+                library, object_name = parenthesized.groups()
+        library_name = PureWindowsPath(library).name
+        if library_name and not library_name.casefold().endswith(".lib"):
+            library_name += ".lib"
+        origin = (library_name.casefold(), object_name.casefold())
+        destination = allowed if len(object_spans) == 1 and origin in trusted else forbidden
+        destination.append(record)
+    return allowed, forbidden
+
+
+def audit_executable(
+    executable: Path,
+    map_path: Path,
+    dumpbin: str,
+    *,
+    trusted_object_origins: set[tuple[str, str]] | None = None,
+) -> dict:
     dependents = _run_tool([dumpbin, "/NOLOGO", "/DEPENDENTS", str(executable)], cwd=executable.parent)
     dependencies = _dependency_names(dependents)
     forbidden_dependencies = [
@@ -992,14 +1152,19 @@ def audit_executable(executable: Path, map_path: Path, dumpbin: str) -> dict:
         for symbol in FORBIDDEN_ENTRY_SYMBOLS
         if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", map_text)
     ]
-    main_objects = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
+    allowed_main_objects, forbidden_main_objects = _classify_main_object_records(
+        map_text,
+        trusted_object_origins or set(),
+    )
     report = {
         "status": "passed",
         "dependencies": dependencies,
         "forbidden_dependencies": forbidden_dependencies,
         "non_system_dependencies": non_system_dependencies,
         "forbidden_entry_symbols": forbidden_symbols,
-        "main_object_records": main_objects,
+        "main_object_records": sorted([*allowed_main_objects, *forbidden_main_objects]),
+        "allowed_trusted_object_records": allowed_main_objects,
+        "forbidden_main_object_records": forbidden_main_objects,
         "executable_sha256": sha256_file(executable),
         "map_sha256": sha256_file(map_path),
     }
@@ -1010,8 +1175,9 @@ def audit_executable(executable: Path, map_path: Path, dumpbin: str) -> dict:
         failures.append("non-system DLLs: " + ", ".join(non_system_dependencies))
     if forbidden_symbols:
         failures.append("generic Python entry symbols: " + ", ".join(forbidden_symbols))
-    if main_objects:
-        failures.append("main.obj was linked")
+    if forbidden_main_objects:
+        origins = [" ".join(record.split())[:300] for record in forbidden_main_objects[:5]]
+        failures.append("forbidden main.obj records: " + " | ".join(origins))
     if failures:
         report["status"] = "failed"
         report["failures"] = failures
@@ -1153,7 +1319,12 @@ def verify_assets(args: argparse.Namespace) -> int:
             args.work_dir.resolve(),
             build_workers=args.build_workers,
         )
-        pe_audit = audit_executable(executable, map_path, toolchain["dumpbin"])
+        pe_audit = audit_executable(
+            executable,
+            map_path,
+            toolchain["dumpbin"],
+            trusted_object_origins=set(map(tuple, toolchain["trusted_object_origins"])),
+        )
         smoke_records, smoke_failures = run_smoke_cases(
             executable,
             smoke_cases,

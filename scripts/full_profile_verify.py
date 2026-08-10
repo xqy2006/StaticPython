@@ -405,7 +405,7 @@ assert path.read_text(encoding="ascii") == contents
         'chardet-smoke',
         r"""
 import chardet
-from chardet.models import BigramProfile, get_enc_index, get_idf_weights, load_models
+from chardet.models import BigramProfile, get_enc_index, get_idf_weights, get_rowmax, load_models
 from chardet.pipeline.confusion import load_confusion_data
 from chardet.universaldetector import UniversalDetector
 
@@ -421,11 +421,14 @@ assert detector.result["encoding"]
 models = load_models()
 enc_index = get_enc_index()
 idf = get_idf_weights()
+rowmax = get_rowmax()
 confusion = load_confusion_data()
 profile = BigramProfile(payload)
 assert models
 assert enc_index
 assert len(idf) == 65536
+assert rowmax
+assert all(len(table) == 256 for table in rowmax.values())
 assert confusion
 assert profile.nonzero
         """,
