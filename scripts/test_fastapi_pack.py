@@ -23,9 +23,9 @@ EXPECTED_VERSIONS = {
     "idna": "3.18",
     "pydantic": "2.13.4",
     "pydantic_core": "2.46.4",
-    "starlette": "1.3.1",
+    "starlette": "1.6.0",
     "typing_extensions": "4.16.0",
-    "typing_inspection": "0.4.2",
+    "typing_inspection": "0.4.3",
 }
 
 
