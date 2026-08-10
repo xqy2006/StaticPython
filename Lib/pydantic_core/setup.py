@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 from libs import pypi_library, source_path, write_source_text
@@ -30,6 +34,255 @@ RUST_SYSTEM_LIBRARIES = [
     "userenv.lib",
     "ws2_32.lib",
 ]
+PYDANTIC_CORE_LICENSE_EXPRESSION = (
+    "Apache-2.0 AND (Apache-2.0 WITH LLVM-exception) AND MIT AND "
+    "Unicode-3.0 AND Unicode-DFS-2016 AND Zlib"
+)
+RUST_LICENSE_EXPRESSIONS = {
+    "(MIT OR Apache-2.0) AND Unicode-DFS-2016",
+    "Apache-2.0 OR MIT",
+    "Apache-2.0 WITH LLVM-exception",
+    "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    "BSD-2-Clause OR Apache-2.0 OR MIT",
+    "MIT",
+    "MIT OR Apache-2.0",
+    "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+    "MIT/Apache-2.0",
+    "Unicode-3.0",
+    "Unlicense OR MIT",
+    "Zlib",
+}
+RUST_SELECTED_LICENSES = {
+    "(MIT OR Apache-2.0) AND Unicode-DFS-2016": "MIT AND Unicode-DFS-2016",
+    "Apache-2.0 OR MIT": "MIT",
+    "Apache-2.0 WITH LLVM-exception": "Apache-2.0 WITH LLVM-exception",
+    "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT": "MIT",
+    "BSD-2-Clause OR Apache-2.0 OR MIT": "MIT",
+    "MIT": "MIT",
+    "MIT OR Apache-2.0": "MIT",
+    "MIT OR Apache-2.0 OR LGPL-2.1-or-later": "MIT",
+    "MIT/Apache-2.0": "MIT",
+    "Unicode-3.0": "Unicode-3.0",
+    "Unlicense OR MIT": "MIT",
+    "Zlib": "Zlib",
+}
+RUST_LICENSE_FILE_PATTERN = re.compile(
+    r"^(?:LICENSE|COPYING|NOTICE|UNLICENSE|COPYRIGHT)",
+    re.IGNORECASE,
+)
+RUST_APACHE_FALLBACK_PACKAGES = {
+    ("r-efi", "5.2.0"),
+    ("wit-bindgen-rt", "0.39.0"),
+}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _cargo_lock_records(path: Path) -> dict[tuple[str, str, str | None], str | None]:
+    payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    records: dict[tuple[str, str, str | None], str | None] = {}
+    for raw in payload.get("package", []):
+        if not isinstance(raw, dict):
+            raise RuntimeError("pydantic-core Cargo.lock contains an invalid package record")
+        name = raw.get("name")
+        version = raw.get("version")
+        source = raw.get("source")
+        checksum = raw.get("checksum")
+        if not isinstance(name, str) or not isinstance(version, str):
+            raise RuntimeError("pydantic-core Cargo.lock contains an unnamed package")
+        if source is not None and not isinstance(source, str):
+            raise RuntimeError(f"pydantic-core Cargo.lock has an invalid source for {name} {version}")
+        if checksum is not None and (
+            not isinstance(checksum, str)
+            or re.fullmatch(r"[0-9a-f]{64}", checksum) is None
+        ):
+            raise RuntimeError(f"pydantic-core Cargo.lock has an invalid checksum for {name} {version}")
+        key = (name, version, source)
+        if key in records:
+            raise RuntimeError(f"pydantic-core Cargo.lock repeats {name} {version}")
+        records[key] = checksum
+    if not records:
+        raise RuntimeError("pydantic-core Cargo.lock contains no packages")
+    return records
+
+
+def _rust_license_candidates(package_root: Path) -> list[Path]:
+    return sorted(
+        (
+            path
+            for path in package_root.iterdir()
+            if path.is_file()
+            and RUST_LICENSE_FILE_PATTERN.match(path.name)
+            and path.stat().st_size <= 2 * 1024 * 1024
+        ),
+        key=lambda path: path.name.casefold(),
+    )
+
+
+def _collect_rust_dependency_licenses(
+    crate_root: Path,
+    cargo_metadata: dict,
+    destination: Path,
+) -> tuple[list[Path], dict]:
+    packages = cargo_metadata.get("packages")
+    if not isinstance(packages, list) or not packages:
+        raise RuntimeError("cargo metadata contains no pydantic-core packages")
+    lock_records = _cargo_lock_records(crate_root / "Cargo.lock")
+    metadata_keys: set[tuple[str, str, str | None]] = set()
+    package_records: list[dict] = []
+    apache_fallback_texts: list[str] = []
+
+    if destination.exists():
+        shutil.rmtree(destination)
+    texts_root = destination / "texts"
+    texts_root.mkdir(parents=True)
+
+    for package in sorted(
+        packages,
+        key=lambda record: (
+            str(record.get("name", "")).casefold(),
+            str(record.get("version", "")),
+            str(record.get("source") or ""),
+        ),
+    ):
+        if not isinstance(package, dict):
+            raise RuntimeError("cargo metadata contains an invalid package record")
+        name = package.get("name")
+        version = package.get("version")
+        source = package.get("source")
+        expression = package.get("license")
+        manifest_path = package.get("manifest_path")
+        if not all(isinstance(value, str) and value for value in (name, version, expression, manifest_path)):
+            raise RuntimeError("cargo metadata contains incomplete package license metadata")
+        if source is not None and not isinstance(source, str):
+            raise RuntimeError(f"cargo metadata has an invalid source for {name} {version}")
+        if source is not None and source != "registry+https://github.com/rust-lang/crates.io-index":
+            raise RuntimeError(f"cargo metadata has an unreviewed source for {name} {version}: {source}")
+        if expression not in RUST_LICENSE_EXPRESSIONS:
+            raise RuntimeError(
+                f"pydantic-core Rust dependency {name} {version} has an unreviewed license: {expression}"
+            )
+        key = (name, version, source)
+        if key in metadata_keys or key not in lock_records:
+            raise RuntimeError(
+                f"cargo metadata package {name} {version} does not map uniquely to Cargo.lock"
+            )
+        metadata_keys.add(key)
+        checksum = lock_records[key]
+        if source is not None and checksum is None:
+            raise RuntimeError(f"registry package {name} {version} has no Cargo.lock checksum")
+
+        package_root = Path(manifest_path).resolve().parent
+        if not package_root.is_dir():
+            raise RuntimeError(f"cargo package root does not exist for {name} {version}")
+        if source is None and package_root != crate_root.resolve():
+            raise RuntimeError(f"cargo root package {name} {version} is outside the locked crate root")
+        if source is not None and package_root.name != f"{name}-{version}":
+            raise RuntimeError(f"cargo registry package path does not match {name} {version}")
+        authors = package.get("authors") or []
+        repository = package.get("repository")
+        if not isinstance(authors, list) or not all(isinstance(author, str) for author in authors):
+            raise RuntimeError(f"cargo metadata has invalid authors for {name} {version}")
+        if repository is not None and not isinstance(repository, str):
+            raise RuntimeError(f"cargo metadata has an invalid repository for {name} {version}")
+        files: list[dict] = []
+        for candidate in _rust_license_candidates(package_root):
+            if not candidate.resolve().is_relative_to(package_root):
+                raise RuntimeError(f"Rust license file escapes package root: {candidate}")
+            digest = _sha256_file(candidate)
+            target = texts_root / f"{digest[:16]}-{candidate.name}"
+            if target.exists():
+                if _sha256_file(target) != digest:
+                    raise RuntimeError(f"Rust license destination collision for {candidate.name}")
+            else:
+                shutil.copy2(candidate, target)
+            relative = target.relative_to(destination).as_posix()
+            files.append(
+                {
+                    "path": relative,
+                    "sha256": digest,
+                    "size": target.stat().st_size,
+                }
+            )
+            if (
+                candidate.name.casefold() == "license-apache"
+                and "Apache-2.0" in expression
+            ):
+                apache_fallback_texts.append(relative)
+
+        selected_license = RUST_SELECTED_LICENSES[expression]
+        if not files:
+            if (name, version) not in RUST_APACHE_FALLBACK_PACKAGES:
+                raise RuntimeError(f"Rust dependency {name} {version} has no packaged license text")
+            if "Apache-2.0" not in expression:
+                raise RuntimeError(f"Rust dependency {name} {version} cannot use the Apache fallback")
+            selected_license = "Apache-2.0"
+
+        package_records.append(
+            {
+                "authors": list(package.get("authors") or []),
+                "checksum": checksum,
+                "license_expression": expression,
+                "license_files": files,
+                "name": name,
+                "repository": repository,
+                "selected_license": selected_license,
+                "source": source,
+                "version": version,
+            }
+        )
+
+    if metadata_keys != set(lock_records):
+        missing = sorted(set(lock_records) - metadata_keys)
+        raise RuntimeError(
+            f"cargo metadata omitted {len(missing)} Cargo.lock package(s): {missing[:3]}"
+        )
+    fallback_path = min(apache_fallback_texts, default=None)
+    if fallback_path is None and any(not record["license_files"] for record in package_records):
+        raise RuntimeError("pydantic-core Rust dependencies need a packaged Apache-2.0 text")
+    if fallback_path is not None:
+        fallback_file = destination / fallback_path
+        fallback_record = {
+            "path": fallback_path,
+            "sha256": _sha256_file(fallback_file),
+            "size": fallback_file.stat().st_size,
+        }
+        for record in package_records:
+            if not record["license_files"]:
+                record["license_files"] = [fallback_record]
+
+    root_packages = [record for record in package_records if record["source"] is None]
+    if len(root_packages) != 1 or root_packages[0]["name"] != "pydantic-core":
+        raise RuntimeError("cargo metadata does not identify one pydantic-core root package")
+    manifest = {
+        "cargo_lock_sha256": _sha256_file(crate_root / "Cargo.lock"),
+        "kind": "staticpython-rust-license-manifest",
+        "license_expression": PYDANTIC_CORE_LICENSE_EXPRESSION,
+        "package_count": len(package_records),
+        "packages": package_records,
+        "root_package": {
+            "name": root_packages[0]["name"],
+            "version": root_packages[0]["version"],
+        },
+        "schema_version": 1,
+    }
+    manifest_path = destination / "rust-dependencies.json"
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    generated = sorted(
+        (path for path in destination.rglob("*") if path.is_file()),
+        key=lambda path: path.as_posix().casefold(),
+    )
+    return generated, manifest
 
 
 def _run_captured(command: list[str], *, cwd: Path, timeout: int = 60) -> str:
@@ -175,10 +428,53 @@ def build_pydantic_core_static_library(context) -> None:
         raise RuntimeError(
             f"pydantic-core static library was not produced: {library_path}"
         )
+    cargo_metadata_output = _run_captured(
+        [
+            *toolchain_command,
+            "cargo",
+            "metadata",
+            "--locked",
+            "--format-version",
+            "1",
+            "--manifest-path",
+            str(cargo_toml),
+        ],
+        cwd=crate_root,
+        timeout=60 * 10,
+    )
+    try:
+        cargo_metadata = json.loads(cargo_metadata_output)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("cargo metadata returned invalid JSON") from exc
+    rust_license_root = source_path(
+        context,
+        "licenses/pydantic_core-rust",
+    )
+    rust_license_files, rust_license_manifest = _collect_rust_dependency_licenses(
+        crate_root,
+        cargo_metadata,
+        rust_license_root,
+    )
+    rust_license_prefix = rust_license_root.relative_to(context.source_root).as_posix() + "/"
+    LIBRARY_INTEGRATION.license_files = [
+        relative
+        for relative in LIBRARY_INTEGRATION.license_files
+        if not relative.startswith(rust_license_prefix)
+    ]
+    LIBRARY_INTEGRATION.license_files.extend(
+        path.relative_to(context.source_root).as_posix()
+        for path in rust_license_files
+    )
+    LIBRARY_INTEGRATION.license_expression = PYDANTIC_CORE_LICENSE_EXPRESSION
     LIBRARY_INTEGRATION.toolchain_metadata["rust"] = {
         "cargo_version": cargo_output,
+        "cargo_lock_sha256": rust_license_manifest["cargo_lock_sha256"],
         "crt_static": True,
+        "license_manifest_sha256": _sha256_file(
+            rust_license_root / "rust-dependencies.json"
+        ),
         "locked": True,
+        "package_count": rust_license_manifest["package_count"],
         "profile": "release",
         "rustc_commit_hash": rustc.get("commit_hash"),
         "rustc_version": rustc["version"],
@@ -254,7 +550,7 @@ LIBRARY_INTEGRATION = pypi_library(
         }
     ],
     source_ignore_patterns=["tests", "__pycache__", "*.so", "*.pyd", "*.dll"],
-    license_expression="MIT",
+    license_expression=PYDANTIC_CORE_LICENSE_EXPRESSION,
     license_files=["pydantic_core_builtin/LICENSE"],
     smoke_tests=[
         {

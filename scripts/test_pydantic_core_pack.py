@@ -79,7 +79,11 @@ class PydanticCorePackTests(unittest.TestCase):
             replacement = rule["replacements"][0]
             self.assertEqual(replacement["old"], 'crate-type = ["cdylib", "rlib"]')
             self.assertEqual(replacement["new"], 'crate-type = ["staticlib", "rlib"]')
-        self.assertEqual(integration.license_expression, "MIT")
+        self.assertEqual(
+            integration.license_expression,
+            "Apache-2.0 AND (Apache-2.0 WITH LLVM-exception) AND MIT AND "
+            "Unicode-3.0 AND Unicode-DFS-2016 AND Zlib",
+        )
 
     def test_pyo3_config_targets_exact_non_abi3_cpython(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -148,6 +152,134 @@ class PydanticCorePackTests(unittest.TestCase):
             parsed["commit_hash"], "6b00bc3880198600130e1cf62b8f8a93494488cc"
         )
         self.assertEqual(parsed["host"], "x86_64-pc-windows-msvc")
+
+    def test_rust_dependency_licenses_are_lock_bound_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            crate_root = root / "pydantic-core"
+            crate_root.mkdir()
+            registry_source = "registry+https://github.com/rust-lang/crates.io-index"
+            packages = []
+
+            def package(
+                name: str,
+                version: str,
+                expression: str,
+                *,
+                source: str | None,
+                license_name: str | None,
+                package_root: Path | None = None,
+            ) -> dict:
+                package_root = package_root or root / f"{name}-{version}"
+                package_root.mkdir(exist_ok=True)
+                manifest = package_root / "Cargo.toml"
+                manifest.write_text("[package]\n", encoding="utf-8")
+                if license_name is not None:
+                    (package_root / license_name).write_text(
+                        f"license for {name} {version}\n",
+                        encoding="utf-8",
+                    )
+                record = {
+                    "authors": [f"{name} authors"],
+                    "license": expression,
+                    "manifest_path": str(manifest),
+                    "name": name,
+                    "repository": f"https://example.invalid/{name}",
+                    "source": source,
+                    "version": version,
+                }
+                packages.append(record)
+                return record
+
+            root_package = package(
+                "pydantic-core",
+                "2.47.0",
+                "MIT",
+                source=None,
+                license_name="LICENSE",
+                package_root=crate_root,
+            )
+            helper = package(
+                "helper",
+                "1.0.0",
+                "MIT OR Apache-2.0",
+                source=registry_source,
+                license_name="LICENSE-APACHE",
+            )
+            fallback = package(
+                "r-efi",
+                "5.2.0",
+                "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+                source=registry_source,
+                license_name=None,
+            )
+            helper_checksum = "a" * 64
+            fallback_checksum = "b" * 64
+            lock_text = (
+                'version = 4\n\n'
+                '[[package]]\nname = "pydantic-core"\nversion = "2.47.0"\n\n'
+                '[[package]]\nname = "helper"\nversion = "1.0.0"\n'
+                f'source = "{registry_source}"\nchecksum = "{helper_checksum}"\n\n'
+                '[[package]]\nname = "r-efi"\nversion = "5.2.0"\n'
+                f'source = "{registry_source}"\nchecksum = "{fallback_checksum}"\n'
+            )
+            (crate_root / "Cargo.lock").write_text(lock_text, encoding="utf-8")
+            destination = root / "licenses"
+
+            generated, manifest = self.module._collect_rust_dependency_licenses(
+                crate_root,
+                {"packages": packages},
+                destination,
+            )
+            first_manifest = (destination / "rust-dependencies.json").read_bytes()
+            generated_again, manifest_again = self.module._collect_rust_dependency_licenses(
+                crate_root,
+                {"packages": packages},
+                destination,
+            )
+
+            self.assertEqual(manifest, manifest_again)
+            self.assertEqual(
+                first_manifest,
+                (destination / "rust-dependencies.json").read_bytes(),
+            )
+            self.assertEqual(
+                [path.relative_to(destination).as_posix() for path in generated],
+                [path.relative_to(destination).as_posix() for path in generated_again],
+            )
+            self.assertEqual(manifest["package_count"], 3)
+            self.assertEqual(manifest["root_package"], {"name": "pydantic-core", "version": "2.47.0"})
+            by_name = {record["name"]: record for record in manifest["packages"]}
+            self.assertIsNone(by_name[root_package["name"]]["checksum"])
+            self.assertEqual(by_name[helper["name"]]["checksum"], "a" * 64)
+            self.assertEqual(by_name[fallback["name"]]["selected_license"], "Apache-2.0")
+            self.assertTrue(by_name[fallback["name"]]["license_files"])
+            self.assertTrue(
+                all(
+                    not Path(file["path"]).is_absolute()
+                    for record in manifest["packages"]
+                    for file in record["license_files"]
+                )
+            )
+
+            helper["license"] = "GPL-3.0-only"
+            with self.assertRaisesRegex(RuntimeError, "unreviewed license"):
+                self.module._collect_rust_dependency_licenses(
+                    crate_root,
+                    {"packages": packages},
+                    root / "invalid-licenses",
+                )
+
+    def test_workflow_requires_complete_rust_dependency_license_evidence(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('GetEntry("licenses/rust-dependencies.json")', workflow)
+        self.assertIn("staticpython-rust-license-manifest", workflow)
+        self.assertIn("$metadata.toolchain.rust.cargo_lock_sha256", workflow)
+        self.assertIn("$metadata.toolchain.rust.package_count", workflow)
+        self.assertIn("$incompleteRustLicenses.Count -ne 0", workflow)
 
     def test_workflow_audits_released_files_per_smoke_record(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml").read_text(

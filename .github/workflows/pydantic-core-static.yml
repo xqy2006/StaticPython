@@ -185,6 +185,14 @@ jobs:
             if (-not $entry) { throw "Pack has no pack.json" }
             $reader = [IO.StreamReader]::new($entry.Open())
             try { $metadata = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+            $rustLicenseEntry = $archive.GetEntry("licenses/rust-dependencies.json")
+            if (-not $rustLicenseEntry) { throw "Pack has no Rust dependency license manifest" }
+            $rustLicenseReader = [IO.StreamReader]::new($rustLicenseEntry.Open())
+            try {
+              $rustLicense = $rustLicenseReader.ReadToEnd() | ConvertFrom-Json
+            } finally {
+              $rustLicenseReader.Dispose()
+            }
           } finally {
             $archive.Dispose()
           }
@@ -200,8 +208,39 @@ jobs:
           if ($metadata.toolchain.rust.target -ne $env:RUST_TARGET) {
             throw "Pack has the wrong Rust target"
           }
-          if ($metadata.license.status -ne 'complete' -or $metadata.license.expression -ne 'MIT') {
+          $expectedLicense = 'Apache-2.0 AND (Apache-2.0 WITH LLVM-exception) AND MIT AND Unicode-3.0 AND Unicode-DFS-2016 AND Zlib'
+          if ($metadata.license.status -ne 'complete' -or $metadata.license.expression -ne $expectedLicense) {
             throw "Pack license metadata is incomplete"
+          }
+          if (@($metadata.license.files) -notcontains 'licenses/rust-dependencies.json') {
+            throw "Pack license metadata omits the Rust dependency manifest"
+          }
+          if (
+            $rustLicense.schema_version -ne 1 -or
+            $rustLicense.kind -ne 'staticpython-rust-license-manifest' -or
+            $rustLicense.license_expression -ne $expectedLicense -or
+            $rustLicense.root_package.name -ne 'pydantic-core' -or
+            $rustLicense.root_package.version -ne $env:PYDANTIC_CORE_VERSION
+          ) {
+            throw "Rust dependency license manifest has the wrong identity"
+          }
+          if (
+            $rustLicense.package_count -ne @($rustLicense.packages).Count -or
+            $rustLicense.package_count -ne $metadata.toolchain.rust.package_count -or
+            $rustLicense.cargo_lock_sha256 -ne $metadata.toolchain.rust.cargo_lock_sha256
+          ) {
+            throw "Rust dependency license manifest does not match toolchain provenance"
+          }
+          $incompleteRustLicenses = @(
+            $rustLicense.packages | Where-Object {
+              [string]::IsNullOrWhiteSpace($_.license_expression) -or
+              [string]::IsNullOrWhiteSpace($_.selected_license) -or
+              @($_.license_files).Count -eq 0 -or
+              ($_.source -and [string]::IsNullOrWhiteSpace($_.checksum))
+            }
+          )
+          if ($incompleteRustLicenses.Count -ne 0) {
+            throw "Rust dependency license manifest has incomplete package records"
           }
           if ($metadata.verification.status -ne 'passed') {
             throw "Pack was promoted without passing verification"
