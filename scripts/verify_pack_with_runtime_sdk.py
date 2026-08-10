@@ -430,6 +430,30 @@ def validate_pack(root: Path, runtime: dict) -> dict:
         name = _validate_library_leaf(library, description=f"pack {owner} wholearchive library")
         if name.casefold() not in library_names:
             raise RuntimeError(f"pack {owner} wholearchive library is missing: {name}")
+    trusted_object_origins = metadata.get("trusted_object_origins", [])
+    if not isinstance(trusted_object_origins, list):
+        raise RuntimeError(f"pack {owner} trusted_object_origins must be a list")
+    seen_object_origins: set[tuple[str, str]] = set()
+    for record in trusted_object_origins:
+        if not isinstance(record, dict) or set(record) != {"library", "object"}:
+            raise RuntimeError(
+                f"pack {owner} trusted object origins must contain only library and object"
+            )
+        library = _validate_library_leaf(
+            record.get("library"),
+            description=f"pack {owner} trusted object library",
+        )
+        if library.casefold() not in library_names:
+            raise RuntimeError(f"pack {owner} trusted object library is missing: {library}")
+        object_name = record.get("object")
+        if not isinstance(object_name, str) or object_name.casefold() != "main.obj":
+            raise RuntimeError(
+                f"pack {owner} trusted object must currently be the exact basename main.obj"
+            )
+        key = (library.casefold(), object_name.casefold())
+        if key in seen_object_origins:
+            raise RuntimeError(f"pack {owner} repeats trusted object origin {library}({object_name})")
+        seen_object_origins.add(key)
     for key in ("system_libraries", "suppressed_system_libraries"):
         values = metadata.get(key, [])
         if not isinstance(values, list):

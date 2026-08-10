@@ -83,6 +83,7 @@ def _pack_metadata(root: Path, runtime: dict, *, name: str = "demo") -> dict:
         "wholearchive": [],
         "system_libraries": [],
         "suppressed_system_libraries": [],
+        "trusted_object_origins": [],
         "dependencies": [],
         "conflicts": [],
         "frozen_modules": [f"{name}.child"],
@@ -166,6 +167,33 @@ class VerifyPackWithRuntimeSDKTests(unittest.TestCase):
             json.dumps(metadata), encoding="utf-8"
         )
         with self.assertRaisesRegex(RuntimeError, "toolchain ABI"):
+            verifier.validate_pack(pack_root, runtime)
+
+    def test_trusted_object_origin_must_be_exact_and_pack_owned(self) -> None:
+        _runtime_root, runtime = self._make_runtime()
+        pack_root, metadata = self._make_pack(runtime)
+        (pack_root / "lib").mkdir()
+        (pack_root / "lib" / "owned.lib").write_bytes(b"library")
+        metadata["libraries"] = ["owned.lib"]
+        metadata["trusted_object_origins"] = [
+            {"library": "owned.lib", "object": "main.obj"},
+        ]
+        metadata["files"] = [
+            record
+            for record in _file_records(pack_root)
+            if record["path"] != verifier.PACK_METADATA_PATH
+        ]
+        (pack_root / verifier.PACK_METADATA_PATH).write_text(json.dumps(metadata), encoding="utf-8")
+        self.assertEqual(
+            verifier.validate_pack(pack_root, runtime)["trusted_object_origins"],
+            [{"library": "owned.lib", "object": "main.obj"}],
+        )
+
+        metadata["trusted_object_origins"] = [
+            {"library": "outside.lib", "object": "main.obj"},
+        ]
+        (pack_root / verifier.PACK_METADATA_PATH).write_text(json.dumps(metadata), encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "trusted object library is missing"):
             verifier.validate_pack(pack_root, runtime)
 
     def test_composition_and_namespace_parents_are_inferred(self) -> None:

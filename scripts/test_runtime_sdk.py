@@ -708,9 +708,16 @@ struct _inittab _PyImport_Inittab[] = {
             python_packages=["demo"],
             top_level_import_names=["demo"],
             materialized_paths=["Lib/demo"],
+            python_link_dependencies_release_x64=["demo-native.lib"],
+            trusted_object_origins=[
+                {"library": "demo-native.lib", "object": "MAIN.OBJ"},
+            ],
             license_expression="MIT",
             license_files=["Lib/demo/LICENSE.txt"],
         )
+        native_output = self.root / "PCbuild" / "amd64"
+        native_output.mkdir(parents=True)
+        (native_output / "demo-native.lib").write_bytes(b"library")
         output = self.root / "dist"
         archive_path = build.export_library_pack(
             self.root,
@@ -736,12 +743,29 @@ struct _inittab _PyImport_Inittab[] = {
             self.assertEqual(metadata["license"]["status"], "complete")
             self.assertEqual(metadata["verification"]["status"], "passed")
             self.assertEqual(
+                metadata["trusted_object_origins"],
+                [{"library": "demo-native.lib", "object": "main.obj"}],
+            )
+            self.assertEqual(
                 metadata["verification"]["smoke_tests"],
                 [{"name": "import-demo", "kind": "import", "status": "passed"}],
             )
             self.assertIn('"demo"', descriptor)
             self.assertIn("staticpython_pack_demo_resource_", descriptor)
             self.assertNotIn('_Py_M__other', descriptor)
+
+    def test_trusted_object_origin_must_name_a_pack_owned_library(self) -> None:
+        integration = libs.LibraryIntegration(
+            name="demo",
+            trusted_object_origins=[
+                {"library": "outside.lib", "object": "main.obj"},
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeError, "not owned by the pack"):
+            build._integration_trusted_object_origins(
+                integration,
+                [{"logical_name": "owned.lib"}],
+            )
 
     def test_prepare_hooks_finalize_custom_pypi_license_metadata(self) -> None:
         source_root = self.root / "source"
