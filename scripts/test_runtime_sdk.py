@@ -1397,6 +1397,95 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertEqual(by_name["tomli"].top_level_import_names, ["tomli"])
         self.assertTrue(by_name["exceptiongroup"].auto_resolve_dependencies)
 
+    def test_jwt_legacy_patch_rules_are_strict_and_idempotent(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        integrations = libs.load_integration_definitions(
+            REPO_ROOT / "Lib",
+            library_catalog=config["third_party_library_catalog"],
+        )
+        integration = next(item for item in integrations if item.name == "jwt")
+        self.assertIn("inspect.signature(jwt.decode)", integration.smoke_tests[0]["code"])
+
+        legacy_root = self.root / "legacy"
+        legacy_module = legacy_root / "Lib" / "jwt" / "__init__.py"
+        legacy_module.parent.mkdir(parents=True)
+        legacy_module.write_text(
+            """import hmac
+from collections import Mapping
+
+signing_methods = {
+    'HS256': lambda msg, key: hmac.new(key, msg, None).digest(),
+    'HS384': lambda msg, key: hmac.new(key, msg, None).digest(),
+    'HS512': lambda msg, key: hmac.new(key, msg, None).digest(),
+}
+
+def constant_time_compare(val1, val2):
+    result = 0
+    for x, y in zip(val1, val2):
+        result |= ord(x) ^ ord(y)
+    return result == 0
+
+def base64url_encode(input):
+    return base64.urlsafe_b64encode(input).replace('=', '')
+""",
+            encoding="utf-8",
+        )
+        integration.release_version = "0.1.6"
+        legacy_context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=legacy_root,
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=legacy_root / "downloads",
+            work_cache_root=legacy_root / "work",
+            asset_overlay_root=REPO_ROOT / "assets" / "overlay",
+            log=lambda _message: None,
+        )
+        libs.run_pre_patch_hooks([integration], legacy_context)
+        libs.run_pre_patch_hooks([integration], legacy_context)
+        legacy_text = legacy_module.read_text(encoding="utf-8")
+        self.assertIn("from collections.abc import Mapping", legacy_text)
+        self.assertIn("def _force_bytes(value):", legacy_text)
+        self.assertEqual(legacy_text.count("hmac.new(_force_bytes(key), _force_bytes(msg),"), 3)
+        self.assertIn("x if isinstance(x, int) else ord(x)", legacy_text)
+        self.assertIn(".replace(b'=', b'').decode('ascii')", legacy_text)
+
+        positional_root = self.root / "positional"
+        api_jws = positional_root / "Lib" / "jwt" / "api_jws.py"
+        api_jwt = positional_root / "Lib" / "jwt" / "api_jwt.py"
+        api_jws.parent.mkdir(parents=True)
+        api_jws.write_text("from collections import Mapping\n", encoding="utf-8")
+        api_jwt.write_text(
+            "from collections import Mapping\n\n"
+            "decoded = super(PyJWT, self).decode(jwt, key, algorithms, options,\n"
+            + (" " * 44)
+            + "**kwargs)\n",
+            encoding="utf-8",
+        )
+        integration.release_version = "1.5.1"
+        positional_context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=positional_root,
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=positional_root / "downloads",
+            work_cache_root=positional_root / "work",
+            asset_overlay_root=REPO_ROOT / "assets" / "overlay",
+            log=lambda _message: None,
+        )
+        libs.run_pre_patch_hooks([integration], positional_context)
+        libs.run_pre_patch_hooks([integration], positional_context)
+        self.assertIn(
+            "jwt, key=key, algorithms=algorithms, options=options, **kwargs",
+            api_jwt.read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "from collections.abc import Mapping",
+            api_jws.read_text(encoding="utf-8"),
+        )
+
     def test_default_integration_smoke_executes_real_import(self) -> None:
         integration = libs.LibraryIntegration(name="demo", top_level_import_names=["demo.api"])
         result = {
