@@ -67,7 +67,7 @@ TCL9_COMPAT_MARKER = (
     "https://core.tcl-lang.org/tcl/wiki?name=Migrating+C+extensions+to+Tcl+9"
 )
 
-TCL9_COMPAT_REPLACEMENTS = (
+TCL9_COMPAT_PREAMBLE_REPLACEMENTS = (
     (
         "#define USE_DEPRECATED_TOMMATH_API 1\n"
         "#endif\n\n"
@@ -81,6 +81,20 @@ TCL9_COMPAT_REPLACEMENTS = (
         "#endif\n\n"
         "#if !(defined(MS_WINDOWS) || defined(__CYGWIN__))",
     ),
+    (
+        "#include <tclTomMath.h>\n\n"
+        "#if !(defined(MS_WINDOWS) || defined(__CYGWIN__))",
+        "#include <tclTomMath.h>\n\n"
+        f"// {TCL9_COMPAT_MARKER}\n"
+        "#ifndef TCL_SIZE_MAX\n"
+        "typedef int Tcl_Size;\n"
+        "#define TCL_SIZE_MAX INT_MAX\n"
+        "#endif\n\n"
+        "#if !(defined(MS_WINDOWS) || defined(__CYGWIN__))",
+    ),
+)
+
+TCL9_COMPAT_REPLACEMENTS = (
     ("{\n    int len;\n#if USE_TCL_UNICODE", "{\n    Tcl_Size len;\n#if USE_TCL_UNICODE"),
     (
         "/**** Tkapp Object ****/\n\n#ifndef WITH_APPINIT",
@@ -248,16 +262,45 @@ def _require_supported_cpython(context) -> None:
 def _patch_tcl9_compat_text(text: str) -> str:
     """Strictly backport CPython's gh-112672 Tcl 9 fix to the 3.11 source."""
 
+    patched_preambles = tuple(
+        replacement for _, replacement in TCL9_COMPAT_PREAMBLE_REPLACEMENTS
+    )
     patched_anchors = tuple(replacement for _, replacement in TCL9_COMPAT_REPLACEMENTS)
     marker_present = TCL9_COMPAT_MARKER in text
+    preamble_present = [replacement in text for replacement in patched_preambles]
     patched_present = [replacement in text for replacement in patched_anchors]
-    if marker_present or any(patched_present):
-        if not marker_present or not all(patched_present):
+    if marker_present or any(preamble_present) or any(patched_present):
+        if (
+            not marker_present
+            or sum(preamble_present) != 1
+            or not all(patched_present)
+        ):
             raise RuntimeError("CPython 3.11 _tkinter Tcl 9 compatibility patch is partial")
-        stale = [anchor for anchor, _ in TCL9_COMPAT_REPLACEMENTS if anchor in text]
+        stale = [
+            anchor
+            for anchor, _ in (
+                TCL9_COMPAT_PREAMBLE_REPLACEMENTS + TCL9_COMPAT_REPLACEMENTS
+            )
+            if anchor in text
+        ]
         if stale:
             raise RuntimeError("CPython 3.11 _tkinter Tcl 9 compatibility patch left stale anchors")
         return text
+
+    preamble_matches = [
+        (anchor, replacement, text.count(anchor))
+        for anchor, replacement in TCL9_COMPAT_PREAMBLE_REPLACEMENTS
+    ]
+    total_preamble_matches = sum(count for _, _, count in preamble_matches)
+    if total_preamble_matches != 1:
+        raise RuntimeError(
+            "CPython 3.11 _tkinter Tcl 9 compatibility preamble expected one "
+            f"supported layout, found {total_preamble_matches}"
+        )
+    for anchor, replacement, matches in preamble_matches:
+        if matches == 1:
+            text = text.replace(anchor, replacement, 1)
+            break
 
     for anchor, replacement in TCL9_COMPAT_REPLACEMENTS:
         matches = text.count(anchor)
@@ -587,12 +630,23 @@ def _patch_tkappinit_text(text: str) -> str:
     )
     text = text[: init_match.end()] + restrict + text[init_match.end() :]
 
-    tk_pattern = re.compile(
-        r"(?m)^(\s*)if \((?:Tk_Init|Tkinter_TkInit)\s*\(interp\) == TCL_ERROR\) \{\r?\n"
-        r"\1    return TCL_ERROR;\r?\n"
-        r"\1\}"
+    tk_patterns = (
+        re.compile(
+            r"(?m)^(\s*)if \((?:Tk_Init|Tkinter_TkInit)\s*\(interp\) == TCL_ERROR\) \{\r?\n"
+            r"\1    return TCL_ERROR;\r?\n"
+            r"\1\}"
+        ),
+        re.compile(
+            r"(?m)^(\s*)if \((?:Tk_Init|Tkinter_TkInit)\s*\(interp\) == TCL_ERROR\) \{\r?\n"
+            r"#ifdef TKINTER_PROTECT_LOADTK\r?\n"
+            r"\1    tk_load_failed = 1;\r?\n"
+            r"\1    Tcl_SetVar\(interp, \"_tkinter_tk_failed\", \"1\", TCL_GLOBAL_ONLY\);\r?\n"
+            r"#endif\r?\n"
+            r"\1    return TCL_ERROR;\r?\n"
+            r"\1\}"
+        ),
     )
-    tk_matches = list(tk_pattern.finditer(text))
+    tk_matches = [match for pattern in tk_patterns for match in pattern.finditer(text)]
     if len(tk_matches) != 1:
         raise RuntimeError(
             f"tkappinit.c completed Tk_Init block expected once, found {len(tk_matches)}"

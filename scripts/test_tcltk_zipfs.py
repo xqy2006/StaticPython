@@ -167,22 +167,24 @@ class TclTkZipfsTests(unittest.TestCase):
         self.assertGreater(zip_path.stat().st_size, 100)
 
     def test_cpython_311_tcl9_backport_is_strict_and_idempotent(self) -> None:
-        legacy = "\n/* next strict anchor */\n".join(
-            anchor for anchor, _ in tkinter_setup.TCL9_COMPAT_REPLACEMENTS
-        )
-        patched = tkinter_setup._patch_tcl9_compat_text(legacy)
-        self.assertIn(tkinter_setup.TCL9_COMPAT_MARKER, patched)
-        for anchor, replacement in tkinter_setup.TCL9_COMPAT_REPLACEMENTS:
-            self.assertNotIn(anchor, patched)
-            self.assertIn(replacement, patched)
-        self.assertEqual(tkinter_setup._patch_tcl9_compat_text(patched), patched)
+        for preamble_index in range(len(tkinter_setup.TCL9_COMPAT_PREAMBLE_REPLACEMENTS)):
+            legacy = "\n/* next strict anchor */\n".join(
+                [tkinter_setup.TCL9_COMPAT_PREAMBLE_REPLACEMENTS[preamble_index][0]]
+                + [anchor for anchor, _ in tkinter_setup.TCL9_COMPAT_REPLACEMENTS]
+            )
+            patched = tkinter_setup._patch_tcl9_compat_text(legacy)
+            self.assertIn(tkinter_setup.TCL9_COMPAT_MARKER, patched)
+            for anchor, replacement in tkinter_setup.TCL9_COMPAT_REPLACEMENTS:
+                self.assertNotIn(anchor, patched)
+                self.assertIn(replacement, patched)
+            self.assertEqual(tkinter_setup._patch_tcl9_compat_text(patched), patched)
 
         partial = patched.replace("    Tcl_Size len;", "    int len;", 1)
         with self.assertRaisesRegex(RuntimeError, "compatibility patch is partial"):
             tkinter_setup._patch_tcl9_compat_text(partial)
 
-        ambiguous = legacy + "\n" + tkinter_setup.TCL9_COMPAT_REPLACEMENTS[0][0]
-        with self.assertRaisesRegex(RuntimeError, "expected once, found 2"):
+        ambiguous = legacy + "\n" + tkinter_setup.TCL9_COMPAT_PREAMBLE_REPLACEMENTS[0][0]
+        with self.assertRaisesRegex(RuntimeError, "preamble expected one supported layout"):
             tkinter_setup._patch_tcl9_compat_text(ambiguous)
 
     def test_cpython_discovery_patch_is_strict_and_idempotent(self) -> None:
@@ -286,6 +288,35 @@ Tcl_AppInit(Tcl_Interp *interp)
         patched = tkinter_setup._patch_tkappinit_text(source)
         self.assertLess(
             patched.index("Tkinter_TkInit(interp)"),
+            patched.index("StaticPython_TkinterZipfsRestrictTkPaths(interp)"),
+        )
+        self.assertEqual(tkinter_setup._patch_tkappinit_text(patched), patched)
+
+    def test_tcl_appinit_supports_cpython_311_protected_tk_init(self) -> None:
+        source = '''#include "tkinter.h"
+
+int
+Tcl_AppInit(Tcl_Interp *interp)
+{
+    if (Tcl_Init (interp) == TCL_ERROR)
+        return TCL_ERROR;
+    if (Tk_Init(interp) == TCL_ERROR) {
+#ifdef TKINTER_PROTECT_LOADTK
+        tk_load_failed = 1;
+        Tcl_SetVar(interp, "_tkinter_tk_failed", "1", TCL_GLOBAL_ONLY);
+#endif
+        return TCL_ERROR;
+    }
+    return TCL_OK;
+}
+'''
+        patched = tkinter_setup._patch_tkappinit_text(source)
+        self.assertLess(
+            patched.index("Tk_Init(interp)"),
+            patched.index("StaticPython_TkinterZipfsRestrictTkPaths(interp)"),
+        )
+        self.assertLess(
+            patched.index("Tcl_SetVar(interp, \"_tkinter_tk_failed\""),
             patched.index("StaticPython_TkinterZipfsRestrictTkPaths(interp)"),
         )
         self.assertEqual(tkinter_setup._patch_tkappinit_text(patched), patched)
