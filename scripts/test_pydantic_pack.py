@@ -79,7 +79,7 @@ class PydanticPackTests(unittest.TestCase):
                 "pydantic": "2.13.4",
                 "pydantic_core": "2.46.4",
                 "typing_extensions": "4.16.0",
-                "typing_inspection": "0.4.2",
+                "typing_inspection": "0.4.3",
             },
         )
         self.assertNotIn(
