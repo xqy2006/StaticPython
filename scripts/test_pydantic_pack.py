@@ -139,6 +139,22 @@ class PydanticPackTests(unittest.TestCase):
         self.assertIn("pydantic-static-2.13.4-${{ matrix.python_tag }}", job)
         self.assertNotIn("pydantic-static-2.13.4-cp313", job)
 
+    def test_workflow_reaudits_the_uploaded_pydantic_verifier_pe(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml"
+        ).read_text(encoding="utf-8")
+        job = workflow.split("  sdk-linked-pydantic:\n", 1)[1]
+
+        self.assertIn("staticpython-pack-verify.exe", job)
+        self.assertIn("$report.pe_audit.executable_sha256", job)
+        self.assertIn("$report.pe_audit.map_sha256", job)
+        self.assertIn("@($report.pe_audit.main_object_records).Count -ne 0", job)
+        self.assertIn("dumpbin /NOLOGO /DEPENDENTS $exePath", job)
+        self.assertIn(
+            "Compare-Object $reportedDependencies $observedDependencies",
+            job,
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
