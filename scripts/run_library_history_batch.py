@@ -75,12 +75,18 @@ def _validate_verifier_report(
     packs = report.get("packs")
     if not isinstance(packs, list) or not packs:
         raise RuntimeError("SDK-linked pack verifier must describe at least one pack")
+    verified_packs = [
+        {
+            "name": record["name"],
+            "version": record["version"],
+            "sha256": record["sha256"].lower(),
+        }
+        for record in packs
+    ]
     matching_packs = [
         record
-        for record in packs
-        if isinstance(record, dict)
-        and record.get("name") == library
-        and record.get("version") == version
+        for record in verified_packs
+        if record["name"] == library and record["version"] == version
     ]
     if len(matching_packs) != 1:
         raise RuntimeError(
@@ -89,18 +95,10 @@ def _validate_verifier_report(
         )
     root_pack = matching_packs[0]
     expected_pack_sha = history_evidence.file_sha256(pack_path)
-    expected_pack = {"name": library, "version": version}
-    for key, expected in expected_pack.items():
-        if root_pack.get(key) != expected:
-            raise RuntimeError(
-                f"SDK-linked pack verifier pack {key} mismatch: "
-                f"expected {expected!r}, got {root_pack.get(key)!r}"
-            )
-    provisional_pack_sha = root_pack.get("sha256")
-    if not isinstance(provisional_pack_sha, str) or not SHA256_PATTERN.fullmatch(
-        provisional_pack_sha
-    ):
-        raise RuntimeError("SDK-linked pack verifier has no provisional pack SHA-256")
+    provisional_pack_sha = root_pack["sha256"]
+    verified_packs.sort(
+        key=lambda pack: (pack["name"].casefold(), pack["version"], pack["sha256"])
+    )
     pe_audit = report.get("pe_audit")
     dependencies = pe_audit.get("dependencies") if isinstance(pe_audit, dict) else None
     if (
@@ -131,7 +129,8 @@ def _validate_verifier_report(
         "runtime_abi": runtime["runtime_abi"],
         "runtime_sdk_sha256": runtime_sdk_sha256,
         "pack_sha256": expected_pack_sha,
-        "provisional_pack_sha256": provisional_pack_sha.lower(),
+        "provisional_pack_sha256": provisional_pack_sha,
+        "verified_packs": verified_packs,
         "executable_sha256": executable_sha.lower(),
         "pe_dependencies": dependencies,
         "smoke_test_count": len(smoke_tests),

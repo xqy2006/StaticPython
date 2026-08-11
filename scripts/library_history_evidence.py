@@ -278,10 +278,37 @@ def validate_manifest(manifest: dict, contract: dict) -> str:
     selection = manifest.get("selection")
     if not isinstance(selection, dict):
         raise RuntimeError("history manifest has no selection record")
+    selection_mode = selection.get("mode")
+    selected_libraries = None
+    smoke_library = None
+    smoke_python_series = None
+    if selection_mode == "full-history":
+        if any(
+            selection.get(field) is not None
+            for field in ("libraries", "smoke_library", "smoke_python_series")
+        ):
+            raise RuntimeError("full-history selection must not contain filters")
+    elif selection_mode == "targeted":
+        selected_libraries = selection.get("libraries")
+        if any(
+            selection.get(field) is not None
+            for field in ("smoke_library", "smoke_python_series")
+        ):
+            raise RuntimeError("targeted selection must not contain smoke filters")
+    elif selection_mode == "smoke":
+        if selection.get("libraries") is not None:
+            raise RuntimeError("smoke selection must not contain targeted libraries")
+        smoke_library = selection.get("smoke_library")
+        smoke_python_series = selection.get("smoke_python_series")
+    else:
+        raise RuntimeError(
+            f"history manifest has invalid selection mode: {selection_mode!r}"
+        )
     selected = history_batches.candidate_combinations(
         contract,
-        smoke_library=selection.get("smoke_library"),
-        smoke_python_series=selection.get("smoke_python_series"),
+        selected_libraries=selected_libraries,
+        smoke_library=smoke_library,
+        smoke_python_series=smoke_python_series,
     )
     selected_identities = {
         (

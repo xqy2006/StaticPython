@@ -341,6 +341,21 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
         )
         self.assertEqual(result["pack_sha256"], pack_sha)
         self.assertEqual(result["provisional_pack_sha256"], provisional_sha)
+        self.assertEqual(
+            result["verified_packs"],
+            [
+                {
+                    "name": "demo",
+                    "version": "1.0",
+                    "sha256": provisional_sha,
+                },
+                {
+                    "name": "dependency",
+                    "version": "2.0",
+                    "sha256": "b" * 64,
+                },
+            ],
+        )
         report["pe_audit"]["dependencies"] = []
         with self.assertRaisesRegex(RuntimeError, "PE dependency"):
             runner._validate_verifier_report(
@@ -353,6 +368,17 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
                 )
 
         report["pe_audit"]["dependencies"] = ["KERNEL32.dll"]
+        report["packs"].append(dict(report["packs"][1]))
+        with self.assertRaisesRegex(RuntimeError, "2 provisional records"):
+            runner._validate_verifier_report(
+                report,
+                runtime_sdk_sha256=runtime_sha,
+                pack_path=pack,
+                library="demo",
+                version="1.0",
+                python_version="3.13.14",
+            )
+        report["packs"].pop()
         report["promotion"]["packs"][0]["final_sha256"] = "e" * 64
         with self.assertRaisesRegex(RuntimeError, "recorded pack promotion evidence"):
             runner._validate_verifier_report(
@@ -363,7 +389,6 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
                 version="1.0",
                 python_version="3.13.14",
             )
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

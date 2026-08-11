@@ -286,6 +286,21 @@
         "source_provider": "pypi"
       },
       {
+        "name": "exceptiongroup",
+        "overlay_entries": [
+          "Lib/exceptiongroup"
+        ],
+        "source_provider": "pypi",
+        "license_expression": "MIT",
+        "smoke_tests": [
+          {
+            "name": "exception-group-shape",
+            "kind": "inline",
+            "code": "from exceptiongroup import ExceptionGroup\n\ngroup = ExceptionGroup('wave', [ValueError('first'), TypeError('second')])\nassert group.message == 'wave'\nassert [type(item) for item in group.exceptions] == [ValueError, TypeError]"
+          }
+        ]
+      },
+      {
         "name": "executing",
         "overlay_entries": [
           "Lib/executing"
@@ -508,6 +523,179 @@
           "Lib/jsonpickle"
         ],
         "source_provider": "pypi"
+      },
+      {
+        "name": "jwt",
+        "project_name": "PyJWT",
+        "overlay_entries": [
+          "Lib/jwt"
+        ],
+        "source_provider": "pypi",
+        "license_expression": "MIT",
+        "license_sources": [
+          {
+            "filename": "LICENSE-PyJWT-MIT",
+            "url": "https://raw.githubusercontent.com/jpadilla/pyjwt/0.4.1/LICENSE",
+            "sha256": "b9f95c496bd9dba93a2b6ee6382f4692918e8648f2d9dab03e93457f8b71ac4c"
+          }
+        ],
+        "patch_rules": [
+          {
+            "package": ">=0.1.1,<0.1.6",
+            "path": "Lib/jwt/__init__.py",
+            "replacements": [
+              {
+                "old": "import hmac\n\ntry:\n    import json",
+                "new": "import hmac\n\ntry:\n    unicode\nexcept NameError:\n    unicode = str\n\n\ndef _force_bytes(value):\n    if isinstance(value, str):\n        return value.encode('utf-8')\n    return value\n\ntry:\n    import json",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": "==0.1.6",
+            "path": "Lib/jwt/__init__.py",
+            "replacements": [
+              {
+                "old": "import hmac\n\nfrom datetime import datetime",
+                "new": "import hmac\n\ntry:\n    unicode\nexcept NameError:\n    unicode = str\n\n\ndef _force_bytes(value):\n    if isinstance(value, str):\n        return value.encode('utf-8')\n    return value\n\nfrom datetime import datetime",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": "==0.1.7",
+            "path": "Lib/jwt/__init__.py",
+            "replacements": [
+              {
+                "old": "from Crypto.Signature import PKCS1_v1_5\nfrom Crypto.Hash import SHA256\nfrom Crypto.Hash import SHA384\nfrom Crypto.Hash import SHA512",
+                "new": "try:\n    from Crypto.Signature import PKCS1_v1_5\n    from Crypto.Hash import SHA256\n    from Crypto.Hash import SHA384\n    from Crypto.Hash import SHA512\nexcept ImportError:\n    PKCS1_v1_5 = SHA256 = SHA384 = SHA512 = None",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": ">=0.1.1,<0.1.7",
+            "path": "Lib/jwt/__init__.py",
+            "replacements": [
+              {
+                "old": "hmac.new(key, msg,",
+                "new": "hmac.new(_force_bytes(key), _force_bytes(msg),",
+                "count": 3
+              },
+              {
+                "old": "def base64url_encode(input):\n    return base64.urlsafe_b64encode(input).replace('=', '')",
+                "new": "def base64url_encode(input):\n    input = _force_bytes(input)\n    return base64.urlsafe_b64encode(input).replace(b'=', b'').decode('ascii')",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": "==0.1.1",
+            "path": "Lib/jwt/__init__.py",
+            "replacements": [
+              {
+                "old": "if not signature == signing_methods[header['alg']](signing_input, key):",
+                "new": "if not signature == _force_bytes(signing_methods[header['alg']](signing_input, key)):",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": "==0.1.6",
+            "path": "Lib/jwt/__init__.py",
+            "replacements": [
+              {
+                "old": "result |= ord(x) ^ ord(y)",
+                "new": "result |= (x if isinstance(x, int) else ord(x)) ^ (y if isinstance(y, int) else ord(y))",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": ">=0.1.6,<0.4.2",
+            "path": "Lib/jwt/__init__.py",
+            "replacements": [
+              {
+                "old": "from collections import Mapping",
+                "new": "from collections.abc import Mapping",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": ">=0.4.2,<1.3",
+            "path": "Lib/jwt/api.py",
+            "replacements": [
+              {
+                "old": "from collections import Mapping",
+                "new": "from collections.abc import Mapping",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": ">=1.3,<1.6",
+            "path": "Lib/jwt/api_jws.py",
+            "replacements": [
+              {
+                "old": "from collections import Mapping",
+                "new": "from collections.abc import Mapping",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": ">=1.3,<1.6",
+            "path": "Lib/jwt/api_jwt.py",
+            "replacements": [
+              {
+                "old": "from collections import Mapping",
+                "new": "from collections.abc import Mapping",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": ">=1.6,<1.7",
+            "path": "Lib/jwt/api_jws.py",
+            "replacements": [
+              {
+                "old": "from collections import Mapping",
+                "new": "from collections.abc import Mapping",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": ">=1.6,<1.7",
+            "path": "Lib/jwt/api_jwt.py",
+            "replacements": [
+              {
+                "old": "from collections import Iterable, Mapping",
+                "new": "from collections.abc import Iterable, Mapping",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": "==1.5.1",
+            "path": "Lib/jwt/api_jwt.py",
+            "replacements": [
+              {
+                "old": "decoded = super(PyJWT, self).decode(jwt, key, algorithms, options,\n                                            **kwargs)",
+                "new": "decoded = super(PyJWT, self).decode(\n            jwt, key=key, algorithms=algorithms, options=options, **kwargs\n        )",
+                "count": 1
+              }
+            ]
+          }
+        ],
+        "smoke_tests": [
+          {
+            "name": "hs256-round-trip",
+            "kind": "inline",
+            "code": "import inspect\nimport jwt\n\nkey = '0123456789abcdef0123456789abcdef'\ntoken = jwt.encode({'sub': 'staticpython', 'admin': True}, key, algorithm='HS256')\ndecode_options = {}\nif 'algorithms' in inspect.signature(jwt.decode).parameters:\n    decode_options['algorithms'] = ['HS256']\npayload = jwt.decode(token, key, **decode_options)\nassert payload == {'sub': 'staticpython', 'admin': True}"
+          }
+        ]
       },
       {
         "name": "jupyter_core",
@@ -1139,6 +1327,21 @@
         "source_provider": "pypi"
       },
       {
+        "name": "tomli",
+        "overlay_entries": [
+          "Lib/tomli"
+        ],
+        "source_provider": "pypi",
+        "license_expression": "MIT",
+        "smoke_tests": [
+          {
+            "name": "toml-loads",
+            "kind": "inline",
+            "code": "import tomli\n\npayload = tomli.loads('title = \"StaticPython\"\\n[pack]\\nenabled = true\\n')\nassert payload == {'title': 'StaticPython', 'pack': {'enabled': True}}"
+          }
+        ]
+      },
+      {
         "name": "tomlkit",
         "overlay_entries": [
           "Lib/tomlkit"
@@ -1427,6 +1630,7 @@
         "dotenv",
         "email_validator",
         "et_xmlfile",
+        "exceptiongroup",
         "executing",
         "faker",
         "fastjsonschema",
@@ -1464,6 +1668,7 @@
         "json5",
         "jsonpickle",
         "jsonschema",
+        "jwt",
         "jupyter_client",
         "jupyter_core",
         "jupyter_events",
@@ -1577,6 +1782,7 @@
         "text_unidecode",
         "threadpoolctl",
         "tinycss2",
+        "tomli",
         "tomlkit",
         "tornado",
         "tqdm",

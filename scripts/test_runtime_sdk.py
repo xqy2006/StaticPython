@@ -46,6 +46,15 @@ assert _LICENSE_AUDIT_SPEC is not None and _LICENSE_AUDIT_SPEC.loader is not Non
 audit_library_licenses = importlib.util.module_from_spec(_LICENSE_AUDIT_SPEC)
 _LICENSE_AUDIT_SPEC.loader.exec_module(audit_library_licenses)
 
+_RESOURCE_SCAN_SPEC = importlib.util.spec_from_file_location(
+    "staticpython_scan_library_resources",
+    REPO_ROOT / "scripts" / "scan_library_resources.py",
+)
+assert _RESOURCE_SCAN_SPEC is not None and _RESOURCE_SCAN_SPEC.loader is not None
+scan_library_resources = importlib.util.module_from_spec(_RESOURCE_SCAN_SPEC)
+sys.modules[_RESOURCE_SCAN_SPEC.name] = scan_library_resources
+_RESOURCE_SCAN_SPEC.loader.exec_module(scan_library_resources)
+
 
 def _passed_pe_audit() -> dict:
     return {
@@ -198,6 +207,36 @@ class RuntimeSDKTests(unittest.TestCase):
         self.assertIn("--pack-runtime-sdk $runtimeSdk[0].FullName", daily)
         self.assertIn("python .\\pack_evidence.py --report $reportPath", daily)
         self.assertIn("staticpython-pack-verify-report.json", daily)
+
+    def test_verifier_applies_profile_version_overrides(self) -> None:
+        profile = {
+            "core_libraries": ["core-demo"],
+            "third_party_libraries": ["third-demo"],
+            "core_library_version_overrides": {"core-demo": "1.2.3"},
+            "third_party_library_version_overrides": {"third-demo": "4.5.6"},
+        }
+        with mock.patch.object(
+            staticpython_verify,
+            "load_integrations",
+            side_effect=(["core"], ["third"]),
+        ) as load_integrations:
+            core, third_party = staticpython_verify.load_profile_integrations(
+                self.root,
+                {},
+                profile,
+                libs.Version("3.12.13"),
+            )
+
+        self.assertEqual(core, ["core"])
+        self.assertEqual(third_party, ["third"])
+        self.assertEqual(
+            load_integrations.call_args_list[0].kwargs["version_overrides"],
+            {"core-demo": "1.2.3"},
+        )
+        self.assertEqual(
+            load_integrations.call_args_list[1].kwargs["version_overrides"],
+            {"third-demo": "4.5.6"},
+        )
 
     def test_runtime_sdk_links_pythoncore_registry_and_security_apis(self) -> None:
         manifest = build.load_manifest()
@@ -1507,14 +1546,17 @@ struct _inittab _PyImport_Inittab[] = {
             "dateutil": "Apache-2.0 OR BSD-3-Clause",
             "dearpygui": "MIT",
             "dialite": "BSD-2-Clause",
+            "exceptiongroup": "MIT",
             "fsspec": "BSD-3-Clause",
             "glfw": "Zlib",
+            "jwt": "MIT",
             "mypy_extensions": "MIT",
             "pscript": "BSD-2-Clause",
             "pyglet": "BSD-3-Clause",
             "pystray": "LGPL-3.0-only",
             "socks": "BSD-3-Clause",
             "text_unidecode": "GPL-1.0-or-later OR Artistic-1.0-Perl",
+            "tomli": "MIT",
         }
         for name, expression in expected.items():
             with self.subTest(name=name):
@@ -1522,6 +1564,7 @@ struct _inittab _PyImport_Inittab[] = {
 
         fallback_sources = {
             "humanize",
+            "jwt",
             "loguru",
             "tqdm",
             "ua_parser_builtins",
@@ -1800,6 +1843,211 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertEqual(
             dash_module.LIBRARY_INTEGRATION.dependency_constraints,
             {"janus": ">=1.0.0"},
+        )
+
+    def test_resource_scanner_keeps_root_library_catalog(self) -> None:
+        profile_name, config, profile = scan_library_resources.read_config(
+            REPO_ROOT / "config.json",
+            "full",
+        )
+        self.assertEqual(profile_name, "full")
+        catalog = profile.get(
+            "third_party_library_catalog",
+            config.get("third_party_library_catalog"),
+        )
+        integrations = libs.load_integration_definitions(
+            REPO_ROOT / "Lib",
+            library_catalog=catalog,
+        )
+        by_name = {integration.name: integration for integration in integrations}
+        self.assertEqual(by_name["jwt"].project_name, "PyJWT")
+        self.assertEqual(by_name["tomli"].top_level_import_names, ["tomli"])
+        self.assertTrue(by_name["exceptiongroup"].auto_resolve_dependencies)
+
+    def test_jwt_legacy_patch_rules_are_strict_and_idempotent(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        integrations = libs.load_integration_definitions(
+            REPO_ROOT / "Lib",
+            library_catalog=config["third_party_library_catalog"],
+        )
+        integration = next(item for item in integrations if item.name == "jwt")
+        self.assertIn("inspect.signature(jwt.decode)", integration.smoke_tests[0]["code"])
+        self.assertEqual(
+            integration.license_sources,
+            [
+                {
+                    "filename": "LICENSE-PyJWT-MIT",
+                    "url": "https://raw.githubusercontent.com/jpadilla/pyjwt/0.4.1/LICENSE",
+                    "sha256": "b9f95c496bd9dba93a2b6ee6382f4692918e8648f2d9dab03e93457f8b71ac4c",
+                }
+            ],
+        )
+
+        legacy_root = self.root / "legacy"
+        legacy_module = legacy_root / "Lib" / "jwt" / "__init__.py"
+        legacy_module.parent.mkdir(parents=True)
+        legacy_module.write_text(
+            """import hmac
+
+from datetime import datetime
+from calendar import timegm
+from collections import Mapping
+
+signing_methods = {
+    'HS256': lambda msg, key: hmac.new(key, msg, None).digest(),
+    'HS384': lambda msg, key: hmac.new(key, msg, None).digest(),
+    'HS512': lambda msg, key: hmac.new(key, msg, None).digest(),
+}
+
+def constant_time_compare(val1, val2):
+    result = 0
+    for x, y in zip(val1, val2):
+        result |= ord(x) ^ ord(y)
+    return result == 0
+
+def base64url_encode(input):
+    return base64.urlsafe_b64encode(input).replace('=', '')
+""",
+            encoding="utf-8",
+        )
+        integration.release_version = "0.1.6"
+        legacy_context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=legacy_root,
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=legacy_root / "downloads",
+            work_cache_root=legacy_root / "work",
+            asset_overlay_root=REPO_ROOT / "assets" / "overlay",
+            log=lambda _message: None,
+        )
+        libs.run_pre_patch_hooks([integration], legacy_context)
+        legacy_once = legacy_module.read_text(encoding="utf-8")
+        libs.run_pre_patch_hooks([integration], legacy_context)
+        legacy_text = legacy_module.read_text(encoding="utf-8")
+        self.assertEqual(legacy_text, legacy_once)
+        self.assertIn("from collections.abc import Mapping", legacy_text)
+        self.assertIn("def _force_bytes(value):", legacy_text)
+        self.assertEqual(legacy_text.count("def _force_bytes(value):"), 1)
+        self.assertEqual(legacy_text.count("hmac.new(_force_bytes(key), _force_bytes(msg),"), 3)
+        self.assertIn("x if isinstance(x, int) else ord(x)", legacy_text)
+        self.assertIn(".replace(b'=', b'').decode('ascii')", legacy_text)
+
+        early_root = self.root / "early"
+        early_module = early_root / "Lib" / "jwt" / "__init__.py"
+        early_module.parent.mkdir(parents=True)
+        early_module.write_text(
+            """import hmac
+
+try:
+    import json
+except ImportError:
+    import simplejson as json
+
+signing_methods = {
+    'HS256': lambda msg, key: hmac.new(key, msg, None).digest(),
+    'HS384': lambda msg, key: hmac.new(key, msg, None).digest(),
+    'HS512': lambda msg, key: hmac.new(key, msg, None).digest(),
+}
+
+def base64url_encode(input):
+    return base64.urlsafe_b64encode(input).replace('=', '')
+
+if not signature == signing_methods[header['alg']](signing_input, key):
+    raise ValueError
+""",
+            encoding="utf-8",
+        )
+        integration.release_version = "0.1.1"
+        early_context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=early_root,
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=early_root / "downloads",
+            work_cache_root=early_root / "work",
+            asset_overlay_root=REPO_ROOT / "assets" / "overlay",
+            log=lambda _message: None,
+        )
+        libs.run_pre_patch_hooks([integration], early_context)
+        early_once = early_module.read_text(encoding="utf-8")
+        libs.run_pre_patch_hooks([integration], early_context)
+        early_text = early_module.read_text(encoding="utf-8")
+        self.assertEqual(early_text, early_once)
+        self.assertEqual(early_text.count("def _force_bytes(value):"), 1)
+
+        crypto_root = self.root / "optional-crypto"
+        crypto_module = crypto_root / "Lib" / "jwt" / "__init__.py"
+        crypto_module.parent.mkdir(parents=True)
+        crypto_module.write_text(
+            """from collections import Mapping
+
+from Crypto.Signature import PKCS1_v1_5
+from Crypto.Hash import SHA256
+from Crypto.Hash import SHA384
+from Crypto.Hash import SHA512
+""",
+            encoding="utf-8",
+        )
+        integration.release_version = "0.1.7"
+        crypto_context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=crypto_root,
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=crypto_root / "downloads",
+            work_cache_root=crypto_root / "work",
+            asset_overlay_root=REPO_ROOT / "assets" / "overlay",
+            log=lambda _message: None,
+        )
+        libs.run_pre_patch_hooks([integration], crypto_context)
+        crypto_once = crypto_module.read_text(encoding="utf-8")
+        libs.run_pre_patch_hooks([integration], crypto_context)
+        crypto_text = crypto_module.read_text(encoding="utf-8")
+        self.assertEqual(crypto_text, crypto_once)
+        self.assertIn("except ImportError:", crypto_text)
+        self.assertIn("from collections.abc import Mapping", crypto_text)
+
+        positional_root = self.root / "positional"
+        api_jws = positional_root / "Lib" / "jwt" / "api_jws.py"
+        api_jwt = positional_root / "Lib" / "jwt" / "api_jwt.py"
+        api_jws.parent.mkdir(parents=True)
+        api_jws.write_text("from collections import Mapping\n", encoding="utf-8")
+        api_jwt.write_text(
+            "from collections import Mapping\n\n"
+            "decoded = super(PyJWT, self).decode(jwt, key, algorithms, options,\n"
+            + (" " * 44)
+            + "**kwargs)\n",
+            encoding="utf-8",
+        )
+        integration.release_version = "1.5.1"
+        positional_context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=positional_root,
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=positional_root / "downloads",
+            work_cache_root=positional_root / "work",
+            asset_overlay_root=REPO_ROOT / "assets" / "overlay",
+            log=lambda _message: None,
+        )
+        libs.run_pre_patch_hooks([integration], positional_context)
+        positional_jws_once = api_jws.read_text(encoding="utf-8")
+        positional_jwt_once = api_jwt.read_text(encoding="utf-8")
+        libs.run_pre_patch_hooks([integration], positional_context)
+        self.assertEqual(api_jws.read_text(encoding="utf-8"), positional_jws_once)
+        self.assertEqual(api_jwt.read_text(encoding="utf-8"), positional_jwt_once)
+        self.assertIn(
+            "jwt, key=key, algorithms=algorithms, options=options, **kwargs",
+            api_jwt.read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "from collections.abc import Mapping",
+            api_jws.read_text(encoding="utf-8"),
         )
 
     def test_default_integration_smoke_executes_real_import(self) -> None:
