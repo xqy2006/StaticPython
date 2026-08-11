@@ -269,6 +269,7 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
         runtime_sha = history_evidence.file_sha256(self.runtime_sdk)
         pack_sha = history_evidence.file_sha256(pack)
         dependency_sha = "a" * 64
+        provisional_sha = "b" * 64
         report = {
             "status": "passed",
             "failures": [],
@@ -283,7 +284,11 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
                     "version": "4.16.0",
                     "sha256": dependency_sha,
                 },
-                {"name": "demo", "version": "1.3.0", "sha256": pack_sha},
+                {
+                    "name": "demo",
+                    "version": "1.3.0",
+                    "sha256": provisional_sha,
+                },
             ],
             "pe_audit": {"status": "passed", "dependencies": ["KERNEL32.dll"]},
             "integration_smoke_tests": [
@@ -301,11 +306,15 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
             python_version="3.11.15",
         )
         self.assertEqual(result["pack_sha256"], pack_sha)
-        self.assertEqual(result["provisional_pack_sha256"], pack_sha)
+        self.assertEqual(result["provisional_pack_sha256"], provisional_sha)
         self.assertEqual(
             result["verified_packs"],
             [
-                {"name": "demo", "version": "1.3.0", "sha256": pack_sha},
+                {
+                    "name": "demo",
+                    "version": "1.3.0",
+                    "sha256": provisional_sha,
+                },
                 {
                     "name": "typing_extensions",
                     "version": "4.16.0",
@@ -314,8 +323,10 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
             ],
         )
 
-        report["packs"][1]["sha256"] = "b" * 64
-        with self.assertRaisesRegex(RuntimeError, "target pack SHA-256 mismatch"):
+        report["packs"].append(
+            {"name": "demo", "version": "1.3.0", "sha256": "c" * 64}
+        )
+        with self.assertRaisesRegex(RuntimeError, "repeats pack"):
             runner._validate_verifier_report(
                 report,
                 runtime_sdk_sha256=runtime_sha,

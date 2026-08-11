@@ -117,11 +117,10 @@ def _validate_verifier_report(
             f"{library} {version}"
         )
     provisional_pack_sha = matching_packs[0]["sha256"]
-    if provisional_pack_sha != expected_pack_sha:
-        raise RuntimeError(
-            f"SDK-linked pack verifier target pack SHA-256 mismatch: "
-            f"expected {expected_pack_sha}, got {provisional_pack_sha}"
-        )
+    # The verified archive is provisional. Exporting the final pack replaces its
+    # verification metadata, so its whole-archive digest is intentionally different.
+    # Both digests remain in the immutable combination evidence so downstream
+    # promotion policy can bind them without conflating the two archive formats.
     verified_packs.sort(
         key=lambda pack: (pack["name"].casefold(), pack["version"], pack["sha256"])
     )
