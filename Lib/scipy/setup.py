@@ -1453,6 +1453,9 @@ def prepare_scipy_generated_sources(context) -> None:
 LIBRARY_INTEGRATION = pypi_library(
     name="scipy",
     release_version=SCIPY_RELEASE_VERSION,
+    source_archive_sha256_by_version={
+        "1.17.1": "95d8e012d8cb8816c226aef832200b1d45109ed4464303e997c5b13122b297c0",
+    },
     dependencies=[
         "numpy",
         "pybind11",
@@ -1582,6 +1585,12 @@ LIBRARY_INTEGRATION = pypi_library(
                 "matrix = sparse.csr_matrix([[1.0, 0.0], [0.0, 2.0]]); "
                 "assert np.array_equal(matrix @ np.array([3.0, 4.0]), np.array([3.0, 8.0]))"
             ),
-        }
+        },
+        {
+            "name": "phase-1-extended-api-behavior",
+            "kind": "script",
+            "script": "scripts/scipy_profile_verify.py",
+            "timeout": 120,
+        },
     ],
 )

@@ -1803,6 +1803,21 @@
         "enabled": false
       }
     },
+    "scipy-experimental": {
+      "description": "Build the experimental SciPy phase-1 subset with its exact NumPy and pybind11 dependency closure.",
+      "core_libraries": "all",
+      "third_party_libraries": [
+        "scipy"
+      ],
+      "third_party_library_version_overrides": {
+        "numpy": "2.4.4",
+        "pybind11": "3.0.4",
+        "scipy": "1.17.1"
+      },
+      "verification": {
+        "enabled": false
+      }
+    },
     "full": {
       "description": "Build CPython plus every configured third-party library integration. Pure libraries come from third_party_library_catalog; native or patched libraries remain under Lib/<name>/setup.py.",
       "core_libraries": "all",
