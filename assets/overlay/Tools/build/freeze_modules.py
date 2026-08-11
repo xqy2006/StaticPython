@@ -61,6 +61,10 @@ SKIP_DIRECTORY_NAMES = {
     'tests',
     'testing',
 }
+NESTED_RUNTIME_PACKAGE_DIRECTORY_NAMES = {
+    'doc',
+    'docs',
+}
 
 
 def _matches_module_tree(fullname, tree_name):
@@ -90,10 +94,19 @@ def _active_skip_module_trees(root_dir):
     return tuple(name for name in SKIP_MODULE_TREES if name not in enabled)
 
 
-def _should_descend_directory(namespace_parts, dirname, skip_module_trees=SKIP_MODULE_TREES):
+def _should_descend_directory(
+    namespace_parts,
+    dirname,
+    skip_module_trees=SKIP_MODULE_TREES,
+    is_package=False,
+):
     child_parts = [*namespace_parts, dirname]
     child_name = '.'.join(child_parts)
-    if dirname in SKIP_DIRECTORY_NAMES:
+    if dirname in SKIP_DIRECTORY_NAMES and not (
+        namespace_parts
+        and is_package
+        and dirname in NESTED_RUNTIME_PACKAGE_DIRECTORY_NAMES
+    ):
         return False
     if any(_matches_module_tree(child_name, tree_name) for tree_name in skip_module_trees):
         return False
@@ -132,7 +145,12 @@ def find_python_modules(root_dir):
         dirs[:] = sorted(
             d for d in dirs
             if _is_valid_module_segment(d)
-            and _should_descend_directory(namespace_parts, d, skip_module_trees)
+            and _should_descend_directory(
+                namespace_parts,
+                d,
+                skip_module_trees=skip_module_trees,
+                is_package=os.path.exists(os.path.join(root, d, '__init__.py')),
+            )
         )
         package_dir_names = {
             d for d in dirs

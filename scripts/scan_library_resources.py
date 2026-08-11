@@ -275,19 +275,38 @@ def hook_closure_value(hook: object, name: str) -> Any:
 
 def pypi_source_info(integration: object) -> PyPISourceInfo | None:
     hooks = getattr(integration, "prepare_source_hooks", [])
-    if not hooks:
-        return None
-    hook = hooks[0]
-    project_name = hook_closure_value(hook, "project_name")
-    normalized_name = hook_closure_value(hook, "normalized")
-    source_mapping = hook_closure_value(hook, "source_mapping")
-    if not isinstance(project_name, str) or not isinstance(normalized_name, str) or not isinstance(source_mapping, dict):
-        return None
-    return PyPISourceInfo(
-        project_name=project_name,
-        normalized_name=normalized_name,
-        source_mapping={str(key): str(value) for key, value in source_mapping.items()},
-    )
+    if hooks:
+        hook = hooks[0]
+        project_name = hook_closure_value(hook, "project_name")
+        normalized_name = hook_closure_value(hook, "normalized")
+        source_mapping = hook_closure_value(hook, "source_mapping")
+        if isinstance(project_name, str) and isinstance(normalized_name, str) and isinstance(source_mapping, dict):
+            return PyPISourceInfo(
+                project_name=project_name,
+                normalized_name=normalized_name,
+                source_mapping={str(key): str(value) for key, value in source_mapping.items()},
+            )
+
+    # Custom PyPI hooks predate the generic catalog and do not necessarily
+    # capture their mapping in a closure.  The materialized Lib roots still
+    # provide a strict, source-resolver-compatible fallback (for example six
+    # resolves selector "six" to the upstream six.py module).
+    project_name = getattr(integration, "project_name", None) or getattr(integration, "name", None)
+    fallback_mapping: dict[str, str] = {}
+    for target in getattr(integration, "materialized_paths", []):
+        normalized_target = normalized_relpath(str(target))
+        if not normalized_target.startswith("Lib/"):
+            continue
+        selector = normalized_target.removeprefix("Lib/")
+        if selector:
+            fallback_mapping.setdefault(selector, normalized_target)
+    if isinstance(project_name, str) and fallback_mapping:
+        return PyPISourceInfo(
+            project_name=project_name,
+            normalized_name=_normalized_project_name(project_name),
+            source_mapping=fallback_mapping,
+        )
+    return None
 
 
 def selected_cached_version(download_root: Path, normalized_name: str, release_version: str | None) -> str | None:
@@ -397,11 +416,18 @@ def static_setup_markers(setup_text: str) -> bool:
 
 
 def handled_reason(destination: str, source_rel: str, setup_text: str, integration: object) -> str | None:
+    normalized_destination = destination.replace("\\", "/")
+    normalized_source = source_rel.replace("\\", "/")
+    for raw_root in getattr(integration, "materialized_paths", []):
+        root = normalized_relpath(str(raw_root)).rstrip("/")
+        if not root.startswith(("Lib/", "share/", "etc/")):
+            continue
+        if normalized_destination == root or normalized_destination.startswith(root + "/"):
+            return f"StaticPythonPackV1 embeds materialized resource root {root!r}"
+
     if not static_setup_markers(setup_text):
         return None
 
-    normalized_destination = destination.replace("\\", "/")
-    normalized_source = source_rel.replace("\\", "/")
     name = Path(normalized_destination).name
     parent_names = [part for part in Path(normalized_destination).parts[:-1]]
     destination_parts = Path(normalized_destination).parts
@@ -659,16 +685,17 @@ def main(argv: list[str] | None = None) -> int:
     if selected_libraries == "all":
         selected_libraries = profile.get("third_party_libraries", "all")
     version_overrides = profile.get("third_party_library_version_overrides")
+    library_catalog = profile.get(
+        "third_party_library_catalog",
+        config.get("third_party_library_catalog"),
+    )
 
     integrations = load_integrations(
         repo_root / "Lib",
         selected_libraries,
         target_version=target_version,
         version_overrides=version_overrides,
-        library_catalog=profile.get(
-            "third_party_library_catalog",
-            config.get("third_party_library_catalog"),
-        ),
+        library_catalog=library_catalog,
     )
     args.work_root.mkdir(parents=True, exist_ok=True)
     results = []
@@ -718,7 +745,11 @@ def main(argv: list[str] | None = None) -> int:
         f"build_only={report['summary']['build_only']}, "
         f"ignored={report['summary']['ignored']}"
     )
-    if args.fail_on_needs and report["summary"]["needs_handling"]:
+    if args.fail_on_needs and (
+        report["summary"]["needs_handling"]
+        or report["summary"]["missing_cache"]
+        or report["summary"]["scan_failed"]
+    ):
         return 1
     return 0
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import fnmatch
 import hashlib
@@ -14,7 +15,7 @@ import time
 from pathlib import Path, PurePosixPath
 import tokenize
 from types import ModuleType
-from typing import Callable
+from typing import Callable, Iterator
 from urllib.request import Request, urlopen
 from zipfile import ZipFile
 
@@ -828,6 +829,33 @@ def _remove_tree(path: Path) -> None:
         raise exc_info[1]
 
     shutil.rmtree(_long_path(path), onerror=onerror)
+
+
+@contextmanager
+def temporary_pypi_release_cache(
+    context: LibraryHookContext,
+    integration: LibraryIntegration,
+    release_version: str,
+) -> Iterator[None]:
+    """Discard one PyPI release's caches after a bounded validation scope."""
+
+    try:
+        yield
+    finally:
+        if integration.source_provider == "pypi":
+            project_name = integration.project_name or integration.name
+            normalized = _normalized_project_name(project_name)
+            removed: list[Path] = []
+            for cache_root in (context.download_cache_root, context.work_cache_root):
+                release_root = cache_root / "pypi" / normalized / release_version
+                if release_root.exists():
+                    _remove_tree(release_root)
+                    removed.append(release_root)
+            if removed:
+                context.log(
+                    f"discarded temporary PyPI cache for {project_name} {release_version} "
+                    f"from {len(removed)} root(s)"
+                )
 
 
 def _archive_target_path(destination_root: Path, member_name: str) -> Path | None:
