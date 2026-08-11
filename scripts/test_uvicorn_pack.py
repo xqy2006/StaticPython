@@ -149,6 +149,15 @@ class UvicornPackTests(unittest.TestCase):
         self.assertIn("Uvicorn loopback ASGI behavior smoke", workflow)
         self.assertIn("$report.pe_audit.status -ne 'passed'", workflow)
         self.assertIn("python.*\\.dll", workflow)
+        self.assertIn("staticpython-pack-verify.exe", workflow)
+        self.assertIn("$report.pe_audit.executable_sha256", workflow)
+        self.assertIn("$report.pe_audit.map_sha256", workflow)
+        self.assertIn("@($report.pe_audit.main_object_records).Count -ne 0", workflow)
+        self.assertIn("dumpbin /NOLOGO /DEPENDENTS $exePath", workflow)
+        self.assertIn(
+            "Compare-Object $reportedDependencies $observedDependencies",
+            workflow,
+        )
 
     def test_dedicated_workflow_covers_every_target_cpython_series(self) -> None:
         workflow = (
