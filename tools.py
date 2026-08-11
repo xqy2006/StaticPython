@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import struct
@@ -384,10 +385,33 @@ def _cleanup_failed_download(destination: Path) -> None:
         temporary.unlink()
 
 
-def download_first_available(log: Callable[[str], None], urls: list[str], destination: Path) -> str:
+def _validate_download_sha256(destination: Path, expected_sha256: str | None) -> None:
+    if expected_sha256 is None:
+        return
+    normalized = expected_sha256.strip().lower()
+    if len(normalized) != 64 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        raise ValueError(f"invalid SHA-256 digest: {expected_sha256!r}")
+    with destination.open("rb") as source:
+        actual = hashlib.file_digest(source, "sha256").hexdigest()
+    if actual != normalized:
+        raise RuntimeError(
+            f"SHA-256 mismatch for {destination}: expected {normalized}, got {actual}"
+        )
+
+
+def download_first_available(
+    log: Callable[[str], None],
+    urls: list[str],
+    destination: Path,
+    *,
+    expected_sha256: str | None = None,
+) -> str:
     if destination.exists():
         try:
             validate_source_archive(destination)
+            _validate_download_sha256(destination, expected_sha256)
         except (BadZipFile, EOFError, OSError, RuntimeError, tarfile.TarError) as exc:
             log(f"discarding invalid cached download {destination}: {exc}")
             _cleanup_failed_download(destination)
@@ -401,6 +425,7 @@ def download_first_available(log: Callable[[str], None], urls: list[str], destin
             try:
                 download_file(log, url, destination, force=True)
                 validate_source_archive(destination)
+                _validate_download_sha256(destination, expected_sha256)
                 return url
             except (BadZipFile, EOFError, HTTPError, OSError, RuntimeError, tarfile.TarError, URLError) as exc:
                 errors.append(f"{url} (attempt {attempt}/2): {exc}")
