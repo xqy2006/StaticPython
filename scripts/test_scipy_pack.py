@@ -199,6 +199,9 @@ class SciPyPackTests(unittest.TestCase):
         self.assertIn("dumpbin /NOLOGO /DEPENDENTS", workflow)
         self.assertIn("forbidden_entry_symbols", workflow)
         self.assertIn("main_object_records", workflow)
+        self.assertIn("$scipy.toolchain.cython.version -ne '3.2.9'", workflow)
+        self.assertIn("cython-3.2.9-py3-none-any.whl", workflow)
+        self.assertIn(self.scipy_setup.SCIPY_CYTHON_WHEEL_SHA256, workflow)
 
 
 if __name__ == "__main__":

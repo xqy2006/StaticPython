@@ -251,6 +251,13 @@ jobs:
           if ($scipy.license.expression -ne 'BSD-3-Clause AND MIT') {
             throw "SciPy pack has the wrong license expression"
           }
+          if (
+            $scipy.toolchain.cython.version -ne '3.2.9' -or
+            $scipy.toolchain.cython.wheel -ne 'cython-3.2.9-py3-none-any.whl' -or
+            $scipy.toolchain.cython.wheel_sha256 -ne 'a2b0e87f6b80790c929308ca0831d686f7a180feab684fe8cd4a4380bd96aaca'
+          ) {
+            throw "SciPy pack does not record the exact hash-pinned Cython toolchain"
+          }
           foreach ($library in @(
             'scipy._lib._ccallback_c.lib',
             'scipy._lib._uarray._uarray.lib',
@@ -326,6 +333,7 @@ jobs:
             "",
             "- CPython: ``$env:VERIFY_CPYTHON_VERSION``",
             "- SciPy: ``$($scipy.version)``",
+            "- Cython: ``$($scipy.toolchain.cython.version)``",
             "- NumPy: ``$($metadataByName['numpy'].version)``",
             "- Runtime ABI: ``$($scipy.runtime_abi)``",
             "- Runtime extraction: ``false``",
