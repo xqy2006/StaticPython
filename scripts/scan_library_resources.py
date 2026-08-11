@@ -252,14 +252,14 @@ def sort_version_dirs(paths: list[Path]) -> list[Path]:
     return sorted(paths, key=key, reverse=True)
 
 
-def read_config(path: Path, profile_name: str | None) -> tuple[str, dict[str, Any]]:
+def read_config(path: Path, profile_name: str | None) -> tuple[str, dict[str, Any], dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     selected = profile_name or data.get("default_profile") or "full"
     profiles = data.get("profiles") or {}
     profile = profiles.get(selected)
     if not isinstance(profile, dict):
         raise RuntimeError(f"profile {selected!r} was not found in {path}")
-    return selected, profile
+    return selected, data, profile
 
 
 def hook_closure_value(hook: object, name: str) -> Any:
@@ -653,7 +653,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = args.repo_root.resolve()
     config_path = args.config if args.config.is_absolute() else repo_root / args.config
-    profile_name, profile = read_config(config_path, args.profile)
+    profile_name, config, profile = read_config(config_path, args.profile)
     target_version = Version(args.python_version)
     selected_libraries = parse_libraries(args.libraries)
     if selected_libraries == "all":
@@ -665,6 +665,10 @@ def main(argv: list[str] | None = None) -> int:
         selected_libraries,
         target_version=target_version,
         version_overrides=version_overrides,
+        library_catalog=profile.get(
+            "third_party_library_catalog",
+            config.get("third_party_library_catalog"),
+        ),
     )
     args.work_root.mkdir(parents=True, exist_ok=True)
     results = []

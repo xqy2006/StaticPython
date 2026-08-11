@@ -138,6 +138,53 @@ class PrepareLibraryHistoryBatchesTests(unittest.TestCase):
         self.assertEqual(result["batches"][0]["versions"], ["2.0"])
         self.assertEqual(result["batches"][0]["python_version"], "3.13.14")
 
+    def test_targeted_selection_covers_every_candidate_for_requested_libraries(
+        self,
+    ) -> None:
+        result = history.prepare_history_batches(
+            contract(),
+            {"pure": "pure-python", "native": "native"},
+            pure_batch_size=2,
+            selected_libraries=["PURE"],
+        )
+        self.assertEqual(result["selection"]["mode"], "targeted")
+        self.assertEqual(result["selection"]["libraries"], ["pure"])
+        self.assertEqual(result["combination_count"], 6)
+        self.assertEqual({batch["library"] for batch in result["batches"]}, {"pure"})
+        self.assertEqual(
+            {
+                (batch["python_version"], version)
+                for batch in result["batches"]
+                for version in batch["versions"]
+            },
+            {
+                (python_version, version)
+                for python_version in ("3.12.13", "3.13.14")
+                for version in ("1.0", "1.1", "2.0")
+            },
+        )
+
+    def test_targeted_selection_rejects_missing_duplicate_and_smoke_filters(
+        self,
+    ) -> None:
+        build_kinds = {"pure": "pure-python", "native": "native"}
+        with self.assertRaisesRegex(RuntimeError, "missing from contract"):
+            history.prepare_history_batches(
+                contract(), build_kinds, selected_libraries=["absent"]
+            )
+        with self.assertRaisesRegex(RuntimeError, "repeated"):
+            history.prepare_history_batches(
+                contract(), build_kinds, selected_libraries=["pure", "PURE"]
+            )
+        with self.assertRaisesRegex(RuntimeError, "mutually exclusive"):
+            history.prepare_history_batches(
+                contract(),
+                build_kinds,
+                selected_libraries=["pure"],
+                smoke_library="pure",
+                smoke_python_series="3.13",
+            )
+
     def test_excess_run_shards_are_rejected_without_dropping_batches(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "needs 7 run shards"):
             history.prepare_history_batches(

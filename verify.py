@@ -76,6 +76,35 @@ def profile_library_catalog(config: dict, profile: dict, key: str) -> object | N
     return profile.get(key, config.get(key))
 
 
+def load_profile_integrations(
+    repo_root: Path,
+    config: dict,
+    profile: dict,
+    target_version: Version,
+) -> tuple[list, list]:
+    core_library_catalog = profile_library_catalog(config, profile, "core_library_catalog")
+    third_party_library_catalog = profile_library_catalog(
+        config,
+        profile,
+        "third_party_library_catalog",
+    )
+    core_integrations = load_integrations(
+        repo_root / "Core",
+        profile.get("core_libraries", "all"),
+        target_version=target_version,
+        version_overrides=profile.get("core_library_version_overrides"),
+        library_catalog=core_library_catalog,
+    )
+    third_party_integrations = load_integrations(
+        repo_root / "Lib",
+        profile.get("third_party_libraries", "all"),
+        target_version=target_version,
+        version_overrides=profile.get("third_party_library_version_overrides"),
+        library_catalog=third_party_library_catalog,
+    )
+    return core_integrations, third_party_integrations
+
+
 def profile_verification_config(config: dict, profile: dict) -> dict:
     root_config = config.get("verification", {})
     if root_config is None:
@@ -553,20 +582,12 @@ def main() -> None:
         raise RuntimeError(f"python executable not found: {python_exe}")
 
     target_version = _target_version(source_root)
-    core_library_catalog = profile_library_catalog(config, profile, "core_library_catalog")
-    third_party_library_catalog = profile_library_catalog(config, profile, "third_party_library_catalog")
     verification_config = profile_verification_config(config, profile)
-    core_integrations = load_integrations(
-        repo_root / "Core",
-        profile.get("core_libraries", "all"),
-        target_version=target_version,
-        library_catalog=core_library_catalog,
-    )
-    integrations = load_integrations(
-        repo_root / "Lib",
-        profile.get("third_party_libraries", "all"),
-        target_version=target_version,
-        library_catalog=third_party_library_catalog,
+    core_integrations, integrations = load_profile_integrations(
+        repo_root,
+        config,
+        profile,
+        target_version,
     )
     log(
         f"verification profile: {profile_name} "

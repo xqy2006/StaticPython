@@ -71,11 +71,16 @@ def integration_build_kinds(config: dict) -> dict[str, str]:
 def candidate_combinations(
     contract: dict,
     *,
+    selected_libraries: list[str] | tuple[str, ...] | None = None,
     smoke_library: str | None = None,
     smoke_python_series: str | None = None,
 ) -> list[dict]:
     if (smoke_library is None) != (smoke_python_series is None):
         raise RuntimeError("smoke library and Python series must be provided together")
+    if selected_libraries is not None and smoke_library is not None:
+        raise RuntimeError(
+            "targeted libraries and smoke selection are mutually exclusive"
+        )
     if smoke_python_series is not None and not re.fullmatch(
         r"3\.(11|12|13|14|15)", smoke_python_series
     ):
@@ -84,8 +89,30 @@ def candidate_combinations(
     libraries = contract.get("libraries")
     if not isinstance(libraries, dict):
         raise RuntimeError("contract libraries must be an object")
+    selected_names: set[str] | None = None
+    if selected_libraries is not None:
+        if not isinstance(selected_libraries, (list, tuple)) or not selected_libraries:
+            raise RuntimeError("targeted library selection must not be empty")
+        requested: dict[str, str] = {}
+        for raw_name in selected_libraries:
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                raise RuntimeError("targeted library names must be non-empty strings")
+            name = raw_name.strip()
+            folded = name.casefold()
+            if folded in requested:
+                raise RuntimeError(f"targeted library is repeated: {name}")
+            requested[folded] = name
+        available = {name.casefold(): name for name in libraries}
+        missing = [requested[key] for key in requested if key not in available]
+        if missing:
+            raise RuntimeError(
+                "targeted libraries are missing from contract: " + ", ".join(missing)
+            )
+        selected_names = set(requested)
     for library_name, library in libraries.items():
         if not isinstance(library, dict) or library.get("source_provider") != "pypi":
+            continue
+        if selected_names is not None and library_name.casefold() not in selected_names:
             continue
         project_name = library.get("project_name")
         versions = library.get("versions")
@@ -120,6 +147,17 @@ def candidate_combinations(
             libs.Version(item["version"]),
         ),
     )
+    if selected_names is not None:
+        covered = {record["library"].casefold() for record in combinations}
+        empty = [
+            name
+            for name in selected_libraries or ()
+            if name.strip().casefold() not in covered
+        ]
+        if empty:
+            raise RuntimeError(
+                "targeted libraries have no candidate combinations: " + ", ".join(empty)
+            )
     if smoke_library is None:
         return combinations
     matching = [
@@ -152,6 +190,7 @@ def prepare_history_batches(
     native_batch_size: int = DEFAULT_NATIVE_BATCH_SIZE,
     max_jobs_per_run: int = DEFAULT_MAX_JOBS_PER_RUN,
     max_run_shards: int = DEFAULT_MAX_RUN_SHARDS,
+    selected_libraries: list[str] | tuple[str, ...] | None = None,
     smoke_library: str | None = None,
     smoke_python_series: str | None = None,
 ) -> dict:
@@ -167,12 +206,14 @@ def prepare_history_batches(
 
     combinations = candidate_combinations(
         contract,
+        selected_libraries=selected_libraries,
         smoke_library=smoke_library,
         smoke_python_series=smoke_python_series,
     )
     recorded_candidate_count = contract.get("status_counts", {}).get("candidate")
     if (
         smoke_library is None
+        and selected_libraries is None
         and isinstance(recorded_candidate_count, int)
         and recorded_candidate_count != len(combinations)
     ):
@@ -269,6 +310,17 @@ def prepare_history_batches(
                 "shard_sha256": _canonical_sha256(shard_identity),
             }
         )
+    if smoke_library is not None:
+        selection_mode = "smoke"
+    elif selected_libraries is not None:
+        selection_mode = "targeted"
+    else:
+        selection_mode = "full-history"
+    canonical_selected_libraries = (
+        sorted({record["library"] for record in combinations}, key=str.casefold)
+        if selected_libraries is not None
+        else None
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "kind": "staticpython-library-history-batches",
@@ -280,7 +332,8 @@ def prepare_history_batches(
             "max_run_shards": max_run_shards,
         },
         "selection": {
-            "mode": "smoke" if smoke_library is not None else "full-history",
+            "mode": selection_mode,
+            "libraries": canonical_selected_libraries,
             "smoke_library": smoke_library,
             "smoke_python_series": smoke_python_series,
         },
@@ -309,6 +362,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--native-batch-size", type=int, default=DEFAULT_NATIVE_BATCH_SIZE)
     parser.add_argument("--max-jobs-per-run", type=int, default=DEFAULT_MAX_JOBS_PER_RUN)
     parser.add_argument("--max-run-shards", type=int, default=DEFAULT_MAX_RUN_SHARDS)
+    parser.add_argument(
+        "--library",
+        action="append",
+        dest="selected_libraries",
+        help="Validate all candidate combinations for this exact integration name; repeatable.",
+    )
     parser.add_argument("--smoke-library")
     parser.add_argument("--smoke-python-series")
     return parser.parse_args()
@@ -330,6 +389,7 @@ def main() -> int:
         native_batch_size=args.native_batch_size,
         max_jobs_per_run=args.max_jobs_per_run,
         max_run_shards=args.max_run_shards,
+        selected_libraries=args.selected_libraries,
         smoke_library=args.smoke_library,
         smoke_python_series=args.smoke_python_series,
     )
