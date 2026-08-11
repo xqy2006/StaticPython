@@ -251,6 +251,7 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
             python_version="3.13.14",
         )
         self.assertEqual(result["pack_sha256"], pack_sha)
+        self.assertEqual(result["provisional_pack_sha256"], pack_sha)
         report["pe_audit"]["dependencies"] = []
         with self.assertRaisesRegex(RuntimeError, "PE dependency"):
             runner._validate_verifier_report(
@@ -260,6 +261,79 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
                 library="demo",
                 version="1.0",
                 python_version="3.13.14",
+            )
+
+    def test_verifier_report_selects_target_from_dependency_packs(self) -> None:
+        pack = self.root / "demo-with-dependency.zip"
+        pack.write_bytes(b"target-pack")
+        runtime_sha = history_evidence.file_sha256(self.runtime_sdk)
+        pack_sha = history_evidence.file_sha256(pack)
+        dependency_sha = "a" * 64
+        provisional_sha = "b" * 64
+        report = {
+            "status": "passed",
+            "failures": [],
+            "runtime_sdk": {
+                "archive_sha256": runtime_sha,
+                "cpython_version": "3.11.15",
+                "runtime_abi": "staticpython-pack-v1-cp311",
+            },
+            "packs": [
+                {
+                    "name": "typing_extensions",
+                    "version": "4.16.0",
+                    "sha256": dependency_sha,
+                },
+                {
+                    "name": "demo",
+                    "version": "1.3.0",
+                    "sha256": provisional_sha,
+                },
+            ],
+            "pe_audit": {"status": "passed", "dependencies": ["KERNEL32.dll"]},
+            "integration_smoke_tests": [
+                {"name": "typing_extensions", "status": "passed"},
+                {"name": "demo", "status": "passed"},
+            ],
+            "executable_sha256": "f" * 64,
+        }
+        result = runner._validate_verifier_report(
+            report,
+            runtime_sdk_sha256=runtime_sha,
+            pack_path=pack,
+            library="demo",
+            version="1.3.0",
+            python_version="3.11.15",
+        )
+        self.assertEqual(result["pack_sha256"], pack_sha)
+        self.assertEqual(result["provisional_pack_sha256"], provisional_sha)
+        self.assertEqual(
+            result["verified_packs"],
+            [
+                {
+                    "name": "demo",
+                    "version": "1.3.0",
+                    "sha256": provisional_sha,
+                },
+                {
+                    "name": "typing_extensions",
+                    "version": "4.16.0",
+                    "sha256": dependency_sha,
+                },
+            ],
+        )
+
+        report["packs"].append(
+            {"name": "demo", "version": "1.3.0", "sha256": "c" * 64}
+        )
+        with self.assertRaisesRegex(RuntimeError, "repeats pack"):
+            runner._validate_verifier_report(
+                report,
+                runtime_sdk_sha256=runtime_sha,
+                pack_path=pack,
+                library="demo",
+                version="1.3.0",
+                python_version="3.11.15",
             )
 
 
