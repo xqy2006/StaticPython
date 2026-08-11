@@ -562,6 +562,13 @@
         ],
         "source_provider": "pypi",
         "license_expression": "MIT",
+        "license_sources": [
+          {
+            "filename": "LICENSE-PyJWT-MIT",
+            "url": "https://raw.githubusercontent.com/jpadilla/pyjwt/0.4.1/LICENSE",
+            "sha256": "b9f95c496bd9dba93a2b6ee6382f4692918e8648f2d9dab03e93457f8b71ac4c"
+          }
+        ],
         "patch_rules": [
           {
             "package": ">=0.1.1,<0.1.6",
