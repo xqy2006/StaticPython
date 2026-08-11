@@ -337,6 +337,24 @@ class PydanticCorePackTests(unittest.TestCase):
         self.assertIn("$smoke.PSObject.Properties['released_files']", workflow)
         self.assertIn("foreach ($path in @($smoke.released_files))", workflow)
 
+    def test_workflow_reaudits_the_uploaded_verifier_pe(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml"
+        ).read_text(encoding="utf-8")
+        _prefix, core_tail = workflow.split("  sdk-linked-pydantic-core:\n", 1)
+        next_job = core_tail.find("\n  sdk-linked-")
+        core_job = core_tail if next_job < 0 else core_tail[:next_job]
+
+        self.assertIn("staticpython-pack-verify.exe", core_job)
+        self.assertIn("$report.pe_audit.executable_sha256", core_job)
+        self.assertIn("$report.pe_audit.map_sha256", core_job)
+        self.assertIn("@($report.pe_audit.main_object_records).Count -ne 0", core_job)
+        self.assertIn("dumpbin /NOLOGO /DEPENDENTS $exePath", core_job)
+        self.assertIn(
+            "Compare-Object $reportedDependencies $observedDependencies",
+            core_job,
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
