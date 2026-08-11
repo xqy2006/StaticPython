@@ -1059,6 +1059,57 @@ struct _inittab _PyImport_Inittab[] = {
 
         self.assertTrue(all(not path.exists() for path in selected_roots))
 
+    def test_temporary_pypi_release_cache_rejects_path_traversal(self) -> None:
+        context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=self.root / "source",
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=self.root / "downloads",
+            work_cache_root=self.root / "work",
+            asset_overlay_root=self.root / "assets",
+            log=lambda _message: None,
+        )
+        integration = libs.LibraryIntegration(
+            name="demo",
+            source_provider="pypi",
+            project_name="demo-project",
+        )
+        protected = context.download_cache_root / "pypi" / "protected"
+        protected.mkdir(parents=True)
+        (protected / "payload.bin").write_bytes(b"keep")
+        entered = False
+
+        with self.assertRaisesRegex(RuntimeError, "unsafe PyPI cache release version"):
+            with libs.temporary_pypi_release_cache(context, integration, ".."):
+                entered = True
+
+        self.assertFalse(entered)
+        self.assertEqual((protected / "payload.bin").read_bytes(), b"keep")
+
+    def test_temporary_pypi_release_cache_rejects_unsafe_project_name(self) -> None:
+        context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=self.root / "source",
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=self.root / "downloads",
+            work_cache_root=self.root / "work",
+            asset_overlay_root=self.root / "assets",
+            log=lambda _message: None,
+        )
+        integration = libs.LibraryIntegration(
+            name="demo",
+            source_provider="pypi",
+            project_name="../demo-project",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "unsafe normalized PyPI cache project"):
+            with libs.temporary_pypi_release_cache(context, integration, "1.2.3"):
+                self.fail("unsafe project cache scope was entered")
+
     def test_declared_license_source_is_versioned_and_hash_verified(self) -> None:
         payload = b"fallback license\n"
         digest = hashlib.sha256(payload).hexdigest()
