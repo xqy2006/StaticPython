@@ -70,22 +70,61 @@ def _validate_verifier_report(
                 f"SDK-linked pack verifier runtime {key} mismatch: "
                 f"expected {expected!r}, got {runtime.get(key)!r}"
             )
-    packs = report.get("packs")
-    if not isinstance(packs, list) or len(packs) != 1 or not isinstance(packs[0], dict):
-        raise RuntimeError("SDK-linked pack verifier must describe exactly one pack")
     expected_pack_sha = history_evidence.file_sha256(pack_path)
-    expected_pack = {"name": library, "version": version}
-    for key, expected in expected_pack.items():
-        if packs[0].get(key) != expected:
+    packs = report.get("packs")
+    if not isinstance(packs, list) or not packs:
+        raise RuntimeError("SDK-linked pack verifier must describe at least one pack")
+    verified_packs = []
+    pack_identities: set[tuple[str, str]] = set()
+    for pack in packs:
+        if not isinstance(pack, dict):
             raise RuntimeError(
-                f"SDK-linked pack verifier pack {key} mismatch: "
-                f"expected {expected!r}, got {packs[0].get(key)!r}"
+                "SDK-linked pack verifier contains an invalid pack record"
             )
-    provisional_pack_sha = packs[0].get("sha256")
-    if not isinstance(provisional_pack_sha, str) or not SHA256_PATTERN.fullmatch(
-        provisional_pack_sha
-    ):
-        raise RuntimeError("SDK-linked pack verifier has no provisional pack SHA-256")
+        pack_name = pack.get("name")
+        pack_version = pack.get("version")
+        pack_sha = pack.get("sha256")
+        if not isinstance(pack_name, str) or not pack_name:
+            raise RuntimeError("SDK-linked pack verifier pack has no name")
+        if not isinstance(pack_version, str) or not pack_version:
+            raise RuntimeError("SDK-linked pack verifier pack has no version")
+        if not isinstance(pack_sha, str) or not SHA256_PATTERN.fullmatch(pack_sha):
+            raise RuntimeError(
+                f"SDK-linked pack verifier pack {pack_name} {pack_version} "
+                "has no SHA-256"
+            )
+        identity = (pack_name.casefold(), pack_version)
+        if identity in pack_identities:
+            raise RuntimeError(
+                f"SDK-linked pack verifier repeats pack {pack_name} {pack_version}"
+            )
+        pack_identities.add(identity)
+        verified_packs.append(
+            {
+                "name": pack_name,
+                "version": pack_version,
+                "sha256": pack_sha.lower(),
+            }
+        )
+    matching_packs = [
+        pack
+        for pack in verified_packs
+        if pack["name"] == library and pack["version"] == version
+    ]
+    if len(matching_packs) != 1:
+        raise RuntimeError(
+            "SDK-linked pack verifier must describe exactly one target pack "
+            f"{library} {version}"
+        )
+    provisional_pack_sha = matching_packs[0]["sha256"]
+    if provisional_pack_sha != expected_pack_sha:
+        raise RuntimeError(
+            f"SDK-linked pack verifier target pack SHA-256 mismatch: "
+            f"expected {expected_pack_sha}, got {provisional_pack_sha}"
+        )
+    verified_packs.sort(
+        key=lambda pack: (pack["name"].casefold(), pack["version"], pack["sha256"])
+    )
     pe_audit = report.get("pe_audit")
     dependencies = pe_audit.get("dependencies") if isinstance(pe_audit, dict) else None
     if (
@@ -116,7 +155,8 @@ def _validate_verifier_report(
         "runtime_abi": runtime["runtime_abi"],
         "runtime_sdk_sha256": runtime_sdk_sha256,
         "pack_sha256": expected_pack_sha,
-        "provisional_pack_sha256": provisional_pack_sha.lower(),
+        "provisional_pack_sha256": provisional_pack_sha,
+        "verified_packs": verified_packs,
         "executable_sha256": executable_sha.lower(),
         "pe_dependencies": dependencies,
         "smoke_test_count": len(smoke_tests),
