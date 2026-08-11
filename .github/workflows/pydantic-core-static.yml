@@ -1,6 +1,18 @@
 name: Experimental pydantic-core static pack
 
 on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/pydantic-core-static.yml"
+      - "Lib/pydantic_core/**"
+      - "assets/overlay/Include/staticpython_pack.h"
+      - "assets/overlay/Python/staticpython_pack_runtime.c"
+      - "build.py"
+      - "config.json"
+      - "libs.py"
+      - "scripts/test_pydantic_core_pack.py"
+      - "scripts/verify_pack_with_runtime_sdk.py"
   pull_request:
     paths:
       - ".github/workflows/pydantic-core-static.yml"

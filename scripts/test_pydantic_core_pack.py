@@ -294,6 +294,8 @@ class PydanticCorePackTests(unittest.TestCase):
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml"
         ).read_text(encoding="utf-8")
+        self.assertIn("push:\n    branches: [master]", workflow)
+        self.assertIn("pull_request:\n    paths:", workflow)
         runtime_job, core_tail = workflow.split(
             "  sdk-linked-pydantic-core:\n", 1
         )
