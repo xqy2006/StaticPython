@@ -13,6 +13,7 @@ from tools import download_first_available, ensure_tool, extract_source_archive,
 PYFLTK_PROJECT_GUID = "{4B6B52A6-20E4-4910-A4F0-87902076E828}"
 FLTK_VERSION = "1.4.5"
 SWIGWIN_VERSION = "4.3.1"
+SWIGWIN_SHA256 = "7ea5197c557af20b2f7780ffcfe803bbe0e2009f5846874112aea37e5f693417"
 
 FLTK_LIBRARY_NAMES = [
     "fltk.lib",
@@ -192,9 +193,11 @@ def ensure_swigwin(context) -> Path:
     used_source = download_first_available(
         context.log,
         [
+            f"https://prdownloads.sourceforge.net/swig/swigwin-{SWIGWIN_VERSION}.zip",
             f"https://downloads.sourceforge.net/project/swig/swigwin/swigwin-{SWIGWIN_VERSION}/swigwin-{SWIGWIN_VERSION}.zip",
         ],
         archive_path,
+        expected_sha256=SWIGWIN_SHA256,
     )
     extract_source_archive(context.log, archive_path, tool_dir.parent, final_name=tool_dir.name)
     if not swig_exe.exists():
