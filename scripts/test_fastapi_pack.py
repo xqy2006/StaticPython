@@ -140,6 +140,8 @@ class FastAPIPackTests(unittest.TestCase):
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml"
         ).read_text(encoding="utf-8")
+        push_paths = workflow.split("  pull_request:\n", 1)[0]
+        self.assertIn('      - "scripts/test_fastapi_pack.py"', push_paths)
         job = workflow.split("  sdk-linked-fastapi:\n", 1)[1]
         targets = {
             "3.11.15": "cp311",
