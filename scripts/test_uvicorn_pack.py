@@ -154,6 +154,8 @@ class UvicornPackTests(unittest.TestCase):
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "uvicorn-static.yml"
         ).read_text(encoding="utf-8")
+        self.assertIn("push:\n    branches: [master]", workflow)
+        self.assertIn("pull_request:\n    paths:", workflow)
         expected_targets = {
             "3.11.15": "cp311",
             "3.12.13": "cp312",

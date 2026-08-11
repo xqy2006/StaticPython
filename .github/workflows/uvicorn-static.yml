@@ -1,6 +1,22 @@
 name: Experimental Uvicorn static pack
 
 on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/workflows/uvicorn-static.yml"
+      - "Lib/click/**"
+      - "Lib/colorama/**"
+      - "assets/overlay/Include/staticpython_pack.h"
+      - "assets/overlay/Python/staticpython_pack_runtime.c"
+      - "build.py"
+      - "config.json"
+      - "libs.py"
+      - "scripts/test_runtime_sdk.py"
+      - "scripts/test_uvicorn_pack.py"
+      - "scripts/uvicorn_runtime.py"
+      - "scripts/verify_pack_with_runtime_sdk.py"
   pull_request:
     paths:
       - ".github/workflows/release.yml"
