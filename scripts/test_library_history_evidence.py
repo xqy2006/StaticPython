@@ -403,6 +403,41 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
         self.assertIsNone(index["active"])
         self.assertIsNone(index["proposed_active"])
 
+    def test_targeted_history_passes_preview_without_becoming_promotable(self) -> None:
+        self.manifest = history_batches.prepare_history_batches(
+            self.contract,
+            {"demo": "pure-python"},
+            selected_libraries=["DEMO"],
+        )
+        self.manifest_path = write_json(
+            self.root / "targeted-preview-manifest.json", self.manifest
+        )
+        index = evidence_module.promote_support_catalog(
+            self.contract_path,
+            self.manifest_path,
+            self.finalize_all_shards(),
+            self.root / "targeted-preview-catalog",
+            mode="preview",
+        )
+        self.assertEqual(self.manifest["selection"]["libraries"], ["demo"])
+        self.assertEqual(index["decision"]["status"], "preview-passed")
+        self.assertEqual(index["decision"]["gate"], "passed")
+        self.assertIsNone(index["active"])
+        self.assertIsNone(index["proposed_active"])
+
+        promoted = evidence_module.promote_support_catalog(
+            self.contract_path,
+            self.manifest_path,
+            self.finalize_all_shards(),
+            self.root / "targeted-promote-catalog",
+            mode="promote",
+        )
+        self.assertEqual(promoted["decision"]["status"], "frozen")
+        self.assertIn(
+            "non-full-history-selection",
+            {record["code"] for record in promoted["decision"]["blockers"]},
+        )
+
     def test_empty_full_history_can_never_promote_active_support(self) -> None:
         empty_contract = contract()
         empty_contract["libraries"]["demo"]["versions"] = {}
