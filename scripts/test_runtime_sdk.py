@@ -1592,6 +1592,9 @@ struct _inittab _PyImport_Inittab[] = {
         legacy_module.parent.mkdir(parents=True)
         legacy_module.write_text(
             """import hmac
+
+from datetime import datetime
+from calendar import timegm
 from collections import Mapping
 
 signing_methods = {
@@ -1624,13 +1627,93 @@ def base64url_encode(input):
             log=lambda _message: None,
         )
         libs.run_pre_patch_hooks([integration], legacy_context)
+        legacy_once = legacy_module.read_text(encoding="utf-8")
         libs.run_pre_patch_hooks([integration], legacy_context)
         legacy_text = legacy_module.read_text(encoding="utf-8")
+        self.assertEqual(legacy_text, legacy_once)
         self.assertIn("from collections.abc import Mapping", legacy_text)
         self.assertIn("def _force_bytes(value):", legacy_text)
+        self.assertEqual(legacy_text.count("def _force_bytes(value):"), 1)
         self.assertEqual(legacy_text.count("hmac.new(_force_bytes(key), _force_bytes(msg),"), 3)
         self.assertIn("x if isinstance(x, int) else ord(x)", legacy_text)
         self.assertIn(".replace(b'=', b'').decode('ascii')", legacy_text)
+
+        early_root = self.root / "early"
+        early_module = early_root / "Lib" / "jwt" / "__init__.py"
+        early_module.parent.mkdir(parents=True)
+        early_module.write_text(
+            """import hmac
+
+try:
+    import json
+except ImportError:
+    import simplejson as json
+
+signing_methods = {
+    'HS256': lambda msg, key: hmac.new(key, msg, None).digest(),
+    'HS384': lambda msg, key: hmac.new(key, msg, None).digest(),
+    'HS512': lambda msg, key: hmac.new(key, msg, None).digest(),
+}
+
+def base64url_encode(input):
+    return base64.urlsafe_b64encode(input).replace('=', '')
+
+if not signature == signing_methods[header['alg']](signing_input, key):
+    raise ValueError
+""",
+            encoding="utf-8",
+        )
+        integration.release_version = "0.1.1"
+        early_context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=early_root,
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=early_root / "downloads",
+            work_cache_root=early_root / "work",
+            asset_overlay_root=REPO_ROOT / "assets" / "overlay",
+            log=lambda _message: None,
+        )
+        libs.run_pre_patch_hooks([integration], early_context)
+        early_once = early_module.read_text(encoding="utf-8")
+        libs.run_pre_patch_hooks([integration], early_context)
+        early_text = early_module.read_text(encoding="utf-8")
+        self.assertEqual(early_text, early_once)
+        self.assertEqual(early_text.count("def _force_bytes(value):"), 1)
+
+        crypto_root = self.root / "optional-crypto"
+        crypto_module = crypto_root / "Lib" / "jwt" / "__init__.py"
+        crypto_module.parent.mkdir(parents=True)
+        crypto_module.write_text(
+            """from collections import Mapping
+
+from Crypto.Signature import PKCS1_v1_5
+from Crypto.Hash import SHA256
+from Crypto.Hash import SHA384
+from Crypto.Hash import SHA512
+""",
+            encoding="utf-8",
+        )
+        integration.release_version = "0.1.7"
+        crypto_context = libs.LibraryHookContext(
+            repo_root=REPO_ROOT,
+            source_root=crypto_root,
+            version_info=(3, 13, 0),
+            version_mm="3.13",
+            version_full="3.13.0",
+            download_cache_root=crypto_root / "downloads",
+            work_cache_root=crypto_root / "work",
+            asset_overlay_root=REPO_ROOT / "assets" / "overlay",
+            log=lambda _message: None,
+        )
+        libs.run_pre_patch_hooks([integration], crypto_context)
+        crypto_once = crypto_module.read_text(encoding="utf-8")
+        libs.run_pre_patch_hooks([integration], crypto_context)
+        crypto_text = crypto_module.read_text(encoding="utf-8")
+        self.assertEqual(crypto_text, crypto_once)
+        self.assertIn("except ImportError:", crypto_text)
+        self.assertIn("from collections.abc import Mapping", crypto_text)
 
         positional_root = self.root / "positional"
         api_jws = positional_root / "Lib" / "jwt" / "api_jws.py"
@@ -1657,7 +1740,11 @@ def base64url_encode(input):
             log=lambda _message: None,
         )
         libs.run_pre_patch_hooks([integration], positional_context)
+        positional_jws_once = api_jws.read_text(encoding="utf-8")
+        positional_jwt_once = api_jwt.read_text(encoding="utf-8")
         libs.run_pre_patch_hooks([integration], positional_context)
+        self.assertEqual(api_jws.read_text(encoding="utf-8"), positional_jws_once)
+        self.assertEqual(api_jwt.read_text(encoding="utf-8"), positional_jwt_once)
         self.assertIn(
             "jwt, key=key, algorithms=algorithms, options=options, **kwargs",
             api_jwt.read_text(encoding="utf-8"),
