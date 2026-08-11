@@ -107,6 +107,41 @@ class TclTkZipfsTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ttk/ttk.tcl"):
             tcltk_zipfs.build_tcltk_zipfs(self.tcl, self.tk)
 
+    def test_archive_rejects_directory_symlinks(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        _write(outside / "host.tcl", b"host filesystem payload")
+        link = self.tcl / "linked-host-directory"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"directory symlinks are unavailable: {exc}")
+        with self.assertRaisesRegex(RuntimeError, "must not contain symlinks"):
+            tcltk_zipfs.build_tcltk_zipfs(self.tcl, self.tk)
+
+    def test_archive_rejects_broken_symlinks(self) -> None:
+        link = self.tcl / "broken-host-file"
+        try:
+            link.symlink_to(self.root / "missing-host-file")
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"file symlinks are unavailable: {exc}")
+        with self.assertRaisesRegex(RuntimeError, "must not contain symlinks"):
+            tcltk_zipfs.build_tcltk_zipfs(self.tcl, self.tk)
+
+    def test_iterator_rejects_non_file_symlink_before_file_filter(self) -> None:
+        root = mock.Mock()
+        entry = mock.Mock()
+        entry.as_posix.return_value = "tcl9.0/linked-host-directory"
+        entry.is_symlink.return_value = True
+        entry.is_file.side_effect = AssertionError(
+            "symlink entries must be rejected before file classification"
+        )
+        root.rglob.return_value = [entry]
+
+        with self.assertRaisesRegex(RuntimeError, "must not contain symlinks"):
+            list(tcltk_zipfs._iter_library_files(root, frozenset()))
+        entry.is_file.assert_not_called()
+
     def test_tcl_module_path_patch_fails_closed_on_upstream_drift(self) -> None:
         (self.tcl / "tm.tcl").write_bytes(b"# upstream changed initialization\n")
         with self.assertRaisesRegex(RuntimeError, "anchor must match exactly once"):

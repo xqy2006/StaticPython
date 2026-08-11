@@ -54,10 +54,10 @@ def _validate_library_root(root: Path, required: tuple[str, ...], *, label: str)
 
 def _iter_library_files(root: Path, excluded_top_level: frozenset[str]):
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
-        if not path.is_file():
-            continue
         if path.is_symlink():
             raise RuntimeError(f"Tcl/Tk ZipFS input must not contain symlinks: {path}")
+        if not path.is_file():
+            continue
         relative = path.relative_to(root).as_posix()
         pure = PurePosixPath(relative)
         if (
