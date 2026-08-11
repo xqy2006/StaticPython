@@ -136,6 +136,29 @@ class FastAPIPackTests(unittest.TestCase):
             set(EXPECTED_VERSIONS),
         )
 
+    def test_workflow_runs_fastapi_on_every_supported_cpython_series(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml"
+        ).read_text(encoding="utf-8")
+        job = workflow.split("  sdk-linked-fastapi:\n", 1)[1]
+        targets = {
+            "3.11.15": "cp311",
+            "3.12.13": "cp312",
+            "3.13.15": "cp313",
+            "3.14.7": "cp314",
+            "3.15.0rc1": "cp315",
+        }
+        for version, tag in targets.items():
+            with self.subTest(version=version):
+                self.assertEqual(job.count(f'cpython_version: "{version}"'), 1)
+                self.assertEqual(job.count(f"python_tag: {tag}"), 1)
+        self.assertIn(
+            "VERIFY_CPYTHON_VERSION: ${{ matrix.cpython_version }}", job
+        )
+        self.assertIn("pydantic-core-runtime-sdk-${{ matrix.python_tag }}", job)
+        self.assertIn("fastapi-static-0.141.1-${{ matrix.python_tag }}", job)
+        self.assertNotIn("fastapi-static-0.141.1-cp313", job)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
