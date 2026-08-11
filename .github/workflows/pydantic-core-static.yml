@@ -25,7 +25,6 @@ env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: "utf-8"
   STATICPYTHON_BUILD_WORKERS: "2"
-  VERIFY_CPYTHON_VERSION: "3.13.15"
   RUST_TOOLCHAIN: "1.88.0"
   RUST_TARGET: "x86_64-pc-windows-msvc"
 
@@ -33,6 +32,22 @@ jobs:
   runtime-sdk:
     runs-on: windows-2022
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cpython_version: "3.11.15"
+            python_tag: cp311
+          - cpython_version: "3.12.13"
+            python_tag: cp312
+          - cpython_version: "3.13.15"
+            python_tag: cp313
+          - cpython_version: "3.14.7"
+            python_tag: cp314
+          - cpython_version: "3.15.0rc1"
+            python_tag: cp315
+    env:
+      VERIFY_CPYTHON_VERSION: ${{ matrix.cpython_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -65,7 +80,7 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          $runtimeRoot = Join-Path $env:RUNNER_TEMP "pydantic-core-runtime"
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP "pydantic-core-runtime-${{ matrix.python_tag }}"
           $runtimeDist = Join-Path $env:GITHUB_WORKSPACE "dist\runtime"
           New-Item -ItemType Directory -Force $runtimeDist | Out-Null
           python .\build.py `
@@ -78,7 +93,7 @@ jobs:
       - name: Upload exact runtime SDK
         uses: actions/upload-artifact@v4
         with:
-          name: pydantic-core-runtime-sdk-cp313
+          name: pydantic-core-runtime-sdk-${{ matrix.python_tag }}
           path: dist/runtime/*.zip
           if-no-files-found: error
           retention-days: 7
@@ -91,12 +106,68 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - pydantic_core_version: "2.46.4"
+          - cpython_version: "3.11.15"
+            python_tag: cp311
+            pydantic_core_version: "2.46.4"
             profile: pydantic-core-experimental
-          - pydantic_core_version: "2.47.0"
+          - cpython_version: "3.11.15"
+            python_tag: cp311
+            pydantic_core_version: "2.47.0"
             profile: pydantic-core-2-47-experimental
-          - pydantic_core_version: "2.48.0"
+          - cpython_version: "3.11.15"
+            python_tag: cp311
+            pydantic_core_version: "2.48.0"
             profile: pydantic-core-latest-experimental
+          - cpython_version: "3.12.13"
+            python_tag: cp312
+            pydantic_core_version: "2.46.4"
+            profile: pydantic-core-experimental
+          - cpython_version: "3.12.13"
+            python_tag: cp312
+            pydantic_core_version: "2.47.0"
+            profile: pydantic-core-2-47-experimental
+          - cpython_version: "3.12.13"
+            python_tag: cp312
+            pydantic_core_version: "2.48.0"
+            profile: pydantic-core-latest-experimental
+          - cpython_version: "3.13.15"
+            python_tag: cp313
+            pydantic_core_version: "2.46.4"
+            profile: pydantic-core-experimental
+          - cpython_version: "3.13.15"
+            python_tag: cp313
+            pydantic_core_version: "2.47.0"
+            profile: pydantic-core-2-47-experimental
+          - cpython_version: "3.13.15"
+            python_tag: cp313
+            pydantic_core_version: "2.48.0"
+            profile: pydantic-core-latest-experimental
+          - cpython_version: "3.14.7"
+            python_tag: cp314
+            pydantic_core_version: "2.46.4"
+            profile: pydantic-core-experimental
+          - cpython_version: "3.14.7"
+            python_tag: cp314
+            pydantic_core_version: "2.47.0"
+            profile: pydantic-core-2-47-experimental
+          - cpython_version: "3.14.7"
+            python_tag: cp314
+            pydantic_core_version: "2.48.0"
+            profile: pydantic-core-latest-experimental
+          - cpython_version: "3.15.0rc1"
+            python_tag: cp315
+            pydantic_core_version: "2.46.4"
+            profile: pydantic-core-experimental
+          - cpython_version: "3.15.0rc1"
+            python_tag: cp315
+            pydantic_core_version: "2.47.0"
+            profile: pydantic-core-2-47-experimental
+          - cpython_version: "3.15.0rc1"
+            python_tag: cp315
+            pydantic_core_version: "2.48.0"
+            profile: pydantic-core-latest-experimental
+    env:
+      VERIFY_CPYTHON_VERSION: ${{ matrix.cpython_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -129,7 +200,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: pydantic-core-runtime-sdk-cp313
+          name: pydantic-core-runtime-sdk-${{ matrix.python_tag }}
           path: dist/runtime
 
       - name: Build static Rust pack, link audited SDK, and run behavior smoke
@@ -281,7 +352,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pydantic-core-static-${{ matrix.pydantic_core_version }}-cp313
+          name: pydantic-core-static-${{ matrix.pydantic_core_version }}-${{ matrix.python_tag }}
           path: |
             dist/pydantic-core-${{ matrix.pydantic_core_version }}/packs/*.zip
             dist/pydantic-core-${{ matrix.pydantic_core_version }}/staticpython-pack-verify-report.json

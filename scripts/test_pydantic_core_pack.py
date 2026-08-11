@@ -290,6 +290,37 @@ class PydanticCorePackTests(unittest.TestCase):
         self.assertIn('pydantic_core_version: "2.47.0"', workflow)
         self.assertIn('pydantic_core_version: "2.48.0"', workflow)
 
+    def test_workflow_covers_all_supported_cpython_series(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml"
+        ).read_text(encoding="utf-8")
+
+        targets = {
+            "3.11.15": "cp311",
+            "3.12.13": "cp312",
+            "3.13.15": "cp313",
+            "3.14.7": "cp314",
+            "3.15.0rc1": "cp315",
+        }
+        for version, tag in targets.items():
+            with self.subTest(version=version):
+                self.assertEqual(workflow.count(f'cpython_version: "{version}"'), 4)
+                self.assertEqual(workflow.count(f"python_tag: {tag}"), 4)
+        for version in ("2.46.4", "2.47.0", "2.48.0"):
+            with self.subTest(pydantic_core=version):
+                self.assertEqual(
+                    workflow.count(f'pydantic_core_version: "{version}"'), 5
+                )
+        self.assertEqual(
+            workflow.count("VERIFY_CPYTHON_VERSION: ${{ matrix.cpython_version }}"),
+            2,
+        )
+        self.assertIn("pydantic-core-runtime-sdk-${{ matrix.python_tag }}", workflow)
+        self.assertIn(
+            "pydantic-core-static-${{ matrix.pydantic_core_version }}-${{ matrix.python_tag }}",
+            workflow,
+        )
+
     def test_workflow_audits_released_files_per_smoke_record(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml").read_text(
             encoding="utf-8"
