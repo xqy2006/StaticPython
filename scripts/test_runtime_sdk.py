@@ -1098,6 +1098,7 @@ struct _inittab _PyImport_Inittab[] = {
 
         fallback_sources = {
             "humanize",
+            "jwt",
             "loguru",
             "tqdm",
             "ua_parser_builtins",
@@ -1405,6 +1406,16 @@ struct _inittab _PyImport_Inittab[] = {
         )
         integration = next(item for item in integrations if item.name == "jwt")
         self.assertIn("inspect.signature(jwt.decode)", integration.smoke_tests[0]["code"])
+        self.assertEqual(
+            integration.license_sources,
+            [
+                {
+                    "filename": "LICENSE-PyJWT-MIT",
+                    "url": "https://raw.githubusercontent.com/jpadilla/pyjwt/0.4.1/LICENSE",
+                    "sha256": "b9f95c496bd9dba93a2b6ee6382f4692918e8648f2d9dab03e93457f8b71ac4c",
+                }
+            ],
+        )
 
         legacy_root = self.root / "legacy"
         legacy_module = legacy_root / "Lib" / "jwt" / "__init__.py"
