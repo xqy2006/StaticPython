@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -7,10 +8,21 @@ import sys
 from pathlib import Path
 
 from libs import pypi_library, source_path, transform_source_text, write_source_text
+from tools import download_file
 
 
 SCIPY_RELEASE_VERSION = "1.17.1"
-SCIPY_CYTHON_REQUIREMENT = "Cython>=3.0.8,<4.0.0"
+SCIPY_CYTHON_VERSION = "3.2.9"
+SCIPY_CYTHON_REQUIREMENT = f"Cython=={SCIPY_CYTHON_VERSION}"
+SCIPY_CYTHON_WHEEL_FILENAME = "cython-3.2.9-py3-none-any.whl"
+SCIPY_CYTHON_WHEEL_URL = (
+    "https://files.pythonhosted.org/packages/00/ec/"
+    "e61deec9bcfbb0e1b36f8b5ba75cb44644419b4bfd0fdd666bffd21d9579/"
+    + SCIPY_CYTHON_WHEEL_FILENAME
+)
+SCIPY_CYTHON_WHEEL_SHA256 = (
+    "a2b0e87f6b80790c929308ca0831d686f7a180feab684fe8cd4a4380bd96aaca"
+)
 
 SCIPY_CCALLBACK_PROJECT_GUID = "{46A90C63-8F37-4F90-B3B4-A4DD42A08B1C}"
 SCIPY_UARRAY_PROJECT_GUID = "{2B76B6C5-297C-4A7F-95F5-9724F9A388F1}"
@@ -226,7 +238,13 @@ def scipy_lib_source_root(context) -> Path:
 
 def scipy_cython_cache_dir(context) -> Path:
     version_tag = f"py{sys.version_info.major}{sys.version_info.minor}"
-    return context.download_cache_root / "build-tools" / "scipy-cython" / version_tag
+    return (
+        context.download_cache_root
+        / "build-tools"
+        / "scipy-cython"
+        / SCIPY_CYTHON_VERSION
+        / version_tag
+    )
 
 
 def scipy_cython_target_dir(context) -> Path:
@@ -248,12 +266,67 @@ def _render_scipy_cython_wrapper(target_dir: Path) -> str:
     )
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _installed_cython_version(target_dir: Path) -> str:
+    environment = os.environ.copy()
+    environment.pop("PYTHONHOME", None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONPATH"] = str(target_dir)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-c",
+            "import Cython; print(Cython.__version__)",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=60,
+    )
+    return completed.stdout.strip()
+
+
 def _ensure_scipy_cython(context) -> Path:
     target_dir = scipy_cython_target_dir(context)
     package_dir = target_dir / "Cython"
+    if (
+        package_dir.exists()
+        and _installed_cython_version(target_dir) != SCIPY_CYTHON_VERSION
+    ):
+        shutil.rmtree(target_dir)
     if not package_dir.exists():
         cache_dir = scipy_cython_cache_dir(context)
         cache_dir.mkdir(parents=True, exist_ok=True)
+        wheel_path = cache_dir / SCIPY_CYTHON_WHEEL_FILENAME
+        if (
+            wheel_path.exists()
+            and _sha256_file(wheel_path) != SCIPY_CYTHON_WHEEL_SHA256
+        ):
+            wheel_path.unlink()
+        if not wheel_path.exists():
+            download_file(
+                context.log,
+                SCIPY_CYTHON_WHEEL_URL,
+                wheel_path,
+                force=True,
+            )
+        observed_wheel_sha256 = _sha256_file(wheel_path)
+        if observed_wheel_sha256 != SCIPY_CYTHON_WHEEL_SHA256:
+            wheel_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                "SciPy Cython wheel SHA-256 mismatch: "
+                f"expected {SCIPY_CYTHON_WHEEL_SHA256}, "
+                f"observed {observed_wheel_sha256}"
+            )
         if target_dir.exists():
             shutil.rmtree(target_dir)
         context.log(f"installing local scipy build dependency {SCIPY_CYTHON_REQUIREMENT}")
@@ -264,14 +337,27 @@ def _ensure_scipy_cython(context) -> Path:
                 "pip",
                 "install",
                 "--disable-pip-version-check",
+                "--no-deps",
+                "--no-index",
                 "--no-compile",
                 "--target",
                 str(target_dir),
-                SCIPY_CYTHON_REQUIREMENT,
+                str(wheel_path),
             ],
             check=True,
             timeout=60 * 10,
         )
+    installed_version = _installed_cython_version(target_dir)
+    if installed_version != SCIPY_CYTHON_VERSION:
+        raise RuntimeError(
+            "SciPy Cython toolchain version mismatch: "
+            f"expected {SCIPY_CYTHON_VERSION}, observed {installed_version}"
+        )
+    LIBRARY_INTEGRATION.toolchain_metadata["cython"] = {
+        "version": installed_version,
+        "wheel": SCIPY_CYTHON_WHEEL_FILENAME,
+        "wheel_sha256": SCIPY_CYTHON_WHEEL_SHA256,
+    }
     wrapper_path = scipy_cython_wrapper_path(context)
     wrapper_path.parent.mkdir(parents=True, exist_ok=True)
     wrapper_path.write_text(

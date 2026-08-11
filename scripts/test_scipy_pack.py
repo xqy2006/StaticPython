@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from packaging.version import Version
 
@@ -39,6 +41,14 @@ class SciPyPackTests(unittest.TestCase):
             integration.name: integration
             for integration in libs.load_integration_definitions(REPO_ROOT / "Lib")
         }
+        setup_path = REPO_ROOT / "Lib" / "scipy" / "setup.py"
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_scipy_setup_test",
+            setup_path,
+        )
+        assert spec is not None and spec.loader is not None
+        cls.scipy_setup = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.scipy_setup)
 
     def test_experimental_profile_locks_exact_dependency_closure(self) -> None:
         _name, profile = build.resolve_profile(self.config, "scipy-experimental")
@@ -77,6 +87,30 @@ class SciPyPackTests(unittest.TestCase):
                     integration.source_archive_sha256_by_version,
                     {version: EXPECTED_SOURCE_HASHES[name]},
                 )
+
+    def test_cython_codegen_toolchain_is_exact_and_hash_pinned(self) -> None:
+        self.assertEqual(self.scipy_setup.SCIPY_CYTHON_VERSION, "3.2.9")
+        self.assertEqual(
+            self.scipy_setup.SCIPY_CYTHON_REQUIREMENT,
+            "Cython==3.2.9",
+        )
+        self.assertEqual(
+            self.scipy_setup.SCIPY_CYTHON_WHEEL_FILENAME,
+            "cython-3.2.9-py3-none-any.whl",
+        )
+        self.assertEqual(
+            self.scipy_setup.SCIPY_CYTHON_WHEEL_SHA256,
+            "a2b0e87f6b80790c929308ca0831d686f7a180feab684fe8cd4a4380bd96aaca",
+        )
+        self.assertTrue(
+            self.scipy_setup.SCIPY_CYTHON_WHEEL_URL.endswith(
+                "/cython-3.2.9-py3-none-any.whl"
+            )
+        )
+
+        context = SimpleNamespace(download_cache_root=Path("C:/cache"))
+        cache_dir = self.scipy_setup.scipy_cython_cache_dir(context).as_posix()
+        self.assertIn("/scipy-cython/3.2.9/", cache_dir)
 
     def test_scipy_contract_declares_native_subset_and_extended_smoke(self) -> None:
         integration = self.definitions["scipy"]
