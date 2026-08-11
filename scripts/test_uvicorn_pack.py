@@ -150,6 +150,23 @@ class UvicornPackTests(unittest.TestCase):
         self.assertIn("$report.pe_audit.status -ne 'passed'", workflow)
         self.assertIn("python.*\\.dll", workflow)
 
+    def test_dedicated_workflow_covers_every_target_cpython_series(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "uvicorn-static.yml"
+        ).read_text(encoding="utf-8")
+        expected_targets = {
+            "3.11.15": "cp311",
+            "3.12.13": "cp312",
+            "3.13.15": "cp313",
+            "3.14.7": "cp314",
+            "3.15.0rc1": "cp315",
+        }
+        self.assertIn("VERIFY_CPYTHON_VERSION: ${{ matrix.cpython_version }}", workflow)
+        self.assertIn("uvicorn-static-0.52.1-${{ matrix.python_tag }}", workflow)
+        for version, tag in expected_targets.items():
+            self.assertEqual(workflow.count(f'cpython_version: "{version}"'), 1)
+            self.assertEqual(workflow.count(f"python_tag: {tag}"), 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

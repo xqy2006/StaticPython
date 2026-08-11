@@ -29,12 +29,27 @@ env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: "utf-8"
   STATICPYTHON_BUILD_WORKERS: "2"
-  VERIFY_CPYTHON_VERSION: "3.13.15"
 
 jobs:
   sdk-linked-uvicorn:
     runs-on: windows-2022
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cpython_version: "3.11.15"
+            python_tag: cp311
+          - cpython_version: "3.12.13"
+            python_tag: cp312
+          - cpython_version: "3.13.15"
+            python_tag: cp313
+          - cpython_version: "3.14.7"
+            python_tag: cp314
+          - cpython_version: "3.15.0rc1"
+            python_tag: cp315
+    env:
+      VERIFY_CPYTHON_VERSION: ${{ matrix.cpython_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +83,7 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          $runtimeRoot = Join-Path $env:RUNNER_TEMP "uvicorn-runtime"
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP "uvicorn-runtime-${{ matrix.python_tag }}"
           $runtimeDist = Join-Path $env:GITHUB_WORKSPACE "dist\runtime"
           New-Item -ItemType Directory -Force $runtimeDist | Out-Null
           python .\build.py `
@@ -205,7 +220,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: uvicorn-static-0.52.1-cp313
+          name: uvicorn-static-0.52.1-${{ matrix.python_tag }}
           path: |
             dist/uvicorn-0.52.1/packs/*.zip
             dist/uvicorn-0.52.1/staticpython-pack-verify-report.json
