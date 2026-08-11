@@ -302,6 +302,8 @@ class PrepareLibraryContractMatrixTests(unittest.TestCase):
         self.assertIn("Discover current source version contract", weekly)
         self.assertIn('selection = "current-source-discovery"', weekly)
         self.assertIn('"previous-library-version-contract.json"', weekly)
+        self.assertIn("STATICPYTHON_TARGET_LIBRARIES", weekly)
+        self.assertIn('$planArgs += @("--library", $library)', weekly)
         self.assertIn("Download matching full-history validation", daily)
         self.assertIn('"--history-support-catalog"', daily)
 

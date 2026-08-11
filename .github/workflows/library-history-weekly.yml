@@ -20,6 +20,11 @@ on:
   schedule:
     - cron: "17 3 * * 0"
   workflow_dispatch:
+    inputs:
+      libraries:
+        description: "Comma-separated integration names for an exact targeted history gate; empty runs full history."
+        required: false
+        type: string
 
 permissions:
   actions: read
@@ -288,9 +293,11 @@ jobs:
             break
           }
 
-      - name: Prepare deterministic full-history shards
+      - name: Prepare deterministic history shards
         id: plan
         shell: pwsh
+        env:
+          STATICPYTHON_TARGET_LIBRARIES: ${{ inputs.libraries }}
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $planRoot = Join-Path $env:GITHUB_WORKSPACE ".tmp\history-plan"
@@ -308,6 +315,21 @@ jobs:
               "--native-batch-size", "1",
               "--max-jobs-per-run", "1"
             )
+          } elseif (
+            "${{ github.event_name }}" -eq "workflow_dispatch" -and
+            -not [string]::IsNullOrWhiteSpace($env:STATICPYTHON_TARGET_LIBRARIES)
+          ) {
+            $requestedLibraries = @(
+              $env:STATICPYTHON_TARGET_LIBRARIES.Split(',') |
+                ForEach-Object { $_.Trim() } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            )
+            if ($requestedLibraries.Count -eq 0) {
+              throw "Targeted history input contains no library names"
+            }
+            foreach ($library in $requestedLibraries) {
+              $planArgs += @("--library", $library)
+            }
           }
           python @planArgs
           $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
@@ -474,7 +496,7 @@ jobs:
           pattern: library-history-shard-${{ needs.plan.outputs.manifest_key }}-s*
           path: .tmp/shard-evidence
 
-      - name: Evaluate full-history support promotion
+      - name: Evaluate history support promotion
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
@@ -523,7 +545,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Enforce full-history support gate
+      - name: Enforce history support gate
         if: always()
         shell: pwsh
         run: |
@@ -534,5 +556,5 @@ jobs:
           $index = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
           if ($index.decision.gate -ne "passed") {
             $codes = @($index.decision.blockers | ForEach-Object { $_.code }) -join ", "
-            throw "Full-history support promotion is frozen: $codes"
+            throw "History support promotion is frozen: $codes"
           }
