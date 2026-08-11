@@ -294,6 +294,12 @@ class PydanticCorePackTests(unittest.TestCase):
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml"
         ).read_text(encoding="utf-8")
+        runtime_job, core_tail = workflow.split(
+            "  sdk-linked-pydantic-core:\n", 1
+        )
+        next_job = core_tail.find("\n  sdk-linked-")
+        core_job = core_tail if next_job < 0 else core_tail[:next_job]
+        workflow = runtime_job + core_job
 
         targets = {
             "3.11.15": "cp311",
