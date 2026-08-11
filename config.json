@@ -534,14 +534,42 @@
         "license_expression": "MIT",
         "patch_rules": [
           {
-            "package": ">=0.1.1,<0.1.7",
+            "package": ">=0.1.1,<0.1.6",
             "path": "Lib/jwt/__init__.py",
             "replacements": [
               {
-                "old": "import hmac\n",
-                "new": "import hmac\n\ntry:\n    unicode\nexcept NameError:\n    unicode = str\n\n\ndef _force_bytes(value):\n    if isinstance(value, str):\n        return value.encode('utf-8')\n    return value\n",
+                "old": "import hmac\n\ntry:\n    import json",
+                "new": "import hmac\n\ntry:\n    unicode\nexcept NameError:\n    unicode = str\n\n\ndef _force_bytes(value):\n    if isinstance(value, str):\n        return value.encode('utf-8')\n    return value\n\ntry:\n    import json",
                 "count": 1
-              },
+              }
+            ]
+          },
+          {
+            "package": "==0.1.6",
+            "path": "Lib/jwt/__init__.py",
+            "replacements": [
+              {
+                "old": "import hmac\n\nfrom datetime import datetime",
+                "new": "import hmac\n\ntry:\n    unicode\nexcept NameError:\n    unicode = str\n\n\ndef _force_bytes(value):\n    if isinstance(value, str):\n        return value.encode('utf-8')\n    return value\n\nfrom datetime import datetime",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": "==0.1.7",
+            "path": "Lib/jwt/__init__.py",
+            "replacements": [
+              {
+                "old": "from Crypto.Signature import PKCS1_v1_5\nfrom Crypto.Hash import SHA256\nfrom Crypto.Hash import SHA384\nfrom Crypto.Hash import SHA512",
+                "new": "try:\n    from Crypto.Signature import PKCS1_v1_5\n    from Crypto.Hash import SHA256\n    from Crypto.Hash import SHA384\n    from Crypto.Hash import SHA512\nexcept ImportError:\n    PKCS1_v1_5 = SHA256 = SHA384 = SHA512 = None",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "package": ">=0.1.1,<0.1.7",
+            "path": "Lib/jwt/__init__.py",
+            "replacements": [
               {
                 "old": "hmac.new(key, msg,",
                 "new": "hmac.new(_force_bytes(key), _force_bytes(msg),",
