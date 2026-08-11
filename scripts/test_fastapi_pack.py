@@ -161,6 +161,22 @@ class FastAPIPackTests(unittest.TestCase):
         self.assertIn("fastapi-static-0.141.1-${{ matrix.python_tag }}", job)
         self.assertNotIn("fastapi-static-0.141.1-cp313", job)
 
+    def test_workflow_reaudits_the_uploaded_fastapi_verifier_pe(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml"
+        ).read_text(encoding="utf-8")
+        job = workflow.split("  sdk-linked-fastapi:\n", 1)[1]
+
+        self.assertIn("staticpython-pack-verify.exe", job)
+        self.assertIn("$report.pe_audit.executable_sha256", job)
+        self.assertIn("$report.pe_audit.map_sha256", job)
+        self.assertIn("@($report.pe_audit.main_object_records).Count -ne 0", job)
+        self.assertIn("dumpbin /NOLOGO /DEPENDENTS $exePath", job)
+        self.assertIn(
+            "Compare-Object $reportedDependencies $observedDependencies",
+            job,
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
