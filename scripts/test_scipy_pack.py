@@ -131,6 +131,8 @@ class SciPyPackTests(unittest.TestCase):
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "scipy-static.yml"
         ).read_text(encoding="utf-8")
+        self.assertIn("push:\n    branches: [master]", workflow)
+        self.assertIn("pull_request:\n    paths:", workflow)
         targets = {
             "3.11.15": "cp311",
             "3.12.13": "cp312",

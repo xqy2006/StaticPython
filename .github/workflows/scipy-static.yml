@@ -1,6 +1,22 @@
 name: Experimental SciPy static pack
 
 on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/scipy-static.yml"
+      - "Lib/numpy/**"
+      - "Lib/pybind11/**"
+      - "Lib/scipy/**"
+      - "assets/overlay/Include/staticpython_pack.h"
+      - "assets/overlay/Python/staticpython_pack_runtime.c"
+      - "build.py"
+      - "config.json"
+      - "libs.py"
+      - "scripts/scipy_profile_verify.py"
+      - "scripts/test_runtime_sdk.py"
+      - "scripts/test_scipy_pack.py"
+      - "scripts/verify_pack_with_runtime_sdk.py"
   pull_request:
     paths:
       - ".github/workflows/scipy-static.yml"
