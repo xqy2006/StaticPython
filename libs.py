@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import fnmatch
 import hashlib
@@ -14,7 +15,7 @@ import time
 from pathlib import Path, PurePosixPath
 import tokenize
 from types import ModuleType
-from typing import Callable
+from typing import Callable, Iterator
 from urllib.request import Request, urlopen
 from zipfile import ZipFile
 
@@ -828,6 +829,67 @@ def _remove_tree(path: Path) -> None:
         raise exc_info[1]
 
     shutil.rmtree(_long_path(path), onerror=onerror)
+
+
+@contextmanager
+def temporary_pypi_release_cache(
+    context: LibraryHookContext,
+    integration: LibraryIntegration,
+    release_version: str,
+) -> Iterator[None]:
+    """Discard one PyPI release's caches after a bounded validation scope."""
+
+    release_roots: list[Path] = []
+    project_name = integration.project_name or integration.name
+    if integration.source_provider == "pypi":
+        normalized = _normalized_project_name(project_name)
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", normalized):
+            raise RuntimeError(
+                f"unsafe normalized PyPI cache project name: {normalized!r}"
+            )
+        try:
+            Version(release_version)
+        except InvalidVersion as exc:
+            raise RuntimeError(
+                f"unsafe PyPI cache release version: {release_version!r}"
+            ) from exc
+        if (
+            not release_version
+            or release_version in {".", ".."}
+            or "/" in release_version
+            or "\\" in release_version
+        ):
+            raise RuntimeError(
+                f"unsafe PyPI cache release version: {release_version!r}"
+            )
+        for cache_root in (context.download_cache_root, context.work_cache_root):
+            cache_root = cache_root.resolve()
+            project_root = (cache_root / "pypi" / normalized).resolve()
+            release_root = (project_root / release_version).resolve()
+            if (
+                not release_root.is_relative_to(cache_root)
+                or release_root.parent != project_root
+            ):
+                raise RuntimeError(
+                    "refusing to clean a PyPI release cache outside its exact "
+                    f"project root: {release_root}"
+                )
+            release_roots.append(release_root)
+
+    try:
+        yield
+    finally:
+        if integration.source_provider == "pypi":
+            removed: list[Path] = []
+            for release_root in release_roots:
+                if release_root.exists():
+                    _remove_tree(release_root)
+                    removed.append(release_root)
+            if removed:
+                context.log(
+                    f"discarded temporary PyPI cache for {project_name} {release_version} "
+                    f"from {len(removed)} root(s)"
+                )
 
 
 def _archive_target_path(destination_root: Path, member_name: str) -> Path | None:
