@@ -1095,6 +1095,13 @@
           "pytest": "Lib/pytest",
           "_pytest": "Lib/_pytest"
         },
+        "python_packages": [
+          "pytest",
+          "_pytest"
+        ],
+        "top_level_import_names": [
+          "pytest"
+        ],
         "source_provider": "pypi"
       },
       {

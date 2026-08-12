@@ -12,6 +12,7 @@ from libs import (
     _normalized_project_name,
     _resolve_source_entry,
     _select_pypi_file,
+    configure_python_module_ownership,
     read_source_text,
     read_text_file,
     write_source_text,
@@ -25,24 +26,12 @@ _NATIVE_CATHETUS_COMPAT = read_text_file(_COMPATIBILITY_ROOT / "cathetus.py")
 
 def _configure_hypothesis_globals_module(enabled: bool) -> None:
     """Keep optional top-level module metadata aligned with the selected sdist."""
-    integration = LIBRARY_INTEGRATION
-    module_name = "_hypothesis_globals"
-    materialized_path = "Lib/_hypothesis_globals.py"
-
-    def update(values: list[str], value: str) -> list[str]:
-        filtered = [item for item in values if item != value]
-        if enabled:
-            return [value, *filtered]
-        return filtered
-
-    integration.materialized_paths = update(
-        integration.materialized_paths,
-        materialized_path,
-    )
-    integration.python_packages = update(integration.python_packages, module_name)
-    integration.top_level_import_names = update(
-        integration.top_level_import_names,
-        module_name,
+    configure_python_module_ownership(
+        LIBRARY_INTEGRATION,
+        module_name="_hypothesis_globals",
+        materialized_path="Lib/_hypothesis_globals.py",
+        enabled=enabled,
+        expose_top_level=True,
     )
 
 

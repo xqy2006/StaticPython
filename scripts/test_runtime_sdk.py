@@ -1918,6 +1918,92 @@ struct _inittab _PyImport_Inittab[] = {
         )
         self.assertEqual(build._integration_frozen_modules(self.root, integration), [])
 
+    def test_release_pack_ownership_covers_auxiliary_top_level_modules(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        integrations = libs.load_integration_definitions(
+            REPO_ROOT / "Lib",
+            library_catalog=config["third_party_library_catalog"],
+        )
+        by_name = {integration.name: integration for integration in integrations}
+        expected_ownership = {
+            "black": {"_black_version", "black", "blackd", "blib2to3"},
+            "ipykernel": {"ipykernel", "ipykernel_launcher"},
+            "matplotlib": {"matplotlib", "mpl_toolkits", "pylab"},
+            "plotly": {"_plotly_utils", "plotly"},
+            "pytest": {"_pytest", "pytest"},
+        }
+        for name, expected in expected_ownership.items():
+            self.assertTrue(
+                expected.issubset(set(by_name[name].python_packages)),
+                name,
+            )
+        self.assertEqual(
+            by_name["black"].top_level_import_names,
+            ["black", "blackd", "blib2to3"],
+        )
+        self.assertEqual(by_name["ipykernel"].top_level_import_names, ["ipykernel"])
+        self.assertEqual(
+            by_name["matplotlib"].top_level_import_names,
+            ["matplotlib", "mpl_toolkits"],
+        )
+        self.assertEqual(by_name["plotly"].top_level_import_names, ["plotly"])
+        self.assertEqual(by_name["pytest"].top_level_import_names, ["pytest"])
+
+        unowned_roots: list[str] = []
+        for integration in integrations:
+            for raw_path in integration.materialized_paths:
+                path = Path(raw_path.replace("\\", "/"))
+                if len(path.parts) < 2 or path.parts[0].casefold() != "lib":
+                    continue
+                root = path.parts[1]
+                if root.casefold() in {"test", "tests"}:
+                    continue
+                module_root = root[:-3] if root.endswith(".py") else root
+                if not any(
+                    package == module_root
+                    or package.startswith(module_root + ".")
+                    or module_root.startswith(package + ".")
+                    for package in integration.python_packages
+                ):
+                    unowned_roots.append(f"{integration.name}:{raw_path}")
+        self.assertEqual(unowned_roots, [])
+
+    def test_optional_auxiliary_module_ownership_tracks_selected_source(self) -> None:
+        black_spec = importlib.util.spec_from_file_location(
+            "staticpython_black_ownership_test",
+            REPO_ROOT / "Lib" / "black" / "setup.py",
+        )
+        assert black_spec is not None and black_spec.loader is not None
+        black = importlib.util.module_from_spec(black_spec)
+        black_spec.loader.exec_module(black)
+        black._configure_black_version_module(False)
+        self.assertNotIn("_black_version", black.LIBRARY_INTEGRATION.python_packages)
+        self.assertIn("Lib/_black_version.py", black.LIBRARY_INTEGRATION.cleanup_paths)
+        black._configure_black_version_module(True)
+        self.assertIn("_black_version", black.LIBRARY_INTEGRATION.python_packages)
+        self.assertNotIn(
+            "_black_version",
+            black.LIBRARY_INTEGRATION.top_level_import_names,
+        )
+
+        plotly_spec = importlib.util.spec_from_file_location(
+            "staticpython_plotly_ownership_test",
+            REPO_ROOT / "Lib" / "plotly" / "setup.py",
+        )
+        assert plotly_spec is not None and plotly_spec.loader is not None
+        plotly = importlib.util.module_from_spec(plotly_spec)
+        plotly_spec.loader.exec_module(plotly)
+        context = SimpleNamespace(source_root=self.root)
+        plotly.configure_plotly_auxiliary_modules(context)
+        self.assertNotIn("_plotly_utils", plotly.LIBRARY_INTEGRATION.python_packages)
+        (self.root / "Lib" / "_plotly_utils").mkdir(parents=True)
+        plotly.configure_plotly_auxiliary_modules(context)
+        self.assertIn("_plotly_utils", plotly.LIBRARY_INTEGRATION.python_packages)
+        self.assertNotIn(
+            "_plotly_utils",
+            plotly.LIBRARY_INTEGRATION.top_level_import_names,
+        )
+
     def test_pack_shards_partition_current_full_catalog(self) -> None:
         config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
         expected = config["profiles"]["full"]["third_party_libraries"]

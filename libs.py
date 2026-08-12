@@ -155,6 +155,49 @@ def _build_cleanup_paths(paths: list[str] | None = None) -> list[str]:
     return _unique([_normalized_relpath(path) for path in (paths or [])])
 
 
+def configure_python_module_ownership(
+    integration: LibraryIntegration,
+    *,
+    module_name: str,
+    materialized_path: str,
+    enabled: bool,
+    expose_top_level: bool = False,
+) -> None:
+    """Keep optional top-level module metadata aligned with materialized source."""
+    if not module_name or any(
+        not part.isidentifier() for part in module_name.split(".")
+    ):
+        raise RuntimeError(f"invalid Python module ownership name: {module_name!r}")
+    normalized_path = _normalized_relpath(materialized_path)
+    if not normalized_path.startswith("Lib/"):
+        raise RuntimeError(
+            f"Python module ownership path must be inside Lib: {materialized_path!r}"
+        )
+
+    def update(values: list[str], value: str, include: bool) -> list[str]:
+        filtered = [item for item in values if item != value]
+        return [value, *filtered] if include else filtered
+
+    integration.materialized_paths = update(
+        integration.materialized_paths,
+        normalized_path,
+        enabled,
+    )
+    integration.cleanup_paths = _build_cleanup_paths(
+        [*integration.cleanup_paths, normalized_path]
+    )
+    integration.python_packages = update(
+        integration.python_packages,
+        module_name,
+        enabled,
+    )
+    integration.top_level_import_names = update(
+        integration.top_level_import_names,
+        module_name,
+        enabled and expose_top_level,
+    )
+
+
 def source_path(context: LibraryHookContext, relative: str) -> Path:
     return context.source_root / _normalized_relpath(relative)
 

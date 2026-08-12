@@ -84,6 +84,8 @@ def embed_ipykernel_resources(context) -> None:
 LIBRARY_INTEGRATION = simple_library(
     name="ipykernel",
     overlay_entries=["Lib/ipykernel"],
+    python_packages=["ipykernel", "ipykernel_launcher"],
+    top_level_import_names=["ipykernel"],
     materialized_paths=[
         "Lib/ipykernel/resources/logo-32x32.png",
         "Lib/ipykernel/resources/logo-64x64.png",

@@ -1736,7 +1736,8 @@ LIBRARY_INTEGRATION = pypi_library(
         "matplotlib_builtin/source/extern/agg24-svn/include/agg_basics.h",
         *[f"PCbuild/{project}" for project, _guid in [*MATPLOTLIB_SUPPORT_PROJECT_ITEMS, *MATPLOTLIB_EXTENSION_PROJECT_ITEMS]],
     ],
-    python_packages=["matplotlib", "mpl_toolkits"],
+    python_packages=["matplotlib", "mpl_toolkits", "pylab"],
+    top_level_import_names=["matplotlib", "mpl_toolkits"],
     static_library_projects_release_x64=[
         *[project for project, _guid in MATPLOTLIB_SUPPORT_PROJECT_ITEMS],
         *[project for project, _guid in MATPLOTLIB_EXTENSION_PROJECT_ITEMS],

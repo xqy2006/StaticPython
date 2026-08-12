@@ -2,6 +2,7 @@ import json
 import re
 
 from libs import (
+    configure_python_module_ownership,
     ensure_text_after,
     replace_function_block_once,
     replace_regex_once,
@@ -10,6 +11,15 @@ from libs import (
     transform_source_text,
     write_source_text,
 )
+
+
+def configure_plotly_auxiliary_modules(context) -> None:
+    configure_python_module_ownership(
+        LIBRARY_INTEGRATION,
+        module_name="_plotly_utils",
+        materialized_path="Lib/_plotly_utils",
+        enabled=(context.source_root / "Lib" / "_plotly_utils").is_dir(),
+    )
 
 
 def patch_plotly_data_source(text: str) -> str:
@@ -615,7 +625,11 @@ LIBRARY_INTEGRATION = simple_library(
         "?_plotly_utils": "Lib/_plotly_utils",
     },
     materialized_paths=[
+        "Lib/_plotly_utils",
         "Lib/plotly/_staticpython_package_data.py",
     ],
+    python_packages=["_plotly_utils", "plotly"],
+    top_level_import_names=["plotly"],
+    prepare_source_hooks=[configure_plotly_auxiliary_modules],
     post_patch_hooks=[patch_plotly_sources],
 )
