@@ -57,6 +57,10 @@ WORK_CACHE_ROOT = REPO_ROOT / ".vendor-stage"
 MANIFEST_PATH = REPO_ROOT / "manifest.json"
 CONFIG_PATH = REPO_ROOT / "config.json"
 CPYTHON_ARCHIVE_URL_TEMPLATE = "https://github.com/python/cpython/archive/refs/tags/v{version}.zip"
+CPYTHON_CODELOAD_URL_TEMPLATE = "https://codeload.github.com/python/cpython/zip/refs/tags/v{version}"
+CPYTHON_PYTHON_ORG_URL_TEMPLATE = (
+    "https://www.python.org/ftp/python/{base_version}/Python-{version}.tgz"
+)
 CPYTHON_SOURCE_PROVENANCE_RELATIVE_PATH = Path(".staticpython-cpython-source.json")
 DEFAULT_CPYTHON_VERSION = "3.13.2"
 DOWNLOAD_MAX_ATTEMPTS = 4
@@ -3996,10 +4000,77 @@ def download_cpython_source(
     reuse_existing: bool = False,
 ) -> Path:
     download_root.mkdir(parents=True, exist_ok=True)
-    archive_url = source_archive_url or CPYTHON_ARCHIVE_URL_TEMPLATE.format(version=version)
-    archive_path = download_root / f"cpython-v{version}.zip"
-    download_file(archive_url, archive_path)
-    source_root = extract_zip_archive(archive_path, download_root, reuse_existing=reuse_existing)
+    if source_archive_url is not None:
+        lower_url = source_archive_url.partition("?")[0].lower()
+        archive_suffix = next(
+            (
+                suffix
+                for suffix in (".tar.gz", ".tgz", ".tar", ".zip")
+                if lower_url.endswith(suffix)
+            ),
+            ".zip",
+        )
+        candidates = [
+            (source_archive_url, download_root / f"cpython-v{version}-custom{archive_suffix}")
+        ]
+    else:
+        base_version = Version(version).base_version
+        candidates = [
+            (
+                CPYTHON_ARCHIVE_URL_TEMPLATE.format(version=version),
+                download_root / f"cpython-v{version}.zip",
+            ),
+            (
+                CPYTHON_CODELOAD_URL_TEMPLATE.format(version=version),
+                download_root / f"cpython-v{version}-codeload.zip",
+            ),
+            (
+                CPYTHON_PYTHON_ORG_URL_TEMPLATE.format(
+                    base_version=base_version,
+                    version=version,
+                ),
+                download_root / f"cpython-v{version}-python-org.tgz",
+            ),
+        ]
+
+    errors: list[str] = []
+    archive_url: str | None = None
+    archive_path: Path | None = None
+    for candidate_url, candidate_path in candidates:
+        try:
+            download_file(candidate_url, candidate_path)
+            validate_source_archive(candidate_path)
+        except (
+            BadZipFile,
+            EOFError,
+            HTTPError,
+            OSError,
+            RuntimeError,
+            tarfile.TarError,
+            URLError,
+            http.client.HTTPException,
+        ) as exc:
+            _cleanup_failed_download(candidate_path)
+            errors.append(f"{candidate_url}: {exc}")
+            log(f"CPython source download failed from {candidate_url}: {exc}")
+            continue
+        archive_url = candidate_url
+        archive_path = candidate_path
+        break
+    if archive_url is None or archive_path is None:
+        raise RuntimeError("all CPython source downloads failed:\n" + "\n".join(errors))
+
+    final_name = f"cpython-{version}"
+    existing_root = download_root / final_name
+    if reuse_existing and (existing_root / "Include" / "patchlevel.h").is_file():
+        source_root = existing_root
+        log(f"reusing existing extracted source tree at {source_root}")
+    else:
+        source_root = extract_source_archive(
+            archive_path,
+            download_root,
+            final_name=final_name,
+        )
     commit = resolve_cpython_tag_commit(version) if source_archive_url is None else None
     write_cpython_source_provenance(
         source_root,

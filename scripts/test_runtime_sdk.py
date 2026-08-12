@@ -140,6 +140,57 @@ class RuntimeSDKTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, build.DOWNLOAD_MAX_ATTEMPTS)
         sleep.assert_has_calls([mock.call(1), mock.call(2), mock.call(4)])
 
+    def test_cpython_download_falls_back_and_records_actual_source(self) -> None:
+        version = "3.15.0rc1"
+        fixture_root = self.root / "fixture" / f"Python-{version}"
+        (fixture_root / "Include").mkdir(parents=True)
+        (fixture_root / "Include" / "patchlevel.h").write_text(
+            "#define PY_VERSION \"3.15.0rc1\"\n",
+            encoding="utf-8",
+        )
+        fallback_archive = self.root / "fallback.tgz"
+        with build.tarfile.open(fallback_archive, "w:gz") as archive:
+            archive.add(fixture_root, arcname=fixture_root.name)
+
+        requested_urls: list[str] = []
+
+        def fake_download(url: str, destination: Path, *, force: bool = False) -> None:
+            del force
+            requested_urls.append(url)
+            if "python.org" not in url:
+                raise build.http.client.RemoteDisconnected("unavailable")
+            destination.write_bytes(fallback_archive.read_bytes())
+
+        commit = "a" * 40
+        with (
+            mock.patch.object(build, "download_file", side_effect=fake_download),
+            mock.patch.object(build, "resolve_cpython_tag_commit", return_value=commit),
+        ):
+            source_root = build.download_cpython_source(
+                version,
+                self.root / "downloads",
+                None,
+            )
+
+        self.assertEqual(source_root.name, f"cpython-{version}")
+        self.assertTrue((source_root / "Include" / "patchlevel.h").is_file())
+        self.assertEqual(len(requested_urls), 3)
+        self.assertEqual(
+            requested_urls[-1],
+            "https://www.python.org/ftp/python/3.15.0/Python-3.15.0rc1.tgz",
+        )
+        provenance = json.loads(
+            (source_root / build.CPYTHON_SOURCE_PROVENANCE_RELATIVE_PATH).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(provenance["archive_url"], requested_urls[-1])
+        self.assertEqual(provenance["commit"], commit)
+        self.assertEqual(
+            provenance["archive_sha256"],
+            build.sha256_file(self.root / "downloads" / f"cpython-v{version}-python-org.tgz"),
+        )
+
     def _write_pack_promotion_fixture(self) -> tuple[dict, Path, dict]:
         staging = self.root / "promotion-fixture"
         staging.mkdir(exist_ok=True)
