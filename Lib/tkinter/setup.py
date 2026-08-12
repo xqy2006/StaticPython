@@ -181,6 +181,15 @@ TCLTK_SYSTEM_LIBRARIES = [
     "imm32.lib",
 ]
 
+TCLTK_INCLUDE_DIRECTORIES = [
+    rf"..\externals\{TCL_SOURCE_NAME}\generic",
+    rf"..\externals\{TCL_SOURCE_NAME}\win",
+    rf"..\externals\{TCL_SOURCE_NAME}\libtommath",
+    rf"..\externals\{TK_SOURCE_NAME}\generic",
+    rf"..\externals\{TK_SOURCE_NAME}\win",
+    rf"..\externals\{TK_SOURCE_NAME}\xlib",
+]
+
 
 def _tcl_source(context) -> Path:
     return source_path(context, f"externals/{TCL_SOURCE_NAME}")
@@ -346,6 +355,7 @@ def prepare_tcltk_sources(context) -> None:
             "win/gitmanifest.in",
             "compat/zlib/LICENSE",
             "compat/zlib/contrib/minizip/LICENSE.Info-Zip",
+            "libtommath/tommath.h",
             "libtommath/LICENSE",
             "license.terms",
         ),
@@ -707,13 +717,7 @@ def patch_tkinter_project(context) -> None:
     set_or_create_property(root, "TargetExt", ".lib")
     set_or_create_property(root, "TargetName", "_tkinter")
 
-    includes = [
-        rf"..\externals\{TCL_SOURCE_NAME}\generic",
-        rf"..\externals\{TCL_SOURCE_NAME}\win",
-        rf"..\externals\{TK_SOURCE_NAME}\generic",
-        rf"..\externals\{TK_SOURCE_NAME}\win",
-        rf"..\externals\{TK_SOURCE_NAME}\xlib",
-    ]
+    includes = TCLTK_INCLUDE_DIRECTORIES
     definitions = [
         "WITH_APPINIT",
         "STATIC_BUILD",

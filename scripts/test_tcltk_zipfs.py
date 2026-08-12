@@ -405,6 +405,10 @@ Tcl_AppInit(Tcl_Interp *interp)
         self.assertRegex(tkinter_setup.TK_COMMIT, r"^[0-9a-f]{40}$")
         self.assertRegex(tkinter_setup.TCL_ARCHIVE_SHA256, r"^[0-9a-f]{64}$")
         self.assertRegex(tkinter_setup.TK_ARCHIVE_SHA256, r"^[0-9a-f]{64}$")
+        self.assertIn(
+            rf"..\externals\{tkinter_setup.TCL_SOURCE_NAME}\libtommath",
+            tkinter_setup.TCLTK_INCLUDE_DIRECTORIES,
+        )
         self.assertEqual(
             integration.license_expression,
             "Python-2.0 AND TCL AND Zlib AND Unlicense AND Info-ZIP",
