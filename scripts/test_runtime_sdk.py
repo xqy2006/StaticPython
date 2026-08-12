@@ -1896,18 +1896,23 @@ struct _inittab _PyImport_Inittab[] = {
             globally_resolved,
         )
 
-    def test_distribution_aliases_have_one_canonical_pack(self) -> None:
+    def test_current_profile_has_one_canonical_pack_per_distribution(self) -> None:
         config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
         catalog = {
             item["name"]: item
             for item in config["third_party_library_catalog"]["libraries"]
         }
         full = config["profiles"]["full"]["third_party_libraries"]
-        self.assertNotIn("attr", catalog)
+        historical = config["profiles"]["full"][
+            "historical_library_contract_libraries"
+        ]
+        self.assertIn("attr", catalog)
         self.assertNotIn("attr", full)
+        self.assertIn("attr", historical)
         self.assertEqual(catalog["attrs"]["python_packages"], ["attrs", "attr"])
-        self.assertNotIn("cattr", catalog)
+        self.assertIn("cattr", catalog)
         self.assertNotIn("cattr", full)
+        self.assertIn("cattr", historical)
         self.assertEqual(catalog["cattrs"]["python_packages"], ["cattrs", "cattr"])
         self.assertEqual(
             catalog["cattrs"]["top_level_import_names"],

@@ -330,10 +330,21 @@ def discover_contract(
 
     _profile_name, profile = build.resolve_profile(config, "full")
     full_libraries = list(profile.get("third_party_libraries", []))
-    requested = selected_libraries or full_libraries
-    unknown = sorted(set(requested) - set(full_libraries), key=str.casefold)
+    historical_libraries = profile.get("historical_library_contract_libraries", [])
+    if not isinstance(historical_libraries, list) or any(
+        not isinstance(name, str) or not name for name in historical_libraries
+    ):
+        raise RuntimeError(
+            "full.historical_library_contract_libraries must be a list of non-empty strings"
+        )
+    contract_libraries = list(dict.fromkeys([*full_libraries, *historical_libraries]))
+    requested = selected_libraries or contract_libraries
+    unknown = sorted(set(requested) - set(contract_libraries), key=str.casefold)
     if unknown:
-        raise RuntimeError("libraries are not in the full profile: " + ", ".join(unknown))
+        raise RuntimeError(
+            "libraries are not in the current or historical contract catalog: "
+            + ", ".join(unknown)
+        )
 
     catalog = build.profile_library_catalog(config, profile, "third_party_library_catalog")
     definitions = libs.load_integration_definitions(build.LIB_PATCH_ROOT, library_catalog=catalog)

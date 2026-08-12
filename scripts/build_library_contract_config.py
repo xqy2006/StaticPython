@@ -23,14 +23,19 @@ def build_contract_config(
     libraries = full_profile.get("third_party_libraries")
     if not isinstance(libraries, list):
         raise RuntimeError("full.third_party_libraries must be a list")
+    historical_libraries = full_profile.get("historical_library_contract_libraries", [])
+    if not isinstance(historical_libraries, list):
+        raise RuntimeError("full.historical_library_contract_libraries must be a list")
     by_name = {
         name.casefold(): name
-        for name in libraries
+        for name in [*libraries, *historical_libraries]
         if isinstance(name, str) and name
     }
     canonical_name = by_name.get(library_name.casefold())
     if canonical_name is None:
-        raise RuntimeError(f"library {library_name!r} is not in the full profile")
+        raise RuntimeError(
+            f"library {library_name!r} is not in the current or historical contract catalog"
+        )
     if not release_version:
         raise RuntimeError("release version must not be empty")
 

@@ -29,8 +29,18 @@ class BuildLibraryContractConfigTests(unittest.TestCase):
 
     def test_unknown_library_is_rejected(self) -> None:
         base = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
-        with self.assertRaisesRegex(RuntimeError, "not in the full profile"):
+        with self.assertRaisesRegex(RuntimeError, "not in the current or historical"):
             builder.build_contract_config(base, "missing-library", "1.0")
+
+    def test_historical_alias_can_build_without_becoming_a_current_release_root(self) -> None:
+        base = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        self.assertNotIn("attr", base["profiles"]["full"]["third_party_libraries"])
+        result, canonical_name = builder.build_contract_config(base, "attr", "25.4.0")
+        self.assertEqual(canonical_name, "attr")
+        self.assertEqual(
+            result["profiles"]["library-contract"]["third_party_libraries"],
+            ["attr"],
+        )
 
 
 if __name__ == "__main__":
