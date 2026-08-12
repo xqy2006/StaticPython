@@ -101,6 +101,7 @@ WINDOWS_LINK_LIBRARY_NAMES = {
     "version.lib",
     "wbemuuid.lib",
     "windowscodecs.lib",
+    "wininet.lib",
     "winmm.lib",
     "winspool.lib",
     "ws2_32.lib",

@@ -16,6 +16,9 @@ if str(SCRIPTS_ROOT) not in sys.path:
 
 import verify_pack_with_runtime_sdk as verifier
 
+sys.path.insert(0, str(REPO_ROOT))
+import build
+
 
 def _file_records(root: Path) -> list[dict]:
     return [
@@ -378,6 +381,12 @@ class VerifyPackWithRuntimeSDKTests(unittest.TestCase):
         self.assertEqual(
             verifier._resolve_system_libraries(runtime, [pack]),
             ["comdlg32.lib", "user32.lib", "kernel32.lib", "advapi32.lib", "shell32.lib"],
+        )
+
+    def test_windows_link_library_allowlist_matches_the_builder(self) -> None:
+        self.assertEqual(
+            verifier.WINDOWS_LINK_LIBRARY_NAMES,
+            build.WINDOWS_SYSTEM_LIBRARY_NAMES | build.WINDOWS_SDK_LIBRARY_NAMES,
         )
 
     def test_dependency_parser_is_stable(self) -> None:
