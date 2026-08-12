@@ -440,6 +440,20 @@ struct _inittab _PyImport_Inittab[] = {
         project = module._render_ujson_project(["python/ujson.c"], ["python"], "5.13.0")
         self.assertIn("UJSON_VERSION=&quot;5.13.0&quot;", project)
 
+    def test_glfw_project_includes_windows_pyconfig_header_directory(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_glfw_setup_test",
+            REPO_ROOT / "Lib" / "glfw" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        project = module._render_glfw_project()
+        self.assertIn(
+            r"..\glfw_builtin\glfw-3.4\include;..\PC;%(AdditionalIncludeDirectories)",
+            project,
+        )
+
     def test_hypothesis_native_compatibility_is_frozen_and_functional(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "staticpython_hypothesis_setup_test",
@@ -1061,6 +1075,12 @@ struct _inittab _PyImport_Inittab[] = {
         with ZipFile(archive_path) as archive:
             metadata = json.loads(archive.read("pack.json"))
             descriptor = archive.read("src/pack.c").decode("utf-8")
+            frozen_header = archive.read("src/frozen/demo.h").decode("utf-8")
+            pack_frozen_symbol = build.staticpython_pack_frozen_symbol(
+                "demo",
+                "1.2.3",
+                "demo",
+            )
             self.assertEqual(metadata["frozen_modules"], ["demo"])
             self.assertNotIn("other", metadata["frozen_modules"])
             self.assertIn("Lib/demo/data.json", [item["path"] for item in metadata["resources"]])
@@ -1080,10 +1100,29 @@ struct _inittab _PyImport_Inittab[] = {
                 build.sha256_file(provisional_path),
             )
             self.assertIn('"demo"', descriptor)
+            self.assertIn(pack_frozen_symbol, descriptor)
+            self.assertIn(pack_frozen_symbol, frozen_header)
+            self.assertNotIn("_Py_M__demo[]", frozen_header)
             self.assertIn("staticpython_pack_demo_resource_", descriptor)
             self.assertNotIn('_Py_M__other', descriptor)
         bound = build.bind_promoted_pack_evidence(verification_report, [archive_path])
         self.assertEqual(bound["promotion"]["packs"][0]["final_sha256"], build.sha256_file(archive_path))
+
+    def test_pack_frozen_symbols_do_not_alias_cpython_module_encoding(self) -> None:
+        stdlib_symbol = "_Py_M__importlib_metadata"
+        backport_symbol = build.staticpython_pack_frozen_symbol(
+            "importlib-metadata",
+            "8.7.0",
+            "importlib_metadata",
+        )
+        dotted_symbol = build.staticpython_pack_frozen_symbol(
+            "example-pack",
+            "1.0",
+            "importlib.metadata",
+        )
+        self.assertNotEqual(backport_symbol, stdlib_symbol)
+        self.assertNotEqual(dotted_symbol, stdlib_symbol)
+        self.assertNotEqual(backport_symbol, dotted_symbol)
 
     def test_promoted_pack_evidence_binds_final_archive_to_verified_payload(self) -> None:
         staging = self.root / "pack-stage"

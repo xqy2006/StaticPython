@@ -1524,6 +1524,12 @@ def _c_identifier(value: str) -> str:
     return identifier
 
 
+def staticpython_pack_frozen_symbol(pack_name: str, pack_version: str, module_name: str) -> str:
+    """Return a pack-private symbol that cannot alias CPython's module-name encoding."""
+    identity = "\0".join((pack_name, pack_version, module_name)).encode("utf-8")
+    return f"_Py_M__staticpython_pack_{hashlib.sha256(identity).hexdigest()}"
+
+
 def staticpython_pack_asset_name(
     name: str,
     version: str,
@@ -1730,15 +1736,30 @@ def _write_pack_descriptor_source(
     frozen_dir = source_dir / "frozen"
     source_dir.mkdir(parents=True, exist_ok=True)
     frozen_dir.mkdir(parents=True, exist_ok=True)
+    pack_frozen_records: list[dict] = []
     for record in frozen_records:
-        shutil.copy2(record["header"], frozen_dir / record["header"].name)
+        copied_header = frozen_dir / record["header"].name
+        shutil.copy2(record["header"], copied_header)
+        copied_record = dict(record)
+        copied_record["symbol"] = staticpython_pack_frozen_symbol(
+            integration.name,
+            integration.release_version,
+            record["name"],
+        )
+        copied_record["header"] = copied_header
+        rewrite_frozen_header_symbol(
+            copied_header,
+            record["symbol"],
+            copied_record["symbol"],
+        )
+        pack_frozen_records.append(copied_record)
 
-    include_lines = [f'#include "frozen/{record["header"].name}"' for record in frozen_records]
+    include_lines = [f'#include "frozen/{record["header"].name}"' for record in pack_frozen_records]
     frozen_lines = [
         "    STATICPYTHON_FROZEN_ENTRY("
         f"{_c_bytes_literal(record['name'])}, {record['symbol']}, {record['size']}, "
         f"{1 if record['is_package'] else 0}),"
-        for record in frozen_records
+        for record in pack_frozen_records
     ]
     builtin_lines = []
     builtin_externs = []
