@@ -80,8 +80,13 @@ async def probe() -> None:
             writer.close()
             await writer.wait_closed()
         server.should_exit = True
-        await asyncio.wait_for(task, timeout=5)
-        listener.close()
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            listener.close()
 
 
 asyncio.run(probe())

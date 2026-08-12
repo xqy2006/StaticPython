@@ -125,6 +125,8 @@ class UvicornPackTests(unittest.TestCase):
         self.assertIn('http="h11"', source)
         self.assertIn("asyncio.open_connection", source)
         self.assertIn("HTTP/1.1 200 OK", source)
+        self.assertIn("task.cancel()", source)
+        self.assertIn("listener.close()", source)
         self.assertNotIn("tempfile", source)
         self.assertNotIn("open(", source)
 
