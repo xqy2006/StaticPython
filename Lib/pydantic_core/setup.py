@@ -30,6 +30,10 @@ RUST_TOOLCHAIN = "1.88.0"
 RUST_TARGET = "x86_64-pc-windows-msvc"
 RUST_LIBRARY_NAME = "pydantic_core._pydantic_core.lib"
 RUST_TARGET_ROOT = "PCbuild/pydantic_core_rust_target"
+# PyO3 0.28's generate-import-lib feature only generates python3.dll when
+# lib_dir is absent.  The path is deliberately inert: link directives are
+# suppressed and the final executable resolves Python symbols from pythoncore.
+PYO3_STATIC_LIB_DIR_SENTINEL = "C:/staticpython/no-python-import-library"
 RUST_SYSTEM_LIBRARIES = [
     "advapi32.lib",
     "bcrypt.lib",
@@ -326,6 +330,7 @@ def _write_pyo3_config(context) -> Path:
                 "abi3=false",
                 "pointer_width=64",
                 "build_flags=",
+                f"lib_dir={PYO3_STATIC_LIB_DIR_SENTINEL}",
                 "suppress_build_script_link_lines=true",
                 "",
             ]

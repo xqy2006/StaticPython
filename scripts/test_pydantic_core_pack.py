@@ -77,9 +77,10 @@ class PydanticCorePackTests(unittest.TestCase):
             ["==2.46.4", "==2.47.0", "==2.48.0"],
         )
         for rule in integration.patch_rules:
-            replacement = rule["replacements"][0]
-            self.assertEqual(replacement["old"], 'crate-type = ["cdylib", "rlib"]')
-            self.assertEqual(replacement["new"], 'crate-type = ["staticlib", "rlib"]')
+            crate_type = rule["replacements"][0]
+            self.assertEqual(crate_type["old"], 'crate-type = ["cdylib", "rlib"]')
+            self.assertEqual(crate_type["new"], 'crate-type = ["staticlib", "rlib"]')
+            self.assertEqual(len(rule["replacements"]), 1)
         self.assertEqual(
             integration.license_expression,
             "Apache-2.0 AND (Apache-2.0 WITH LLVM-exception) AND MIT AND "
@@ -110,6 +111,7 @@ class PydanticCorePackTests(unittest.TestCase):
                     "abi3=false",
                     "pointer_width=64",
                     "build_flags=",
+                    "lib_dir=C:/staticpython/no-python-import-library",
                     "suppress_build_script_link_lines=true",
                 ],
             )
