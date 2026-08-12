@@ -716,6 +716,7 @@ def ensure_sdl2_source(context) -> Path:
         context.log,
         [
             f"https://github.com/libsdl-org/SDL/archive/refs/tags/release-{version}.zip",
+            f"https://codeload.github.com/libsdl-org/SDL/zip/refs/tags/release-{version}",
         ],
         archive_path,
     )
@@ -762,6 +763,7 @@ def ensure_qhull_source(context) -> Path:
         context.log,
         [
             f"https://github.com/qhull/qhull/archive/v{QHULL_VERSION}/qhull-{QHULL_VERSION}.tar.gz",
+            f"https://codeload.github.com/qhull/qhull/tar.gz/refs/tags/v{QHULL_VERSION}",
         ],
         archive_path,
     )

@@ -23,6 +23,33 @@ if PYFLTK_SETUP_SPEC is None or PYFLTK_SETUP_SPEC.loader is None:
 PYFLTK_SETUP = importlib.util.module_from_spec(PYFLTK_SETUP_SPEC)
 PYFLTK_SETUP_SPEC.loader.exec_module(PYFLTK_SETUP)
 
+PYZMQ_SETUP_SPEC = importlib.util.spec_from_file_location(
+    "staticpython_test_pyzmq_setup",
+    REPO_ROOT / "Lib" / "pyzmq" / "setup.py",
+)
+if PYZMQ_SETUP_SPEC is None or PYZMQ_SETUP_SPEC.loader is None:
+    raise RuntimeError("could not load pyzmq setup module")
+PYZMQ_SETUP = importlib.util.module_from_spec(PYZMQ_SETUP_SPEC)
+PYZMQ_SETUP_SPEC.loader.exec_module(PYZMQ_SETUP)
+
+MATPLOTLIB_SETUP_SPEC = importlib.util.spec_from_file_location(
+    "staticpython_test_matplotlib_setup",
+    REPO_ROOT / "Lib" / "matplotlib" / "setup.py",
+)
+if MATPLOTLIB_SETUP_SPEC is None or MATPLOTLIB_SETUP_SPEC.loader is None:
+    raise RuntimeError("could not load matplotlib setup module")
+MATPLOTLIB_SETUP = importlib.util.module_from_spec(MATPLOTLIB_SETUP_SPEC)
+MATPLOTLIB_SETUP_SPEC.loader.exec_module(MATPLOTLIB_SETUP)
+
+DEARPYGUI_SETUP_SPEC = importlib.util.spec_from_file_location(
+    "staticpython_test_dearpygui_setup",
+    REPO_ROOT / "Lib" / "dearpygui" / "setup.py",
+)
+if DEARPYGUI_SETUP_SPEC is None or DEARPYGUI_SETUP_SPEC.loader is None:
+    raise RuntimeError("could not load DearPyGui setup module")
+DEARPYGUI_SETUP = importlib.util.module_from_spec(DEARPYGUI_SETUP_SPEC)
+DEARPYGUI_SETUP_SPEC.loader.exec_module(DEARPYGUI_SETUP)
+
 
 def _zip_bytes(root: Path, name: str, content: str) -> bytes:
     archive = root / f"{name}.zip"
@@ -145,6 +172,44 @@ class DownloadFirstAvailableTests(unittest.TestCase):
 
 
 class PyFltkDownloadTests(unittest.TestCase):
+    def test_fltk_uses_github_and_codeload_mirrors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            class Context:
+                source_root = root / "source"
+                download_cache_root = root / "downloads"
+
+                @staticmethod
+                def log(_message: str) -> None:
+                    pass
+
+            def fake_download(_log, urls, destination, *, expected_sha256=None):
+                self.assertIsNone(expected_sha256)
+                self.assertEqual(
+                    urls,
+                    [
+                        "https://github.com/fltk/fltk/archive/refs/tags/release-1.4.5.zip",
+                        "https://codeload.github.com/fltk/fltk/zip/refs/tags/release-1.4.5",
+                    ],
+                )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.touch()
+                return urls[1]
+
+            def fake_extract(_log, _archive, destination, *, final_name=None):
+                source_dir = destination / str(final_name)
+                (source_dir / "FL").mkdir(parents=True)
+                (source_dir / "FL" / "Fl.H").touch()
+
+            with (
+                mock.patch.object(PYFLTK_SETUP, "download_first_available", side_effect=fake_download),
+                mock.patch.object(PYFLTK_SETUP, "extract_source_archive", side_effect=fake_extract),
+            ):
+                source_dir = PYFLTK_SETUP.ensure_fltk_source(Context())
+
+            self.assertTrue((source_dir / "FL" / "Fl.H").is_file())
+
     def test_swigwin_uses_two_mirrors_and_a_fixed_digest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -195,6 +260,38 @@ class PyFltkDownloadTests(unittest.TestCase):
                 PYFLTK_SETUP.SWIGWIN_SHA256,
                 "7ea5197c557af20b2f7780ffcfe803bbe0e2009f5846874112aea37e5f693417",
             )
+
+
+class PyZmqDownloadTests(unittest.TestCase):
+    def test_native_dependencies_have_independent_codeload_mirrors(self) -> None:
+        self.assertEqual(
+            PYZMQ_SETUP.LIBSODIUM_CODELOAD_URL_TEMPLATE.format(version="1.0.20"),
+            "https://codeload.github.com/jedisct1/libsodium/tar.gz/refs/tags/1.0.20-RELEASE",
+        )
+        self.assertEqual(
+            PYZMQ_SETUP.LIBZMQ_CODELOAD_URL_TEMPLATE.format(version="4.3.5"),
+            "https://codeload.github.com/zeromq/libzmq/tar.gz/refs/tags/v4.3.5",
+        )
+
+
+class NativeDependencyMirrorTests(unittest.TestCase):
+    def test_matplotlib_sdl_and_qhull_have_codeload_fallbacks(self) -> None:
+        source = (REPO_ROOT / "Lib" / "matplotlib" / "setup.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'f"https://codeload.github.com/libsdl-org/SDL/zip/refs/tags/release-{version}"',
+            source,
+        )
+        self.assertIn(
+            'f"https://codeload.github.com/qhull/qhull/tar.gz/refs/tags/v{QHULL_VERSION}"',
+            source,
+        )
+
+    def test_dearpygui_submodules_have_codeload_fallbacks(self) -> None:
+        for entry in DEARPYGUI_SETUP.DEARPYGUI_SUBMODULES:
+            with self.subTest(name=entry["name"]):
+                self.assertTrue(
+                    any(url.startswith("https://codeload.github.com/") for url in entry["urls"])
+                )
 
 
 if __name__ == "__main__":

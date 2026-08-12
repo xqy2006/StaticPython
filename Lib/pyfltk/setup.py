@@ -173,6 +173,7 @@ def ensure_fltk_source(context) -> Path:
         context.log,
         [
             f"https://github.com/fltk/fltk/archive/refs/tags/release-{FLTK_VERSION}.zip",
+            f"https://codeload.github.com/fltk/fltk/zip/refs/tags/release-{FLTK_VERSION}",
         ],
         archive_path,
     )

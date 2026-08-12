@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import hashlib
 import io
@@ -10,6 +11,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError
 from zipfile import ZipFile
 
 
@@ -139,6 +141,82 @@ class RuntimeSDKTests(unittest.TestCase):
         self.assertFalse(temporary.exists())
         self.assertEqual(urlopen.call_count, build.DOWNLOAD_MAX_ATTEMPTS)
         sleep.assert_has_calls([mock.call(1), mock.call(2), mock.call(4)])
+
+    def test_library_download_is_atomic_and_cleans_failed_temporary_file(self) -> None:
+        destination = self.root / "source.zip"
+        temporary = Path(str(destination) + ".tmp")
+        temporary.write_bytes(b"stale partial download")
+
+        with (
+            mock.patch.object(libs, "_read_url_bytes", side_effect=OSError("disconnect")),
+            self.assertRaisesRegex(OSError, "disconnect"),
+        ):
+            libs._download_file("https://example.invalid/source.zip", destination)
+
+        self.assertFalse(destination.exists())
+        self.assertFalse(temporary.exists())
+
+    def test_library_http_reader_retries_only_transient_failures(self) -> None:
+        with (
+            mock.patch.object(
+                libs,
+                "urlopen",
+                side_effect=[
+                    http.client.RemoteDisconnected("disconnect"),
+                    io.BytesIO(b"payload"),
+                ],
+            ) as urlopen,
+            mock.patch.object(libs.time, "sleep") as sleep,
+        ):
+            payload = libs._read_url_bytes("https://example.invalid/source.zip")
+
+        self.assertEqual(payload, b"payload")
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
+        not_found = HTTPError(
+            "https://example.invalid/missing.zip",
+            404,
+            "not found",
+            None,
+            None,
+        )
+        with (
+            mock.patch.object(libs, "urlopen", side_effect=not_found) as urlopen,
+            mock.patch.object(libs.time, "sleep") as sleep,
+            self.assertRaises(HTTPError),
+        ):
+            libs._read_url_bytes("https://example.invalid/missing.zip")
+
+        urlopen.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_default_github_archives_have_codeload_fallback(self) -> None:
+        self.assertEqual(
+            libs._github_archive_urls(
+                "owner/project",
+                "v1.2.3",
+                "tags",
+                None,
+                {},
+            ),
+            [
+                "https://github.com/owner/project/archive/refs/tags/v1.2.3.zip",
+                "https://codeload.github.com/owner/project/zip/refs/tags/v1.2.3",
+            ],
+        )
+
+    def test_custom_github_archive_does_not_invent_a_mirror(self) -> None:
+        self.assertEqual(
+            libs._github_archive_urls(
+                "owner/project",
+                "v1.2.3",
+                "tags",
+                "https://sources.example/{repo}/{ref}.zip",
+                {},
+            ),
+            ["https://sources.example/owner/project/v1.2.3.zip"],
+        )
 
     def test_cpython_download_falls_back_and_records_actual_source(self) -> None:
         version = "3.15.0rc1"
