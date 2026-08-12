@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-import tempfile
-from pathlib import Path
+from io import BytesIO
 
 
 def test_scipy_import() -> None:
@@ -62,10 +61,10 @@ def test_scipy_io_wavfile() -> None:
 
     rate = 16000
     samples = np.array([0, 1024, -1024, 2048, -2048], dtype=np.int16)
-    with tempfile.TemporaryDirectory(prefix="staticpython-scipy-wav-") as temp_dir:
-        path = Path(temp_dir) / "sample.wav"
-        wavfile.write(path, rate, samples)
-        read_rate, read_samples = wavfile.read(path)
+    payload = BytesIO()
+    wavfile.write(payload, rate, samples)
+    payload.seek(0)
+    read_rate, read_samples = wavfile.read(payload)
     assert read_rate == rate
     np.testing.assert_array_equal(read_samples, samples)
 

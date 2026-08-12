@@ -176,6 +176,9 @@ class SciPyPackTests(unittest.TestCase):
                 self.assertIn(function, defined_functions)
                 label = function.removeprefix("test_").replace("_", "-")
                 self.assertIn((label, function), registered_tests)
+        self.assertIn("BytesIO", source)
+        self.assertNotIn("tempfile", source)
+        self.assertNotIn("TemporaryDirectory", source)
 
     def test_workflow_covers_all_target_cpython_series(self) -> None:
         workflow = (
