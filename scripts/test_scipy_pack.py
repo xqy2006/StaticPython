@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import sys
@@ -137,7 +138,7 @@ class SciPyPackTests(unittest.TestCase):
     def test_extended_smoke_covers_each_supported_phase_one_area(self) -> None:
         smoke_path = REPO_ROOT / "scripts" / "scipy_profile_verify.py"
         source = smoke_path.read_text(encoding="utf-8")
-        compile(source, str(smoke_path), "exec")
+        tree = ast.parse(source, filename=str(smoke_path))
         expected_tests = {
             "test_scipy_import",
             "test_scipy_fft",
@@ -156,10 +157,25 @@ class SciPyPackTests(unittest.TestCase):
             "test_scipy_sparse_linalg",
             "test_scipy_spatial",
         }
+        defined_functions = {
+            node.name
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        registered_tests = {
+            (node.elts[0].value, node.elts[1].id)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Tuple)
+            and len(node.elts) == 2
+            and isinstance(node.elts[0], ast.Constant)
+            and isinstance(node.elts[0].value, str)
+            and isinstance(node.elts[1], ast.Name)
+        }
         for function in expected_tests:
             with self.subTest(function=function):
-                self.assertIn(f"def {function}()", source)
-                self.assertIn(f"({function.removeprefix('test_').replace('_', '-')!r}", source)
+                self.assertIn(function, defined_functions)
+                label = function.removeprefix("test_").replace("_", "-")
+                self.assertIn((label, function), registered_tests)
 
     def test_workflow_covers_all_target_cpython_series(self) -> None:
         workflow = (
