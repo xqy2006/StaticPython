@@ -1624,7 +1624,11 @@ def _record_source_archive_sha256(
     resolved_version: str,
     archive_path: Path,
 ) -> str:
-    observed = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with archive_path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    observed = digest.hexdigest()
     expected = integration.source_archive_sha256_by_version.get(resolved_version)
     if expected is not None:
         normalized_expected = expected.casefold()

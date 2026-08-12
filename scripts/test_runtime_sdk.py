@@ -1898,10 +1898,15 @@ struct _inittab _PyImport_Inittab[] = {
             name="demo",
             source_archive_sha256_by_version={"1.2.3": observed},
         )
-        self.assertEqual(
-            libs._record_source_archive_sha256(integration, "1.2.3", archive),
-            observed,
-        )
+        with mock.patch.object(
+            Path,
+            "read_bytes",
+            side_effect=AssertionError("source archives must be hashed as a stream"),
+        ):
+            self.assertEqual(
+                libs._record_source_archive_sha256(integration, "1.2.3", archive),
+                observed,
+            )
         self.assertEqual(integration.source_archive_sha256, observed)
 
         integration.source_archive_sha256_by_version["1.2.3"] = "0" * 64
