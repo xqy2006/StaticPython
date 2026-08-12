@@ -59,6 +59,15 @@ if LIBFFI_SETUP_SPEC is None or LIBFFI_SETUP_SPEC.loader is None:
 LIBFFI_SETUP = importlib.util.module_from_spec(LIBFFI_SETUP_SPEC)
 LIBFFI_SETUP_SPEC.loader.exec_module(LIBFFI_SETUP)
 
+OPENSSL_SETUP_SPEC = importlib.util.spec_from_file_location(
+    "staticpython_test_openssl_setup",
+    REPO_ROOT / "Core" / "openssl" / "setup.py",
+)
+if OPENSSL_SETUP_SPEC is None or OPENSSL_SETUP_SPEC.loader is None:
+    raise RuntimeError("could not load OpenSSL setup module")
+OPENSSL_SETUP = importlib.util.module_from_spec(OPENSSL_SETUP_SPEC)
+OPENSSL_SETUP_SPEC.loader.exec_module(OPENSSL_SETUP)
+
 
 def _zip_bytes(root: Path, name: str, content: str) -> bytes:
     archive = root / f"{name}.zip"
@@ -284,6 +293,52 @@ class PyZmqDownloadTests(unittest.TestCase):
 
 
 class NativeDependencyMirrorTests(unittest.TestCase):
+    def test_openssl_prefers_codeload_for_every_target_version(self) -> None:
+        for version in ("3.0.15", "3.0.16", "3.0.21", "3.5.7"):
+            with self.subTest(version=version):
+                self.assertEqual(
+                    OPENSSL_SETUP.openssl_archive_urls(version),
+                    [
+                        "https://codeload.github.com/openssl/openssl/"
+                        f"tar.gz/refs/tags/openssl-{version}",
+                        f"https://www.openssl.org/source/openssl-{version}.tar.gz",
+                        "https://github.com/openssl/openssl/archive/refs/tags/"
+                        f"openssl-{version}.tar.gz",
+                    ],
+                )
+
+    def test_openssl_codeload_archive_must_contain_configure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            class Context:
+                source_root = root / "source"
+                download_cache_root = root / "downloads"
+
+                @staticmethod
+                def log(_message: str) -> None:
+                    pass
+
+            def fake_download(_log, urls, destination, *, expected_sha256=None):
+                self.assertIsNone(expected_sha256)
+                self.assertEqual(urls[0], OPENSSL_SETUP.openssl_archive_urls("3.5.7")[0])
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.touch()
+                return urls[0]
+
+            def fake_extract(_log, _archive, destination, *, final_name=None):
+                source_dir = destination / str(final_name)
+                source_dir.mkdir(parents=True)
+                (source_dir / "Configure").touch()
+
+            with (
+                mock.patch.object(OPENSSL_SETUP, "download_first_available", side_effect=fake_download),
+                mock.patch.object(OPENSSL_SETUP, "extract_source_archive", side_effect=fake_extract),
+            ):
+                source_dir = OPENSSL_SETUP.ensure_openssl_source(Context(), "3.5.7")
+
+            self.assertTrue((source_dir / "Configure").is_file())
+
     def test_libffi_uses_hash_pinned_byte_identical_release_mirror(self) -> None:
         self.assertEqual(
             LIBFFI_SETUP.libffi_archive_urls("3.4.4"),
