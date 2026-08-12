@@ -50,6 +50,15 @@ if DEARPYGUI_SETUP_SPEC is None or DEARPYGUI_SETUP_SPEC.loader is None:
 DEARPYGUI_SETUP = importlib.util.module_from_spec(DEARPYGUI_SETUP_SPEC)
 DEARPYGUI_SETUP_SPEC.loader.exec_module(DEARPYGUI_SETUP)
 
+LIBFFI_SETUP_SPEC = importlib.util.spec_from_file_location(
+    "staticpython_test_libffi_setup",
+    REPO_ROOT / "Core" / "libffi" / "setup.py",
+)
+if LIBFFI_SETUP_SPEC is None or LIBFFI_SETUP_SPEC.loader is None:
+    raise RuntimeError("could not load libffi setup module")
+LIBFFI_SETUP = importlib.util.module_from_spec(LIBFFI_SETUP_SPEC)
+LIBFFI_SETUP_SPEC.loader.exec_module(LIBFFI_SETUP)
+
 
 def _zip_bytes(root: Path, name: str, content: str) -> bytes:
     archive = root / f"{name}.zip"
@@ -275,6 +284,56 @@ class PyZmqDownloadTests(unittest.TestCase):
 
 
 class NativeDependencyMirrorTests(unittest.TestCase):
+    def test_libffi_uses_hash_pinned_byte_identical_release_mirror(self) -> None:
+        self.assertEqual(
+            LIBFFI_SETUP.libffi_archive_urls("3.4.4"),
+            [
+                "https://github.com/libffi/libffi/releases/download/v3.4.4/libffi-3.4.4.tar.gz",
+                "https://deb.debian.org/debian/pool/main/libf/libffi/libffi_3.4.4.orig.tar.gz",
+            ],
+        )
+        self.assertEqual(
+            LIBFFI_SETUP.libffi_archive_sha256("3.4.4"),
+            "d66c56ad259a82cf2a9dfc408b32bf5da52371500b84745f7fb8b645712df676",
+        )
+        with self.assertRaisesRegex(RuntimeError, "no reviewed release archive SHA-256"):
+            LIBFFI_SETUP.libffi_archive_sha256("9.9.9")
+
+    def test_libffi_download_requires_release_generated_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            class Context:
+                source_root = root / "source"
+                download_cache_root = root / "downloads"
+
+                @staticmethod
+                def log(_message: str) -> None:
+                    pass
+
+            def fake_download(_log, urls, destination, *, expected_sha256=None):
+                self.assertEqual(urls, LIBFFI_SETUP.libffi_archive_urls("3.4.4"))
+                self.assertEqual(expected_sha256, LIBFFI_SETUP.libffi_archive_sha256("3.4.4"))
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.touch()
+                return urls[1]
+
+            def fake_extract(_log, _archive, destination, *, final_name=None):
+                source_dir = destination / str(final_name)
+                (source_dir / "include").mkdir(parents=True)
+                (source_dir / "src" / "x86").mkdir(parents=True)
+                (source_dir / "fficonfig.h.in").touch()
+                (source_dir / "include" / "ffi.h.in").touch()
+                (source_dir / "src" / "x86" / "ffiw64.c").touch()
+
+            with (
+                mock.patch.object(LIBFFI_SETUP, "download_first_available", side_effect=fake_download),
+                mock.patch.object(LIBFFI_SETUP, "extract_source_archive", side_effect=fake_extract),
+            ):
+                source_dir = LIBFFI_SETUP.ensure_libffi_source(Context(), "3.4.4")
+
+            self.assertTrue((source_dir / "fficonfig.h.in").is_file())
+
     def test_matplotlib_sdl_and_qhull_have_codeload_fallbacks(self) -> None:
         source = (REPO_ROOT / "Lib" / "matplotlib" / "setup.py").read_text(encoding="utf-8")
         self.assertIn(
