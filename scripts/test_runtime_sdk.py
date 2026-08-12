@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import io
 import importlib.util
 import sys
 import tempfile
@@ -97,6 +98,47 @@ class RuntimeSDKTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_download_file_retries_transient_disconnects_atomically(self) -> None:
+        destination = self.root / "source.zip"
+        with (
+            mock.patch.object(
+                build,
+                "urlopen",
+                side_effect=[
+                    build.http.client.RemoteDisconnected("first disconnect"),
+                    build.URLError("second disconnect"),
+                    io.BytesIO(b"archive payload"),
+                ],
+            ) as urlopen,
+            mock.patch.object(build.time, "sleep") as sleep,
+        ):
+            build.download_file("https://example.invalid/source.zip", destination)
+
+        self.assertEqual(destination.read_bytes(), b"archive payload")
+        self.assertFalse(Path(str(destination) + ".tmp").exists())
+        self.assertEqual(urlopen.call_count, 3)
+        sleep.assert_has_calls([mock.call(1), mock.call(2)])
+
+    def test_download_file_exhausts_retries_without_partial_output(self) -> None:
+        destination = self.root / "source.zip"
+        temporary = Path(str(destination) + ".tmp")
+        temporary.write_bytes(b"stale partial download")
+        with (
+            mock.patch.object(
+                build,
+                "urlopen",
+                side_effect=build.http.client.RemoteDisconnected("disconnect"),
+            ) as urlopen,
+            mock.patch.object(build.time, "sleep") as sleep,
+            self.assertRaises(build.http.client.RemoteDisconnected),
+        ):
+            build.download_file("https://example.invalid/source.zip", destination)
+
+        self.assertFalse(destination.exists())
+        self.assertFalse(temporary.exists())
+        self.assertEqual(urlopen.call_count, build.DOWNLOAD_MAX_ATTEMPTS)
+        sleep.assert_has_calls([mock.call(1), mock.call(2), mock.call(4)])
 
     def _write_pack_promotion_fixture(self) -> tuple[dict, Path, dict]:
         staging = self.root / "promotion-fixture"
