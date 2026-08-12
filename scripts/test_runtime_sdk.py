@@ -1896,6 +1896,153 @@ struct _inittab _PyImport_Inittab[] = {
             globally_resolved,
         )
 
+    def test_distribution_aliases_have_one_canonical_pack(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        catalog = {
+            item["name"]: item
+            for item in config["third_party_library_catalog"]["libraries"]
+        }
+        full = config["profiles"]["full"]["third_party_libraries"]
+        self.assertNotIn("attr", catalog)
+        self.assertNotIn("attr", full)
+        self.assertEqual(catalog["attrs"]["python_packages"], ["attrs", "attr"])
+        self.assertNotIn("cattr", catalog)
+        self.assertNotIn("cattr", full)
+        self.assertEqual(catalog["cattrs"]["python_packages"], ["cattrs", "cattr"])
+        self.assertEqual(
+            catalog["cattrs"]["top_level_import_names"],
+            ["cattrs", "cattr"],
+        )
+        self.assertEqual(
+            catalog["cattrs"]["source_mapping"],
+            {
+                "cattrs||src/cattrs||cattr||src/cattr": "Lib/cattrs",
+                "?cattr||?src/cattr||?cattrs||?src/cattrs": "Lib/cattr",
+            },
+        )
+
+    def test_pack_verification_groups_isolate_native_dependency_closures(self) -> None:
+        assets = self.root / "group-assets"
+        assets.mkdir()
+
+        def write_pack(name: str, *, dependencies: list[str] | None = None, native: bool = False) -> Path:
+            staging = self.root / f"group-{name}"
+            staging.mkdir()
+            metadata = {
+                "name": name,
+                "version": "1.0",
+                "dependencies": list(dependencies or []),
+                "libraries": [f"{name}.lib"] if native else [],
+                "builtin_modules": [{"name": f"{name}._native"}] if native else [],
+                "files": [],
+            }
+            (staging / "pack.json").write_text(json.dumps(metadata), encoding="utf-8")
+            destination = assets / f"{name}.zip"
+            build.write_deterministic_zip(staging, destination)
+            return destination
+
+        pure_dependency = write_pack("pure_dependency")
+        pure_first = write_pack("pure_first", dependencies=["pure_dependency"])
+        pure_second = write_pack("pure_second")
+        native_dependency = write_pack("native_dependency", native=True)
+        native_root = write_pack("native_root", dependencies=["native_dependency"])
+
+        groups = build.pack_verification_groups(
+            [pure_dependency, pure_first, pure_second, native_dependency, native_root],
+            ["pure_first", "pure_second", "native_root"],
+        )
+
+        self.assertEqual(groups[0]["roots"], ["pure_first", "pure_second"])
+        self.assertEqual(
+            [build.read_pack_metadata(path)["name"] for path in groups[0]["packs"]],
+            ["pure_dependency", "pure_first", "pure_second"],
+        )
+        self.assertEqual(groups[1]["roots"], ["native_root"])
+        self.assertEqual(
+            [build.read_pack_metadata(path)["name"] for path in groups[1]["packs"]],
+            ["native_dependency", "native_root"],
+        )
+
+    def test_pack_verification_report_set_preserves_each_root_evidence(self) -> None:
+        def report(root: str, dependency: str | None, suffix: str) -> dict:
+            names = [name for name in (dependency, root) if name]
+            return {
+                "schema_version": 1,
+                "kind": "staticpython-pack-sdk-verification",
+                "status": "passed",
+                "failures": [],
+                "runtime_sdk": _passed_runtime_sdk(),
+                "verification_roots": [root],
+                "packs": [
+                    {
+                        "name": name,
+                        "version": "1.0",
+                        "sha256": suffix * 64,
+                        "provisional_sha256": suffix * 64,
+                        "payload_manifest_sha256": suffix * 64,
+                        "metadata_without_verification_sha256": suffix * 64,
+                    }
+                    for name in names
+                ],
+                "namespace_packages": [],
+                "executable_sha256": suffix * 64,
+                "pe_audit": {
+                    **_passed_pe_audit(),
+                    "executable_sha256": suffix * 64,
+                    "map_sha256": suffix * 64,
+                },
+                "integration_smoke_tests": [
+                    _passed_report_smoke(name, "import-1", "import")
+                    for name in names
+                ],
+            }
+
+        first = report("first", "shared", "a")
+        second = report("second", "shared", "a")
+        first["integration_smoke_tests"][0]["duration_seconds"] = 0.125
+        first["integration_smoke_tests"][0]["stdout"] = "first run"
+        second["integration_smoke_tests"][0]["duration_seconds"] = 0.875
+        second["integration_smoke_tests"][0]["stdout"] = "second run"
+        aggregate = build._aggregate_pack_verification_reports([first, second])
+
+        self.assertEqual(aggregate["status"], "passed")
+        self.assertEqual(aggregate["verification_mode"], "dependency-closure-set")
+        self.assertEqual(
+            [record["name"] for record in aggregate["packs"]],
+            ["first", "second", "shared"],
+        )
+        self.assertEqual(len(aggregate["closure_verifications"]), 2)
+        self.assertEqual(aggregate["verification_roots"], ["first", "second"])
+        self.assertTrue(
+            all(
+                "duration_seconds" not in record
+                and "stdout" not in record
+                and "stderr" not in record
+                for record in aggregate["integration_smoke_tests"]
+            )
+        )
+        pack_evidence.validate_sdk_verification_report(aggregate)
+
+    def test_pack_promotion_rejects_dependency_only_evidence(self) -> None:
+        report, final, _metadata = self._write_pack_promotion_fixture()
+        report["packs"].append(
+            {
+                "name": "root",
+                "version": "1.0",
+                "sha256": "a" * 64,
+                "provisional_sha256": "a" * 64,
+                "payload_manifest_sha256": "b" * 64,
+                "metadata_without_verification_sha256": "c" * 64,
+            }
+        )
+        report["integration_smoke_tests"].append(
+            _passed_report_smoke("root", "root-behavior", "script")
+        )
+        report["verification_roots"] = ["root"]
+
+        with self.assertRaisesRegex(RuntimeError, "only a dependency"):
+            build.bind_promoted_pack_evidence(report, [final])
+
     def test_global_pack_version_lock_preserves_cross_family_solution(self) -> None:
         config = build.load_config()
         integrations = [

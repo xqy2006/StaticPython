@@ -1316,6 +1316,20 @@ def verify_assets(args: argparse.Namespace) -> int:
             packs.append(MaterializedPack(archive, root, metadata))
         if not packs:
             raise RuntimeError("at least one --pack is required")
+        selected_names = {pack.metadata["name"].casefold(): pack.metadata["name"] for pack in packs}
+        verification_roots: list[str] = []
+        seen_roots: set[str] = set()
+        for requested in args.root_pack:
+            key = requested.casefold()
+            canonical = selected_names.get(key)
+            if canonical is None:
+                raise RuntimeError(f"verification root is not selected: {requested}")
+            if key in seen_roots:
+                continue
+            seen_roots.add(key)
+            verification_roots.append(canonical)
+        if not verification_roots:
+            verification_roots = [pack.metadata["name"] for pack in packs]
         validate_composition(runtime, packs)
         smoke_cases = build_smoke_cases(args.repo_root.resolve(), packs)
         executable, map_path, toolchain = build_harness(
@@ -1365,6 +1379,7 @@ def verify_assets(args: argparse.Namespace) -> int:
                     }
                     for pack in packs
                 ],
+                "verification_roots": verification_roots,
                 "namespace_packages": list(infer_namespace_packages(runtime, packs)),
                 "executable": str(executable),
                 "executable_sha256": sha256_file(executable),
@@ -1394,6 +1409,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--runtime-sdk", type=Path, required=True)
     parser.add_argument("--pack", type=Path, action="append", default=[], required=True)
+    parser.add_argument(
+        "--root-pack",
+        action="append",
+        default=[],
+        help="Pack root whose exact dependency closure this harness verifies; may be repeated.",
+    )
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--report-json", type=Path, required=True)

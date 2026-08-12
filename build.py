@@ -42,6 +42,7 @@ from pack_evidence import (
     bind_promoted_pack_evidence,
     pack_metadata_without_verification_sha256,
     pack_payload_manifest_sha256,
+    read_pack_metadata,
 )
 
 
@@ -4788,35 +4789,284 @@ def build_pack_static_libraries(
     log("pack-only build intentionally skipped pythoncore.vcxproj and python.vcxproj")
 
 
+def _pack_dependency_closure(
+    pack_by_name: dict[str, tuple[Path, dict]],
+    root_names: list[str],
+) -> list[tuple[Path, dict]]:
+    selected: set[str] = set()
+    visiting: set[str] = set()
+    ordered: list[tuple[Path, dict]] = []
+
+    def visit(name: str) -> None:
+        key = name.casefold()
+        if key in selected:
+            return
+        if key in visiting:
+            # Cyclic dependency components are supported by StaticPythonPackV1.
+            return
+        record = pack_by_name.get(key)
+        if record is None:
+            raise RuntimeError(f"pack dependency is missing from the provisional set: {name}")
+        visiting.add(key)
+        for dependency in record[1].get("dependencies", []):
+            visit(str(dependency))
+        visiting.remove(key)
+        selected.add(key)
+        ordered.append(record)
+
+    for name in root_names:
+        visit(name)
+    return ordered
+
+
+def _is_native_pack(metadata: dict) -> bool:
+    return bool(metadata.get("libraries") or metadata.get("builtin_modules"))
+
+
+def pack_verification_groups(
+    provisional_packs: list[Path],
+    root_names: list[str],
+) -> list[dict]:
+    """Partition release roots into independently executable dependency closures.
+
+    Release families are storage shards, not runtime compositions.  Pure-Python
+    roots can safely share one harness when their union is compatible.  Every
+    root whose transitive closure contains native code gets its own harness so
+    one native library cannot make unrelated packs fail before CPython starts.
+    """
+    records: list[tuple[Path, dict]] = []
+    by_name: dict[str, tuple[Path, dict]] = {}
+    for path in provisional_packs:
+        metadata = read_pack_metadata(path)
+        name = metadata.get("name")
+        if not isinstance(name, str) or not name:
+            raise RuntimeError(f"provisional pack has no valid name: {path}")
+        key = name.casefold()
+        if key in by_name:
+            raise RuntimeError(f"provisional pack set repeats name: {name}")
+        record = (path, metadata)
+        records.append(record)
+        by_name[key] = record
+
+    canonical_roots: list[str] = []
+    seen_roots: set[str] = set()
+    for requested in root_names:
+        key = requested.casefold()
+        record = by_name.get(key)
+        if record is None:
+            raise RuntimeError(f"verification root is missing from the provisional set: {requested}")
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+        canonical_roots.append(record[1]["name"])
+    if not canonical_roots:
+        canonical_roots = [metadata["name"] for _path, metadata in records]
+
+    native_groups: list[dict] = []
+    pure_roots: list[str] = []
+    pure_pack_keys: set[str] = set()
+    for root_name in canonical_roots:
+        closure = _pack_dependency_closure(by_name, [root_name])
+        if any(_is_native_pack(metadata) for _path, metadata in closure):
+            native_groups.append({
+                "roots": [root_name],
+                "packs": [path for path, _metadata in closure],
+            })
+            continue
+        pure_roots.append(root_name)
+        pure_pack_keys.update(metadata["name"].casefold() for _path, metadata in closure)
+
+    groups: list[dict] = []
+    if pure_roots:
+        groups.append({
+            "roots": pure_roots,
+            "packs": [
+                path
+                for path, metadata in records
+                if metadata["name"].casefold() in pure_pack_keys
+            ],
+        })
+    groups.extend(native_groups)
+    return groups
+
+
+def _aggregate_pack_verification_reports(reports: list[dict]) -> dict:
+    if not reports:
+        raise RuntimeError("pack verification produced no reports")
+    if len(reports) == 1:
+        return reports[0]
+
+    runtime = reports[0].get("runtime_sdk")
+    packs: dict[tuple[str, str], dict] = {}
+    smokes: dict[tuple[str, str], dict] = {}
+    closures: list[dict] = []
+    dependencies: set[str] = set()
+    executable_hashes: list[str] = []
+    map_hashes: list[str] = []
+    verification_roots: list[str] = []
+    seen_roots: set[str] = set()
+    for report in reports:
+        if report.get("status") != "passed" or report.get("failures") != []:
+            raise RuntimeError("cannot aggregate a failed SDK pack verification report")
+        if report.get("runtime_sdk") != runtime:
+            raise RuntimeError("SDK pack verification reports disagree on runtime provenance")
+        roots = report.get("verification_roots")
+        if (
+            not isinstance(roots, list)
+            or not roots
+            or any(not isinstance(root, str) or not root for root in roots)
+        ):
+            raise RuntimeError("SDK pack verification report has no verification roots")
+        for root in roots:
+            key = root.casefold()
+            if key in seen_roots:
+                raise RuntimeError(f"SDK pack verification root is repeated: {root}")
+            seen_roots.add(key)
+            verification_roots.append(root)
+        report_pack_names = {
+            record.get("name")
+            for record in report.get("packs", [])
+            if isinstance(record, dict)
+        }
+        if any(root not in report_pack_names for root in roots):
+            raise RuntimeError("SDK pack verification roots are not present in their closure")
+        for record in report.get("packs", []):
+            if not isinstance(record, dict):
+                raise RuntimeError("SDK pack verification report has an invalid pack record")
+            identity = (record.get("name"), record.get("version"))
+            previous = packs.get(identity)
+            if previous is not None and previous != record:
+                raise RuntimeError(f"SDK verification reports disagree on pack {identity!r}")
+            packs[identity] = record
+        for record in report.get("integration_smoke_tests", []):
+            if not isinstance(record, dict):
+                raise RuntimeError("SDK pack verification report has an invalid smoke record")
+            normalized_record = dict(record)
+            # A dependency can be exercised by more than one isolated native
+            # closure.  Wall-clock duration is diagnostic rather than
+            # identity evidence and will naturally differ between those runs.
+            # Drop it from the aggregate so otherwise identical passing smoke
+            # evidence remains deterministic.
+            for diagnostic_field in ("duration_seconds", "stdout", "stderr"):
+                normalized_record.pop(diagnostic_field, None)
+            identity = (record.get("integration"), record.get("name"))
+            previous = smokes.get(identity)
+            if previous is not None and previous != normalized_record:
+                raise RuntimeError(f"SDK verification reports disagree on smoke {identity!r}")
+            smokes[identity] = normalized_record
+        pe_audit = report.get("pe_audit")
+        if not isinstance(pe_audit, dict) or pe_audit.get("status") != "passed":
+            raise RuntimeError("SDK pack verification report has no passed PE audit")
+        dependencies.update(str(name) for name in pe_audit.get("dependencies", []))
+        executable_hashes.append(report["executable_sha256"])
+        map_hashes.append(pe_audit["map_sha256"])
+        closures.append({
+            "roots": roots,
+            "packs": sorted(report_pack_names, key=str.casefold),
+            "executable_sha256": report["executable_sha256"],
+            "map_sha256": pe_audit["map_sha256"],
+            "pe_dependencies": pe_audit["dependencies"],
+        })
+
+    aggregate_executable_sha = hashlib.sha256(
+        "\n".join(executable_hashes).encode("ascii")
+    ).hexdigest()
+    aggregate_map_sha = hashlib.sha256(
+        "\n".join(map_hashes).encode("ascii")
+    ).hexdigest()
+    return {
+        "schema_version": 1,
+        "kind": "staticpython-pack-sdk-verification",
+        "verification_mode": "dependency-closure-set",
+        "status": "passed",
+        "runtime_sdk": runtime,
+        "verification_roots": sorted(verification_roots, key=str.casefold),
+        "packs": sorted(
+            packs.values(),
+            key=lambda record: (record["name"].casefold(), record["version"]),
+        ),
+        "namespace_packages": sorted({
+            namespace
+            for report in reports
+            for namespace in report.get("namespace_packages", [])
+        }),
+        "executable_sha256": aggregate_executable_sha,
+        "pe_audit": {
+            "status": "passed",
+            "dependencies": sorted(dependencies, key=str.casefold),
+            "forbidden_dependencies": [],
+            "non_system_dependencies": [],
+            "forbidden_entry_symbols": [],
+            "main_object_records": [],
+            "failures": [],
+            "executable_sha256": aggregate_executable_sha,
+            "map_sha256": aggregate_map_sha,
+            "closure_audits": closures,
+        },
+        "integration_smoke_tests": sorted(
+            smokes.values(),
+            key=lambda record: (
+                str(record["integration"]).casefold(),
+                str(record["name"]).casefold(),
+            ),
+        ),
+        "failures": [],
+        "closure_verifications": closures,
+    }
+
+
 def verify_pack_only_with_runtime_sdk(
     source_root: Path,
     runtime_sdk: Path,
     provisional_packs: list[Path],
     host_python: str,
     build_workers: int | None,
+    root_names: list[str] | None = None,
 ) -> dict:
     report_path = source_root / "PCbuild" / "staticpython-pack-verify-report.json"
-    work_dir = source_root / "PCbuild" / "staticpython-pack-verify"
-    command = [
-        host_python,
-        str(REPO_ROOT / "scripts" / "verify_pack_with_runtime_sdk.py"),
-        "--runtime-sdk",
-        str(runtime_sdk),
-        "--repo-root",
-        str(REPO_ROOT),
-        "--work-dir",
-        str(work_dir),
-        "--report-json",
-        str(report_path),
-    ]
-    for pack in provisional_packs:
-        command.extend(["--pack", str(pack)])
-    if build_workers is not None:
-        command.extend(["--build-workers", str(build_workers)])
-    run(command, cwd=REPO_ROOT)
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    if not isinstance(report, dict) or report.get("status") != "passed":
-        raise RuntimeError("runtime SDK pack verification did not produce a passed report")
+    work_root = source_root / "PCbuild" / "staticpython-pack-verify"
+    groups = pack_verification_groups(provisional_packs, root_names or [])
+    reports: list[dict] = []
+    for index, group in enumerate(groups, start=1):
+        group_work_dir = work_root if len(groups) == 1 else work_root / f"closure-{index:04d}"
+        group_report_path = (
+            report_path
+            if len(groups) == 1
+            else source_root / "PCbuild" / f"staticpython-pack-verify-report-{index:04d}.json"
+        )
+        command = [
+            host_python,
+            str(REPO_ROOT / "scripts" / "verify_pack_with_runtime_sdk.py"),
+            "--runtime-sdk",
+            str(runtime_sdk),
+            "--repo-root",
+            str(REPO_ROOT),
+            "--work-dir",
+            str(group_work_dir),
+            "--report-json",
+            str(group_report_path),
+        ]
+        for root_name in group["roots"]:
+            command.extend(["--root-pack", root_name])
+        for pack in group["packs"]:
+            command.extend(["--pack", str(pack)])
+        if build_workers is not None:
+            command.extend(["--build-workers", str(build_workers)])
+        log(
+            f"verifying pack closure {index}/{len(groups)}: "
+            + ", ".join(group["roots"])
+        )
+        run(command, cwd=REPO_ROOT)
+        report = json.loads(group_report_path.read_text(encoding="utf-8"))
+        if not isinstance(report, dict) or report.get("status") != "passed":
+            raise RuntimeError("runtime SDK pack verification did not produce a passed report")
+        reports.append(report)
+    report = _aggregate_pack_verification_reports(reports)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     return report
 
 
@@ -5325,6 +5575,7 @@ def main() -> int:
                         provisional_packs,
                         args.host_python,
                         build_workers,
+                        [integration.name for integration in output_pack_integrations],
                     )
             exported_packs = export_library_packs(
                 source_root,

@@ -369,6 +369,15 @@ def validate_sdk_verification_report(report: dict) -> None:
     if len(smoke_identities) != len(set(smoke_identities)):
         raise RuntimeError("SDK verification report repeats integration smoke evidence")
     pack_names = {name for name, _version in identities}
+    verification_roots = report.get("verification_roots")
+    if verification_roots is not None and (
+        not isinstance(verification_roots, list)
+        or not verification_roots
+        or any(not isinstance(name, str) or not name for name in verification_roots)
+        or len(verification_roots) != len({name.casefold() for name in verification_roots})
+        or any(name not in pack_names for name in verification_roots)
+    ):
+        raise RuntimeError("SDK verification report has invalid verification roots")
     smoke_names = {record["integration"] for record in smoke_tests}
     if smoke_names != pack_names:
         raise RuntimeError(
@@ -384,11 +393,17 @@ def expected_pack_promotion(report: dict, promoted_packs: list[Path]) -> dict:
 
     final_records: list[dict] = []
     identities: set[tuple[object, object]] = set()
+    verification_roots = report.get("verification_roots")
+    root_names = set(verification_roots) if isinstance(verification_roots, list) else None
     for pack_path in promoted_packs:
         metadata = read_pack_metadata(pack_path)
         name = metadata.get("name")
         version = metadata.get("version")
         identity = (name, version)
+        if root_names is not None and name not in root_names:
+            raise RuntimeError(
+                f"promoted pack {name} {version} was only a dependency, not a verification root"
+            )
         if identity in identities:
             raise RuntimeError(f"pack promotion repeats final pack {name} {version}")
         identities.add(identity)

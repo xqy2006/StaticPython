@@ -294,6 +294,27 @@ class VerifyPackWithRuntimeSDKTests(unittest.TestCase):
             ("google", "native", "zope"),
         )
 
+    def test_verification_root_must_be_selected(self) -> None:
+        runtime_root, runtime = self._make_runtime()
+        pack_root, _metadata = self._make_pack(runtime)
+        pack_archive = self.root / "demo.zip"
+        with ZipFile(pack_archive, "w") as archive:
+            for path in pack_root.rglob("*"):
+                if path.is_file():
+                    archive.write(path, path.relative_to(pack_root).as_posix())
+        args = mock.Mock(
+            runtime_sdk=runtime_root,
+            pack=[pack_archive],
+            root_pack=["missing"],
+            repo_root=REPO_ROOT,
+            work_dir=self.root / "work",
+            report_json=self.root / "report.json",
+            build_workers=1,
+            skip_group=[],
+        )
+        with self.assertRaisesRegex(RuntimeError, "verification root is not selected"):
+            verifier.verify_assets(args)
+
     def test_smoke_sources_are_embedded_with_virtual_script_paths(self) -> None:
         script = self.root / "smoke.py"
         script.write_text("assert __name__ == '__main__'\n", encoding="utf-8")

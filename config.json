@@ -72,13 +72,6 @@
         "source_provider": "pypi"
       },
       {
-        "name": "attr",
-        "overlay_entries": [
-          "Lib/attr"
-        ],
-        "source_provider": "pypi"
-      },
-      {
         "name": "attrs",
         "overlay_entries": [
           "Lib/attrs",
@@ -173,19 +166,18 @@
         "source_provider": "pypi"
       },
       {
-        "name": "cattr",
-        "overlay_entries": [
-          "Lib/cattr"
-        ],
-        "source_provider": "pypi"
-      },
-      {
         "name": "cattrs",
         "source_mapping": {
-          "cattrs||src/cattrs||cattr||src/cattr": "Lib/cattrs"
+          "cattrs||src/cattrs||cattr||src/cattr": "Lib/cattrs",
+          "?cattr||?src/cattr||?cattrs||?src/cattrs": "Lib/cattr"
         },
         "python_packages": [
-          "cattrs"
+          "cattrs",
+          "cattr"
+        ],
+        "top_level_import_names": [
+          "cattrs",
+          "cattr"
         ],
         "source_provider": "pypi"
       },
@@ -1639,7 +1631,6 @@
         "asgiref",
         "asttokens",
         "async_lru",
-        "attr",
         "attrs",
         "babel",
         "black",
@@ -1650,7 +1641,6 @@
         "bokeh",
         "bs4",
         "cachetools",
-        "cattr",
         "cattrs",
         "certifi",
         "chardet",
