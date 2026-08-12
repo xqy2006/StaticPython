@@ -70,10 +70,28 @@ class FastAPIPackTests(unittest.TestCase):
             },
         )
         self.assertEqual(entry["license_expression"], "MIT")
-        smoke = entry["smoke_tests"][0]["code"]
-        self.assertIn("FastAPI", smoke)
-        self.assertIn("app.openapi()", smoke)
-        self.assertIn("BaseModel", smoke)
+        self.assertEqual(
+            entry["smoke_tests"],
+            [
+                {
+                    "name": "in-memory-asgi-pydantic-route",
+                    "kind": "script",
+                    "script": "scripts/fastapi_runtime.py",
+                    "timeout": 30,
+                }
+            ],
+        )
+
+    def test_runtime_smoke_exercises_asgi_validation_without_files(self) -> None:
+        smoke_path = REPO_ROOT / "scripts" / "fastapi_runtime.py"
+        source = smoke_path.read_text(encoding="utf-8")
+        compile(source, str(smoke_path), "exec")
+        self.assertIn("await app(scope, receive, send)", source)
+        self.assertIn('assert status == 200', source)
+        self.assertIn('assert status == 422', source)
+        self.assertIn('payload == {"name": "widget", "price": 2.5}', source)
+        self.assertNotIn("tempfile", source)
+        self.assertNotIn("open(", source)
 
     def test_catalog_hash_pin_reaches_library_integration(self) -> None:
         integration = libs._integration_from_catalog_entry(self.catalog["fastapi"])
@@ -142,6 +160,7 @@ class FastAPIPackTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         push_paths = workflow.split("  pull_request:\n", 1)[0]
         self.assertIn('      - "scripts/test_fastapi_pack.py"', push_paths)
+        self.assertIn('      - "scripts/fastapi_runtime.py"', push_paths)
         job = workflow.split("  sdk-linked-fastapi:\n", 1)[1]
         targets = {
             "3.11.15": "cp311",

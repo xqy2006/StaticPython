@@ -14,6 +14,7 @@ on:
       - "scripts/test_pydantic_core_pack.py"
       - "scripts/test_pydantic_pack.py"
       - "scripts/test_fastapi_pack.py"
+      - "scripts/fastapi_runtime.py"
       - "scripts/verify_pack_with_runtime_sdk.py"
   pull_request:
     paths:
@@ -27,6 +28,7 @@ on:
       - "scripts/test_pydantic_core_pack.py"
       - "scripts/test_pydantic_pack.py"
       - "scripts/test_fastapi_pack.py"
+      - "scripts/fastapi_runtime.py"
       - "scripts/verify_pack_with_runtime_sdk.py"
   workflow_dispatch:
 

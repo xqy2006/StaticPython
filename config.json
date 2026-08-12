@@ -377,9 +377,10 @@
         ],
         "smoke_tests": [
           {
-            "name": "openapi-pydantic-route-contract",
-            "kind": "inline",
-            "code": "from fastapi import FastAPI\nfrom pydantic import BaseModel, Field\n\nclass Item(BaseModel):\n    name: str\n    price: float = Field(gt=0)\n\napp = FastAPI(title='Static API')\n\n@app.post('/items/{item_id}', response_model=Item)\ndef put_item(item_id: int, item: Item) -> Item:\n    assert item_id == 7\n    return item\n\nschema = app.openapi()\nassert schema['info']['title'] == 'Static API'\nassert 'post' in schema['paths']['/items/{item_id}']\nassert schema['components']['schemas']['Item']['properties']['price']['exclusiveMinimum'] == 0\nassert put_item(7, Item(name='widget', price='2.5')).price == 2.5"
+            "name": "in-memory-asgi-pydantic-route",
+            "kind": "script",
+            "script": "scripts/fastapi_runtime.py",
+            "timeout": 30
           }
         ],
         "source_ignore_patterns": [
