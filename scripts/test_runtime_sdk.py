@@ -887,6 +887,31 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertIn("gdi32.lib", integration.python_link_dependencies_release_x64)
         self.assertTrue(build.is_windows_system_library("gdi32.lib"))
 
+    def test_libui_native_module_embeds_static_common_controls_manifest(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_libui_manifest_patch_test",
+            REPO_ROOT / "Lib" / "libui" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        source = (
+            "#ifdef _WIN32\n"
+            "#include <windows.h>\n"
+            "#endif\n"
+            "PyMODINIT_FUNC PyInit_core(void);\n"
+        )
+        patched = module._patch_libui_native_module_text(source)
+
+        self.assertIn("PyInit__libui_core", patched)
+        self.assertNotIn("PyInit_core", patched)
+        self.assertIn(module.LIBUI_COMMON_CONTROLS_MANIFEST_PRAGMA, patched)
+        self.assertIn("Microsoft.Windows.Common-Controls", patched)
+        self.assertIn("version='6.0.0.0'", patched)
+        self.assertEqual(patched.count("/manifestdependency:"), 1)
+        self.assertEqual(module._patch_libui_native_module_text(patched), patched)
+
     def test_wxpython_link_metadata_tracks_bundled_wxwidgets_version(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "staticpython_wxpython_versioned_libraries_test",
