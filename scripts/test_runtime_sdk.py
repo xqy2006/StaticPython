@@ -191,6 +191,30 @@ class RuntimeSDKTests(unittest.TestCase):
             build.sha256_file(self.root / "downloads" / f"cpython-v{version}-python-org.tgz"),
         )
 
+    def test_safe_tar_extraction_rejects_links_and_special_members(self) -> None:
+        for member_type in (
+            build.tarfile.SYMTYPE,
+            build.tarfile.LNKTYPE,
+            build.tarfile.FIFOTYPE,
+            build.tarfile.CHRTYPE,
+            build.tarfile.BLKTYPE,
+        ):
+            archive_path = self.root / f"unsafe-{member_type.hex()}.tar"
+            with build.tarfile.open(archive_path, "w") as archive:
+                member = build.tarfile.TarInfo("source/unsafe")
+                member.type = member_type
+                if member_type in {build.tarfile.SYMTYPE, build.tarfile.LNKTYPE}:
+                    member.linkname = "../../outside"
+                archive.addfile(member)
+            destination = self.root / f"extract-{member_type.hex()}"
+            destination.mkdir()
+            with (
+                build.tarfile.open(archive_path, "r:") as archive,
+                self.assertRaisesRegex(RuntimeError, "unsupported link or special member"),
+            ):
+                build.safe_extract_tar(archive, destination)
+            self.assertFalse((destination / "source" / "unsafe").exists())
+
     def _write_pack_promotion_fixture(self) -> tuple[dict, Path, dict]:
         staging = self.root / "promotion-fixture"
         staging.mkdir(exist_ok=True)

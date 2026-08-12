@@ -3944,6 +3944,10 @@ def safe_extract_zip(archive: ZipFile, destination_root: Path) -> None:
 
 def safe_extract_tar(archive: tarfile.TarFile, destination_root: Path) -> None:
     for member in archive.getmembers():
+        if not (member.isfile() or member.isdir()):
+            raise RuntimeError(
+                f"tar archive contains unsupported link or special member: {member.name}"
+            )
         if ensure_safe_archive_member(destination_root, member.name):
             archive.extract(member, destination_root)
 
