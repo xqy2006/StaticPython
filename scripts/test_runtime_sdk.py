@@ -257,6 +257,7 @@ class RuntimeSDKTests(unittest.TestCase):
             static_library_projects_release_x64=["demo_static.vcxproj"],
         )
         with (
+            mock.patch.object(build, "stage_pack_build_pyconfig_header") as stage_pyconfig,
             mock.patch.object(build, "run_pre_build_hooks") as pre_build,
             mock.patch.object(build, "stage_static_libraries") as stage,
             mock.patch.object(build, "resolve_msbuild_exe", return_value=Path("msbuild.exe")),
@@ -277,6 +278,12 @@ class RuntimeSDKTests(unittest.TestCase):
                 "3.13.14",
                 2,
             )
+        stage_pyconfig.assert_called_once_with(
+            self.root,
+            (3, 13, 14),
+            "Release",
+            "x64",
+        )
         pre_build.assert_called_once()
         stage.assert_called_once_with(self.root, "x64", {}, [integration])
         self.assertEqual(run.call_count, 1)
@@ -294,6 +301,43 @@ class RuntimeSDKTests(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text("legacy", encoding="utf-8")
         self.assertEqual(build.resolve_runtime_sdk_pyconfig_header(self.root, "x64"), generated)
+
+    def test_pack_only_build_stages_freezer_generated_pyconfig_header(self) -> None:
+        generated = build.generated_pyconfig_header_path(
+            self.root,
+            (3, 13, 15),
+            "Release",
+            "x64",
+            "_freeze_module",
+        )
+        generated.parent.mkdir(parents=True)
+        generated.write_text("#define STATICPYTHON_TEST 1\n", encoding="utf-8")
+        target = build.stage_pack_build_pyconfig_header(
+            self.root,
+            (3, 13, 15),
+            "Release",
+            "x64",
+        )
+        self.assertEqual(
+            target,
+            build.generated_pyconfig_header_path(
+                self.root,
+                (3, 13, 15),
+                "Release",
+                "x64",
+                "pythoncore",
+            ),
+        )
+        self.assertEqual(target.read_bytes(), generated.read_bytes())
+
+    def test_pack_only_build_rejects_missing_generated_pyconfig_header(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "did not produce a usable pyconfig.h"):
+            build.stage_pack_build_pyconfig_header(
+                self.root,
+                (3, 13, 15),
+                "Release",
+                "x64",
+            )
 
     def test_parse_cpython_version_preserves_prerelease_suffix(self) -> None:
         include = self.root / "Include"
@@ -439,20 +483,6 @@ struct _inittab _PyImport_Inittab[] = {
         spec.loader.exec_module(module)
         project = module._render_ujson_project(["python/ujson.c"], ["python"], "5.13.0")
         self.assertIn("UJSON_VERSION=&quot;5.13.0&quot;", project)
-
-    def test_glfw_project_includes_windows_pyconfig_header_directory(self) -> None:
-        spec = importlib.util.spec_from_file_location(
-            "staticpython_glfw_setup_test",
-            REPO_ROOT / "Lib" / "glfw" / "setup.py",
-        )
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        project = module._render_glfw_project()
-        self.assertIn(
-            r"..\glfw_builtin\glfw-3.4\include;..\PC;%(AdditionalIncludeDirectories)",
-            project,
-        )
 
     def test_hypothesis_native_compatibility_is_frozen_and_functional(self) -> None:
         spec = importlib.util.spec_from_file_location(

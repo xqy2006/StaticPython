@@ -4022,6 +4022,80 @@ def get_pcbuild_output_dir(source_root: Path, platform: str) -> Path:
     return source_root / "PCbuild" / platform_output_dir_name(platform)
 
 
+def generated_pyconfig_header_path(
+    source_root: Path,
+    version_info: tuple[int, int, int],
+    configuration: str,
+    platform: str,
+    project_name: str,
+) -> Path:
+    arch_name = {
+        "x64": "amd64",
+        "Win32": "win32",
+        "ARM64": "arm64",
+        "ARM": "arm32",
+    }.get(platform, platform.casefold())
+    return (
+        source_root
+        / "PCbuild"
+        / "obj"
+        / f"{version_info[0]}{version_info[1]}{arch_name}_{configuration}"
+        / project_name
+        / "pyconfig.h"
+    )
+
+
+def stage_pack_build_pyconfig_header(
+    source_root: Path,
+    version_info: tuple[int, int, int],
+    configuration: str,
+    platform: str,
+) -> Path:
+    """Populate the pythoncore include location expected by pyproject.props.
+
+    Pack-only builds intentionally do not build pythoncore.  The already-built
+    freeze tool generated the same configuration header in its own intermediate
+    directory, so copy that audited build input into pythoncore's expected path.
+    """
+    target = generated_pyconfig_header_path(
+        source_root,
+        version_info,
+        configuration,
+        platform,
+        "pythoncore",
+    )
+    candidates = [
+        get_pcbuild_output_dir(source_root, platform) / "pyconfig.h",
+        generated_pyconfig_header_path(
+            source_root,
+            version_info,
+            configuration,
+            platform,
+            "_freeze_module",
+        ),
+        target,
+        source_root / "PC" / "pyconfig.h",
+    ]
+    source = next(
+        (candidate for candidate in candidates if candidate.is_file() and candidate.stat().st_size),
+        None,
+    )
+    if source is None:
+        rendered = "\n".join(f"- {candidate}" for candidate in candidates)
+        raise RuntimeError(
+            "pack-only build did not produce a usable pyconfig.h; checked:\n"
+            + rendered
+        )
+    if source.resolve() != target.resolve():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        log(
+            "staged pack-build pyconfig.h from "
+            f"{source.relative_to(source_root)} to {target.relative_to(source_root)}"
+        )
+    return target
+
+
 def find_external_source(source_root: Path, prefix: str, *, require_file: str) -> Path | None:
     externals = source_root / "externals"
     if not externals.exists():
@@ -4674,6 +4748,12 @@ def build_pack_static_libraries(
 ) -> None:
     """Build only native projects owned by selected third-party packs."""
     pcbuild = source_root / "PCbuild"
+    stage_pack_build_pyconfig_header(
+        source_root,
+        version_info,
+        configuration,
+        platform,
+    )
     run_pre_build_hooks(
         integrations,
         make_library_hook_context(
