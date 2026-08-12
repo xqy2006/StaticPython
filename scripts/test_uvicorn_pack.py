@@ -109,7 +109,7 @@ class UvicornPackTests(unittest.TestCase):
         selected = libs.load_integrations(
             build.LIB_PATCH_ROOT,
             ["uvicorn"],
-            target_version=Version("3.13.14"),
+            target_version=Version("3.13.15"),
             version_overrides=profile["third_party_library_version_overrides"],
             library_catalog=catalog,
         )
