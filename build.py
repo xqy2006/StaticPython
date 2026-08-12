@@ -66,6 +66,27 @@ DEFAULT_CPYTHON_VERSION = "3.13.2"
 DOWNLOAD_MAX_ATTEMPTS = 4
 DOWNLOAD_RETRY_DELAYS_SECONDS = (1, 2, 4)
 TRANSIENT_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+CPYTHON_SOURCE_DEPS_ARCHIVE_URL_TEMPLATES = (
+    "https://github.com/python/cpython-source-deps/archive/refs/tags/{tag}.zip",
+    "https://codeload.github.com/python/cpython-source-deps/zip/refs/tags/{tag}",
+)
+CPYTHON_CUSTOM_SOURCE_DEPENDENCY_PREFIXES = (
+    "libffi-",
+    "openssl-",
+    "tcl-",
+    "tcl-core-",
+    "tix-",
+    "tk-",
+)
+CPYTHON_SOURCE_DEPENDENCY_MARKERS = {
+    "bzip2-": ("bzlib.c", "bzlib.h"),
+    "mpdecimal-": ("libmpdec/basearith.c",),
+    "sqlite-": ("sqlite3.c", "sqlite3.h"),
+    "xz-": ("src/liblzma/api/lzma.h",),
+    "zlib-ng-": ("zlib-ng.h.in",),
+    "zlib-": ("adler32.c", "zlib.h"),
+    "zstd-": ("lib/zstd.h",),
+}
 WINDOWS_RESERVED_BASENAMES = {
     "CON",
     "PRN",
@@ -5239,15 +5260,77 @@ def export_built_python(exe_path: Path, output_dir: Path, version_full: str, pla
     return destination
 
 
-def maybe_get_externals(source_root: Path) -> None:
+def cpython_source_dependency_tags(source_root: Path) -> list[str]:
     script = source_root / "PCbuild" / "get_externals.bat"
     text = script.read_text(encoding="utf-8", errors="ignore")
-    args = ["cmd", "/c", "get_externals.bat"]
-    if "--no-openssl" in text:
-        args.append("--no-openssl")
-    if "--no-libffi" in text:
-        args.append("--no-libffi")
-    run(args, cwd=source_root / "PCbuild")
+    tags: list[str] = []
+    for line in text.splitlines():
+        match = re.search(
+            r"\bset\s+libraries\s*=\s*%libraries%\s+([A-Za-z0-9][A-Za-z0-9._+-]*)",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            continue
+        tag = match.group(1)
+        if tag.lower().startswith(CPYTHON_CUSTOM_SOURCE_DEPENDENCY_PREFIXES):
+            continue
+        if tag not in tags:
+            tags.append(tag)
+    if not tags:
+        raise RuntimeError(f"could not resolve CPython source dependencies from {script}")
+    return tags
+
+
+def cpython_source_dependency_markers(tag: str) -> tuple[str, ...]:
+    for prefix, markers in CPYTHON_SOURCE_DEPENDENCY_MARKERS.items():
+        if tag.lower().startswith(prefix):
+            return markers
+    raise RuntimeError(
+        "CPython added an unreviewed source dependency to PCbuild/get_externals.bat: "
+        f"{tag}. Add strict content markers before enabling it."
+    )
+
+
+def source_dependency_is_complete(path: Path, markers: tuple[str, ...]) -> bool:
+    return all((path / Path(marker)).is_file() for marker in markers)
+
+
+def maybe_get_externals(source_root: Path) -> None:
+    """Materialize CPython's source dependencies with retries and a mirror.
+
+    Upstream get_externals.bat runs every fetch inside a parenthesized loop and
+    consequently returns success when an individual get_external.py invocation
+    fails.  That turns a transient GitHub outage into a much later compiler
+    error (typically a missing zlib.h).  StaticPython owns OpenSSL and libffi
+    source preparation, and optional tkinter owns Tcl/Tk, so fetch only the
+    remaining source dependencies and validate them before compilation.
+    """
+    externals = source_root / "externals"
+    externals.mkdir(parents=True, exist_ok=True)
+    cache_root = DOWNLOAD_ROOT / "cpython-source-deps"
+
+    for tag in cpython_source_dependency_tags(source_root):
+        markers = cpython_source_dependency_markers(tag)
+        destination = externals / tag
+        if source_dependency_is_complete(destination, markers):
+            log(f"using existing CPython source dependency {tag}")
+            continue
+        if destination.exists():
+            log(f"discarding incomplete CPython source dependency {destination}")
+            shutil.rmtree(destination)
+
+        archive_path = cache_root / f"{tag}.zip"
+        urls = [template.format(tag=tag) for template in CPYTHON_SOURCE_DEPS_ARCHIVE_URL_TEMPLATES]
+        used_source = download_first_available(urls, archive_path)
+        extract_source_archive(archive_path, externals, final_name=tag)
+        missing = [marker for marker in markers if not (destination / Path(marker)).is_file()]
+        if missing:
+            raise RuntimeError(
+                f"downloaded CPython source dependency {tag} is incomplete; missing: "
+                + ", ".join(missing)
+            )
+        log(f"materialized CPython source dependency {tag} from {used_source}")
 
 
 def parse_args() -> argparse.Namespace:

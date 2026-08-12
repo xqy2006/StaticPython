@@ -616,6 +616,100 @@ struct _inittab _PyImport_Inittab[] = {
         with mock.patch("build.subprocess.run", return_value=result):
             self.assertEqual(build.resolve_cpython_tag_commit("3.13.14"), peeled)
 
+    def test_cpython_source_dependency_tags_skip_custom_integrations(self) -> None:
+        script = self.root / "PCbuild" / "get_externals.bat"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "\n".join(
+                [
+                    "set libraries=",
+                    "set libraries=%libraries% bzip2-1.0.8",
+                    'if NOT "%IncludeLibffiSrc%"=="false" set libraries=%libraries% libffi-3.4.4',
+                    'if NOT "%IncludeSSLSrc%"=="false" set libraries=%libraries% openssl-3.0.16',
+                    'if NOT "%IncludeTkinterSrc%"=="false" set libraries=%libraries% tcl-core-8.6.15.0',
+                    "set libraries=%libraries% sqlite-3.49.1.0",
+                    "set libraries=%libraries% xz-5.2.5",
+                    "set libraries=%libraries% zlib-1.3.1",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            build.cpython_source_dependency_tags(self.root),
+            ["bzip2-1.0.8", "sqlite-3.49.1.0", "xz-5.2.5", "zlib-1.3.1"],
+        )
+
+    def test_get_externals_uses_mirror_and_validates_materialized_sources(self) -> None:
+        script = self.root / "PCbuild" / "get_externals.bat"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "set libraries=\nset libraries=%libraries% zlib-1.3.1\n",
+            encoding="utf-8",
+        )
+        used_urls: list[str] = []
+
+        def fake_download(urls, destination):
+            used_urls.extend(urls)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"archive")
+            return urls[-1]
+
+        def fake_extract(_archive, destination_root, *, final_name=None):
+            destination = destination_root / final_name
+            destination.mkdir(parents=True)
+            (destination / "adler32.c").write_text("", encoding="utf-8")
+            (destination / "zlib.h").write_text("", encoding="utf-8")
+            return destination
+
+        with (
+            mock.patch.object(build, "DOWNLOAD_ROOT", self.root / "downloads"),
+            mock.patch.object(build, "download_first_available", side_effect=fake_download),
+            mock.patch.object(build, "extract_source_archive", side_effect=fake_extract),
+        ):
+            build.maybe_get_externals(self.root)
+
+        self.assertEqual(len(used_urls), 2)
+        self.assertIn("github.com/python/cpython-source-deps", used_urls[0])
+        self.assertIn("codeload.github.com/python/cpython-source-deps", used_urls[1])
+        self.assertTrue((self.root / "externals" / "zlib-1.3.1" / "zlib.h").is_file())
+
+    def test_get_externals_rejects_unreviewed_dependency(self) -> None:
+        script = self.root / "PCbuild" / "get_externals.bat"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "set libraries=\nset libraries=%libraries% surprise-1.0\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(RuntimeError, "unreviewed source dependency"):
+            build.maybe_get_externals(self.root)
+
+    def test_get_externals_rejects_incomplete_materialized_source(self) -> None:
+        script = self.root / "PCbuild" / "get_externals.bat"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "set libraries=\nset libraries=%libraries% zlib-1.3.1\n",
+            encoding="utf-8",
+        )
+
+        def fake_download(urls, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"archive")
+            return urls[0]
+
+        def fake_extract(_archive, destination_root, *, final_name=None):
+            destination = destination_root / final_name
+            destination.mkdir(parents=True)
+            (destination / "zlib.h").write_text("", encoding="utf-8")
+            return destination
+
+        with (
+            mock.patch.object(build, "DOWNLOAD_ROOT", self.root / "downloads"),
+            mock.patch.object(build, "download_first_available", side_effect=fake_download),
+            mock.patch.object(build, "extract_source_archive", side_effect=fake_extract),
+            self.assertRaisesRegex(RuntimeError, r"zlib-1\.3\.1 is incomplete; missing: adler32\.c"),
+        ):
+            build.maybe_get_externals(self.root)
+
     def test_prompt_toolkit_3053_lazy_version_patch_is_strict(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "staticpython_prompt_toolkit_setup_test",
