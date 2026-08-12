@@ -27,8 +27,11 @@ from tools import (
 
 ARCHIVE_URL_TEMPLATES = [
     "https://github.com/libffi/libffi/releases/download/v{version}/libffi-{version}.tar.gz",
-    "https://github.com/libffi/libffi/archive/refs/tags/v{version}.tar.gz",
+    "https://deb.debian.org/debian/pool/main/libf/libffi/libffi_{version}.orig.tar.gz",
 ]
+LIBFFI_ARCHIVE_SHA256_BY_VERSION = {
+    "3.4.4": "d66c56ad259a82cf2a9dfc408b32bf5da52371500b84745f7fb8b645712df676",
+}
 COMMON_SOURCES = [
     "src/prep_cif.c",
     "src/types.c",
@@ -82,18 +85,40 @@ def libffi_archive_urls(version: str) -> list[str]:
     return [template.format(version=version) for template in ARCHIVE_URL_TEMPLATES]
 
 
+def libffi_archive_sha256(version: str) -> str:
+    try:
+        return LIBFFI_ARCHIVE_SHA256_BY_VERSION[version]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"libffi {version} has no reviewed release archive SHA-256"
+        ) from exc
+
+
 def ensure_libffi_source(context, version: str) -> Path:
     source_dir = libffi_source_dir(context, version)
-    if (source_dir / "include" / "ffi.h.in").exists() and (source_dir / "src" / "x86" / "ffiw64.c").exists():
+    required_source_files = [
+        source_dir / "fficonfig.h.in",
+        source_dir / "include" / "ffi.h.in",
+        source_dir / "src" / "x86" / "ffiw64.c",
+    ]
+    if all(path.exists() for path in required_source_files):
         context.log(f"using existing libffi source at {source_dir.relative_to(context.source_root)}")
         return source_dir
 
     archive_path = libffi_archive_path(context, version)
-    used_source = download_first_available(context.log, libffi_archive_urls(version), archive_path)
+    used_source = download_first_available(
+        context.log,
+        libffi_archive_urls(version),
+        archive_path,
+        expected_sha256=libffi_archive_sha256(version),
+    )
     source_dir.parent.mkdir(parents=True, exist_ok=True)
     extract_source_archive(context.log, archive_path, source_dir.parent, final_name=source_dir.name)
-    if not (source_dir / "include" / "ffi.h.in").exists():
-        raise RuntimeError(f"downloaded libffi source is missing include/ffi.h.in: {source_dir}")
+    missing = [path.relative_to(source_dir).as_posix() for path in required_source_files if not path.exists()]
+    if missing:
+        raise RuntimeError(
+            f"downloaded libffi source is incomplete: {', '.join(missing)}: {source_dir}"
+        )
     context.log(f"materialized libffi {version} from {used_source} to {source_dir.relative_to(context.source_root)}")
     return source_dir
 

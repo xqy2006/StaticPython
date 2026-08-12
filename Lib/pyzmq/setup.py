@@ -66,8 +66,14 @@ PYZMQ_CORE_LEGACY_EXTENSION_SOURCES = [
 LIBSODIUM_ARCHIVE_URL_TEMPLATE = (
     "https://github.com/jedisct1/libsodium/releases/download/{version}-RELEASE/libsodium-{version}.tar.gz"
 )
+LIBSODIUM_CODELOAD_URL_TEMPLATE = (
+    "https://codeload.github.com/jedisct1/libsodium/tar.gz/refs/tags/{version}-RELEASE"
+)
 LIBZMQ_ARCHIVE_URL_TEMPLATE = (
     "https://github.com/zeromq/libzmq/releases/download/v{version}/zeromq-{version}.tar.gz"
+)
+LIBZMQ_CODELOAD_URL_TEMPLATE = (
+    "https://codeload.github.com/zeromq/libzmq/tar.gz/refs/tags/v{version}"
 )
 
 
@@ -612,7 +618,10 @@ def ensure_libsodium_source(context) -> Path:
     archive_path = libsodium_archive_path(context)
     used_source = download_first_available(
         context.log,
-        [LIBSODIUM_ARCHIVE_URL_TEMPLATE.format(version=version)],
+        [
+            LIBSODIUM_ARCHIVE_URL_TEMPLATE.format(version=version),
+            LIBSODIUM_CODELOAD_URL_TEMPLATE.format(version=version),
+        ],
         archive_path,
     )
     source_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -635,7 +644,10 @@ def ensure_libzmq_source(context) -> Path:
     archive_path = libzmq_archive_path(context)
     used_source = download_first_available(
         context.log,
-        [LIBZMQ_ARCHIVE_URL_TEMPLATE.format(version=version)],
+        [
+            LIBZMQ_ARCHIVE_URL_TEMPLATE.format(version=version),
+            LIBZMQ_CODELOAD_URL_TEMPLATE.format(version=version),
+        ],
         archive_path,
     )
     source_dir.parent.mkdir(parents=True, exist_ok=True)

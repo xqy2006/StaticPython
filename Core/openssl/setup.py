@@ -26,8 +26,9 @@ from tools import (
 
 
 ARCHIVE_URL_TEMPLATES = [
-    "https://github.com/openssl/openssl/archive/refs/tags/openssl-{version}.tar.gz",
+    "https://codeload.github.com/openssl/openssl/tar.gz/refs/tags/openssl-{version}",
     "https://www.openssl.org/source/openssl-{version}.tar.gz",
+    "https://github.com/openssl/openssl/archive/refs/tags/openssl-{version}.tar.gz",
 ]
 STATIC_DIR_NAME = "openssl-static"
 

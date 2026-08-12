@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 import fnmatch
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
@@ -16,8 +17,11 @@ from pathlib import Path, PurePosixPath
 import tokenize
 from types import ModuleType
 from typing import Callable, Iterator
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zipfile import ZipFile
+
+from tools import download_first_available
 
 
 def _ensure_repo_packaging_on_path() -> None:
@@ -42,6 +46,10 @@ Hook = Callable[["LibraryHookContext"], None]
 PYPI_API_URL_TEMPLATE = "https://pypi.org/pypi/{project}/json"
 PYPI_VERSION_API_URL_TEMPLATE = "https://pypi.org/pypi/{project}/{version}/json"
 GITHUB_ARCHIVE_URL_TEMPLATE = "https://github.com/{repo}/archive/refs/{ref_kind}/{ref}.zip"
+GITHUB_CODELOAD_URL_TEMPLATE = "https://codeload.github.com/{repo}/zip/refs/{ref_kind}/{ref}"
+DOWNLOAD_MAX_ATTEMPTS = 4
+DOWNLOAD_RETRY_DELAYS_SECONDS = (1, 2, 4)
+TRANSIENT_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 SOURCE_ROOT_CANDIDATES = (
     "",
     "src",
@@ -153,6 +161,49 @@ def _build_optional_source_cleanup_paths(source_mapping: dict[str, str]) -> list
 
 def _build_cleanup_paths(paths: list[str] | None = None) -> list[str]:
     return _unique([_normalized_relpath(path) for path in (paths or [])])
+
+
+def configure_python_module_ownership(
+    integration: LibraryIntegration,
+    *,
+    module_name: str,
+    materialized_path: str,
+    enabled: bool,
+    expose_top_level: bool = False,
+) -> None:
+    """Keep optional top-level module metadata aligned with materialized source."""
+    if not module_name or any(
+        not part.isidentifier() for part in module_name.split(".")
+    ):
+        raise RuntimeError(f"invalid Python module ownership name: {module_name!r}")
+    normalized_path = _normalized_relpath(materialized_path)
+    if not normalized_path.startswith("Lib/"):
+        raise RuntimeError(
+            f"Python module ownership path must be inside Lib: {materialized_path!r}"
+        )
+
+    def update(values: list[str], value: str, include: bool) -> list[str]:
+        filtered = [item for item in values if item != value]
+        return [value, *filtered] if include else filtered
+
+    integration.materialized_paths = update(
+        integration.materialized_paths,
+        normalized_path,
+        enabled,
+    )
+    integration.cleanup_paths = _build_cleanup_paths(
+        [*integration.cleanup_paths, normalized_path]
+    )
+    integration.python_packages = update(
+        integration.python_packages,
+        module_name,
+        enabled,
+    )
+    integration.top_level_import_names = update(
+        integration.top_level_import_names,
+        module_name,
+        enabled and expose_top_level,
+    )
 
 
 def source_path(context: LibraryHookContext, relative: str) -> Path:
@@ -448,25 +499,71 @@ def _http_get_json(url: str) -> dict:
 
 def _download_file(url: str, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(_read_url_bytes(url))
+    temporary = Path(str(destination) + ".tmp")
+    if temporary.exists():
+        temporary.unlink()
+    try:
+        temporary.write_bytes(_read_url_bytes(url))
+        temporary.replace(destination)
+    except BaseException:
+        if temporary.exists():
+            temporary.unlink()
+        raise
 
 
-def _read_url_bytes(url: str, *, attempts: int = 5, initial_delay_seconds: float = 1.0) -> bytes:
+def _read_url_bytes(
+    url: str,
+    *,
+    attempts: int = DOWNLOAD_MAX_ATTEMPTS,
+    initial_delay_seconds: float = 1.0,
+) -> bytes:
     request = Request(url, headers={"User-Agent": "StaticPython/1.0"})
     delay = initial_delay_seconds
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
-            with urlopen(request) as response:
+            with urlopen(request, timeout=60) as response:
                 return response.read()
-        except Exception as exc:
+        except HTTPError as exc:
+            last_error = exc
+            if exc.code not in TRANSIENT_HTTP_STATUS_CODES or attempt >= attempts:
+                break
+        except (URLError, OSError, http.client.HTTPException) as exc:
             last_error = exc
             if attempt >= attempts:
                 break
+        if attempt < attempts:
             time.sleep(delay)
             delay = min(delay * 2, 15.0)
     assert last_error is not None
     raise last_error
+
+
+def _github_archive_urls(
+    repo: str,
+    ref: str,
+    ref_kind: str,
+    archive_url_template: str | None,
+    format_args: dict[str, str],
+) -> list[str]:
+    if archive_url_template is not None:
+        return [
+            archive_url_template.format(
+                repo=repo,
+                ref=ref,
+                ref_kind=ref_kind,
+                **format_args,
+            )
+        ]
+    return [
+        template.format(
+            repo=repo,
+            ref=ref,
+            ref_kind=ref_kind,
+            **format_args,
+        )
+        for template in (GITHUB_ARCHIVE_URL_TEMPLATE, GITHUB_CODELOAD_URL_TEMPLATE)
+    ]
 
 
 def _marker_environment(target_version: Version) -> dict[str, str]:
@@ -1618,9 +1715,14 @@ def _build_github_source_hook(
     def prepare_source(context: LibraryHookContext) -> None:
         format_args = _version_format_args(context)
         resolved_ref = ref.format(**format_args)
-        url_template = archive_url_template or GITHUB_ARCHIVE_URL_TEMPLATE
-        url = url_template.format(repo=repo, ref=resolved_ref, ref_kind=ref_kind, **format_args)
-        filename = Path(url.split("?", 1)[0]).name or f"{_safe_cache_component(resolved_ref)}.zip"
+        urls = _github_archive_urls(
+            repo,
+            resolved_ref,
+            ref_kind,
+            archive_url_template,
+            format_args,
+        )
+        filename = Path(urls[0].split("?", 1)[0]).name or f"{_safe_cache_component(resolved_ref)}.zip"
 
         archive_path = (
             context.download_cache_root
@@ -1639,11 +1741,8 @@ def _build_github_source_hook(
             / "extracted"
         )
 
-        if not archive_path.exists():
-            context.log(f"downloading {repo}@{resolved_ref} from GitHub")
-            _download_file(url, archive_path)
-        else:
-            context.log(f"reusing cached GitHub archive {repo}@{resolved_ref}")
+        used_source = download_first_available(context.log, urls, archive_path)
+        context.log(f"using GitHub archive {repo}@{resolved_ref} from {used_source}")
 
         extracted_root = _extract_archive(archive_path, extract_root, context.log)
         context.log(f"using GitHub source from {extracted_root}")

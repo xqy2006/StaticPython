@@ -24,6 +24,7 @@ DEARPYGUI_SUBMODULES = [
         "commit": "3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c",
         "urls": [
             "https://github.com/ocornut/imgui/archive/3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c.zip",
+            "https://codeload.github.com/ocornut/imgui/zip/3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c",
         ],
         "probe": "imgui.cpp",
     },
@@ -32,6 +33,7 @@ DEARPYGUI_SUBMODULES = [
         "commit": "4707b245fbcd69075b1a8a74fa8d2435561b3134",
         "urls": [
             "https://github.com/epezent/implot/archive/4707b245fbcd69075b1a8a74fa8d2435561b3134.zip",
+            "https://codeload.github.com/epezent/implot/zip/4707b245fbcd69075b1a8a74fa8d2435561b3134",
         ],
         "probe": "implot.cpp",
     },
@@ -40,6 +42,7 @@ DEARPYGUI_SUBMODULES = [
         "commit": "8cf046c38d4c6ada76ba070562beff0d5041f795",
         "urls": [
             "https://github.com/freetype/freetype/archive/8cf046c38d4c6ada76ba070562beff0d5041f795.zip",
+            "https://codeload.github.com/freetype/freetype/zip/8cf046c38d4c6ada76ba070562beff0d5041f795",
             "https://gitlab.freedesktop.org/freetype/freetype/-/archive/8cf046c38d4c6ada76ba070562beff0d5041f795/freetype-8cf046c38d4c6ada76ba070562beff0d5041f795.zip",
         ],
         "probe": "CMakeLists.txt",

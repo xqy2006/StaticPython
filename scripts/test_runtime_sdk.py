@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import http.client
 import json
 import hashlib
+import io
 import importlib.util
 import sys
 import tempfile
@@ -9,6 +11,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError
 from zipfile import ZipFile
 
 
@@ -18,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import build
 import libs
+import pack_evidence
 import verify as staticpython_verify
 
 _INDEX_SPEC = importlib.util.spec_from_file_location(
@@ -55,6 +59,40 @@ sys.modules[_RESOURCE_SCAN_SPEC.name] = scan_library_resources
 _RESOURCE_SCAN_SPEC.loader.exec_module(scan_library_resources)
 
 
+def _passed_pe_audit() -> dict:
+    return {
+        "status": "passed",
+        "dependencies": ["KERNEL32.dll"],
+        "forbidden_dependencies": [],
+        "non_system_dependencies": [],
+        "forbidden_entry_symbols": [],
+        "main_object_records": [],
+        "executable_sha256": "e" * 64,
+        "map_sha256": "f" * 64,
+    }
+
+
+def _passed_report_smoke(integration: str, name: str, kind: str) -> dict:
+    return {
+        "integration": integration,
+        "name": name,
+        "kind": kind,
+        "status": "passed",
+        "returncode": 0,
+        "timed_out": False,
+        "released_files": [],
+    }
+
+
+def _passed_runtime_sdk() -> dict:
+    return {
+        "archive_sha256": "9" * 64,
+        "cpython_version": "3.13.0",
+        "runtime_abi": "staticpython-pack-v1-cp313",
+        "staticpython_commit": "d" * 40,
+    }
+
+
 class RuntimeSDKTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -63,12 +101,307 @@ class RuntimeSDKTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def test_download_file_retries_transient_disconnects_atomically(self) -> None:
+        destination = self.root / "source.zip"
+        with (
+            mock.patch.object(
+                build,
+                "urlopen",
+                side_effect=[
+                    build.http.client.RemoteDisconnected("first disconnect"),
+                    build.URLError("second disconnect"),
+                    io.BytesIO(b"archive payload"),
+                ],
+            ) as urlopen,
+            mock.patch.object(build.time, "sleep") as sleep,
+        ):
+            build.download_file("https://example.invalid/source.zip", destination)
+
+        self.assertEqual(destination.read_bytes(), b"archive payload")
+        self.assertFalse(Path(str(destination) + ".tmp").exists())
+        self.assertEqual(urlopen.call_count, 3)
+        sleep.assert_has_calls([mock.call(1), mock.call(2)])
+
+    def test_download_file_exhausts_retries_without_partial_output(self) -> None:
+        destination = self.root / "source.zip"
+        temporary = Path(str(destination) + ".tmp")
+        temporary.write_bytes(b"stale partial download")
+        with (
+            mock.patch.object(
+                build,
+                "urlopen",
+                side_effect=build.http.client.RemoteDisconnected("disconnect"),
+            ) as urlopen,
+            mock.patch.object(build.time, "sleep") as sleep,
+            self.assertRaises(build.http.client.RemoteDisconnected),
+        ):
+            build.download_file("https://example.invalid/source.zip", destination)
+
+        self.assertFalse(destination.exists())
+        self.assertFalse(temporary.exists())
+        self.assertEqual(urlopen.call_count, build.DOWNLOAD_MAX_ATTEMPTS)
+        sleep.assert_has_calls([mock.call(1), mock.call(2), mock.call(4)])
+
+    def test_library_download_is_atomic_and_cleans_failed_temporary_file(self) -> None:
+        destination = self.root / "source.zip"
+        temporary = Path(str(destination) + ".tmp")
+        temporary.write_bytes(b"stale partial download")
+
+        with (
+            mock.patch.object(libs, "_read_url_bytes", side_effect=OSError("disconnect")),
+            self.assertRaisesRegex(OSError, "disconnect"),
+        ):
+            libs._download_file("https://example.invalid/source.zip", destination)
+
+        self.assertFalse(destination.exists())
+        self.assertFalse(temporary.exists())
+
+    def test_library_http_reader_retries_only_transient_failures(self) -> None:
+        with (
+            mock.patch.object(
+                libs,
+                "urlopen",
+                side_effect=[
+                    http.client.RemoteDisconnected("disconnect"),
+                    io.BytesIO(b"payload"),
+                ],
+            ) as urlopen,
+            mock.patch.object(libs.time, "sleep") as sleep,
+        ):
+            payload = libs._read_url_bytes("https://example.invalid/source.zip")
+
+        self.assertEqual(payload, b"payload")
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
+        not_found = HTTPError(
+            "https://example.invalid/missing.zip",
+            404,
+            "not found",
+            None,
+            None,
+        )
+        with (
+            mock.patch.object(libs, "urlopen", side_effect=not_found) as urlopen,
+            mock.patch.object(libs.time, "sleep") as sleep,
+            self.assertRaises(HTTPError),
+        ):
+            libs._read_url_bytes("https://example.invalid/missing.zip")
+
+        urlopen.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_default_github_archives_have_codeload_fallback(self) -> None:
+        self.assertEqual(
+            libs._github_archive_urls(
+                "owner/project",
+                "v1.2.3",
+                "tags",
+                None,
+                {},
+            ),
+            [
+                "https://github.com/owner/project/archive/refs/tags/v1.2.3.zip",
+                "https://codeload.github.com/owner/project/zip/refs/tags/v1.2.3",
+            ],
+        )
+
+    def test_custom_github_archive_does_not_invent_a_mirror(self) -> None:
+        self.assertEqual(
+            libs._github_archive_urls(
+                "owner/project",
+                "v1.2.3",
+                "tags",
+                "https://sources.example/{repo}/{ref}.zip",
+                {},
+            ),
+            ["https://sources.example/owner/project/v1.2.3.zip"],
+        )
+
+    def test_cpython_download_falls_back_and_records_actual_source(self) -> None:
+        version = "3.15.0rc1"
+        fixture_root = self.root / "fixture" / f"Python-{version}"
+        (fixture_root / "Include").mkdir(parents=True)
+        (fixture_root / "Include" / "patchlevel.h").write_text(
+            "#define PY_VERSION \"3.15.0rc1\"\n",
+            encoding="utf-8",
+        )
+        fallback_archive = self.root / "fallback.tgz"
+        with build.tarfile.open(fallback_archive, "w:gz") as archive:
+            archive.add(fixture_root, arcname=fixture_root.name)
+
+        requested_urls: list[str] = []
+
+        def fake_download(url: str, destination: Path, *, force: bool = False) -> None:
+            del force
+            requested_urls.append(url)
+            if "python.org" not in url:
+                raise build.http.client.RemoteDisconnected("unavailable")
+            destination.write_bytes(fallback_archive.read_bytes())
+
+        commit = "a" * 40
+        with (
+            mock.patch.object(build, "download_file", side_effect=fake_download),
+            mock.patch.object(build, "resolve_cpython_tag_commit", return_value=commit),
+        ):
+            source_root = build.download_cpython_source(
+                version,
+                self.root / "downloads",
+                None,
+            )
+
+        self.assertEqual(source_root.name, f"cpython-{version}")
+        self.assertTrue((source_root / "Include" / "patchlevel.h").is_file())
+        self.assertEqual(len(requested_urls), 3)
+        self.assertEqual(
+            requested_urls[-1],
+            "https://www.python.org/ftp/python/3.15.0/Python-3.15.0rc1.tgz",
+        )
+        provenance = json.loads(
+            (source_root / build.CPYTHON_SOURCE_PROVENANCE_RELATIVE_PATH).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(provenance["archive_url"], requested_urls[-1])
+        self.assertEqual(provenance["commit"], commit)
+        self.assertEqual(
+            provenance["archive_sha256"],
+            build.sha256_file(self.root / "downloads" / f"cpython-v{version}-python-org.tgz"),
+        )
+
+    def test_safe_tar_extraction_rejects_links_and_special_members(self) -> None:
+        for member_type in (
+            build.tarfile.SYMTYPE,
+            build.tarfile.LNKTYPE,
+            build.tarfile.FIFOTYPE,
+            build.tarfile.CHRTYPE,
+            build.tarfile.BLKTYPE,
+        ):
+            archive_path = self.root / f"unsafe-{member_type.hex()}.tar"
+            with build.tarfile.open(archive_path, "w") as archive:
+                member = build.tarfile.TarInfo("source/unsafe")
+                member.type = member_type
+                if member_type in {build.tarfile.SYMTYPE, build.tarfile.LNKTYPE}:
+                    member.linkname = "../../outside"
+                archive.addfile(member)
+            destination = self.root / f"extract-{member_type.hex()}"
+            destination.mkdir()
+            with (
+                build.tarfile.open(archive_path, "r:") as archive,
+                self.assertRaisesRegex(RuntimeError, "unsupported link or special member"),
+            ):
+                build.safe_extract_tar(archive, destination)
+            self.assertFalse((destination / "source" / "unsafe").exists())
+
+    def _write_pack_promotion_fixture(self) -> tuple[dict, Path, dict]:
+        staging = self.root / "promotion-fixture"
+        staging.mkdir(exist_ok=True)
+        payload = b"verified payload"
+        (staging / "payload.bin").write_bytes(payload)
+        provisional_metadata = {
+            "schema_version": 1,
+            "kind": "staticpython-library-pack",
+            "name": "demo",
+            "version": "1.0",
+            "platform": "x64",
+            "cpython_abi": "cp313",
+            "cpython_version": "3.13.0",
+            "runtime_abi": "staticpython-pack-v1-cp313",
+            "staticpython_commit": "d" * 40,
+            "cpython_commit": "c" * 40,
+            "cpython_tag": "v3.13.0",
+            "cpython_source": {
+                "commit": "c" * 40,
+                "archive_sha256": "a" * 64,
+            },
+            "toolchain": {
+                "visual_studio_version": "17.0",
+                "vscmd_version": "17.14.36",
+                "vc_tools_version": "14.44.35207",
+                "windows_sdk_version": "10.0.26100.0\\",
+                "platform_toolset": "v143",
+                "runtime_library": "MultiThreaded",
+            },
+            "license": {"status": "complete"},
+            "files": [{
+                "path": "payload.bin",
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }],
+            "verification": {"status": "not-run", "smoke_tests": []},
+        }
+        (staging / "pack.json").write_text(json.dumps(provisional_metadata), encoding="utf-8")
+        provisional = self.root / "fixture-provisional.zip"
+        build.write_deterministic_zip(staging, provisional)
+        provisional_sha = build.sha256_file(provisional)
+        payload_sha = build.pack_payload_manifest_sha256(provisional_metadata)
+        metadata_sha = build.pack_metadata_without_verification_sha256(provisional_metadata)
+        report = {
+            "schema_version": 1,
+            "kind": "staticpython-pack-sdk-verification",
+            "status": "passed",
+            "failures": [],
+            "runtime_sdk": _passed_runtime_sdk(),
+            "pe_audit": _passed_pe_audit(),
+            "executable_sha256": "e" * 64,
+            "packs": [{
+                "name": "demo",
+                "version": "1.0",
+                "sha256": provisional_sha,
+                "provisional_sha256": provisional_sha,
+                "payload_manifest_sha256": payload_sha,
+                "metadata_without_verification_sha256": metadata_sha,
+            }],
+            "integration_smoke_tests": [
+                _passed_report_smoke("demo", "demo-behavior", "script"),
+            ],
+        }
+        final_metadata = dict(provisional_metadata)
+        final_metadata["verification"] = {
+            "status": "passed",
+            "smoke_tests": [{"name": "demo-behavior", "kind": "script", "status": "passed"}],
+            "provisional_pack_sha256": provisional_sha,
+            "payload_manifest_sha256": payload_sha,
+            "metadata_without_verification_sha256": metadata_sha,
+        }
+        (staging / "pack.json").write_text(json.dumps(final_metadata), encoding="utf-8")
+        final = self.root / "fixture-final.zip"
+        build.write_deterministic_zip(staging, final)
+        return report, final, final_metadata
+
     def test_runtime_sdk_profile_is_minimal(self) -> None:
         config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
         profile = config["profiles"]["runtime-sdk"]
         self.assertEqual(profile["build_type"], "runtime-sdk")
         self.assertEqual(profile["core_libraries"], "all")
         self.assertEqual(profile["third_party_libraries"], [])
+
+    def test_release_and_contract_workflows_use_pack_only_runtime_sdk_evidence(self) -> None:
+        release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "needs: [unit-tests, resolve-cpython-matrix, resolve-pack-versions, runtime-sdk]",
+            release,
+        )
+        self.assertIn('"--pack-only"', release)
+        self.assertIn('"--pack-runtime-sdk", $runtimeSdk[0].FullName', release)
+        self.assertIn("python @evidenceArgs", release)
+
+        daily = (
+            REPO_ROOT / ".github" / "workflows" / "library-version-discovery.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("runtime_versions: ${{ steps.matrix.outputs.runtime_versions }}", daily)
+        self.assertIn("build-contract-runtime-sdks:", daily)
+        self.assertIn("needs: [discover, build-contract-runtime-sdks]", daily)
+        self.assertIn("@($batch.candidates_json | ConvertFrom-Json)", daily)
+        self.assertIn("pattern: contract-runtime-sdk-*", daily)
+        self.assertIn("path: ${{ runner.temp }}/contract-runtime-sdks", daily)
+        self.assertIn('"contract-runtime-sdk-$($candidate.python_version)"', daily)
+        self.assertIn("--pack-only", daily)
+        self.assertIn("--pack-runtime-sdk $runtimeSdk[0].FullName", daily)
+        self.assertIn("python .\\pack_evidence.py --report $reportPath", daily)
+        self.assertIn("staticpython-pack-verify-report.json", daily)
 
     def test_verifier_applies_profile_version_overrides(self) -> None:
         profile = {
@@ -119,6 +452,7 @@ class RuntimeSDKTests(unittest.TestCase):
             static_library_projects_release_x64=["demo_static.vcxproj"],
         )
         with (
+            mock.patch.object(build, "stage_pack_build_pyconfig_header") as stage_pyconfig,
             mock.patch.object(build, "run_pre_build_hooks") as pre_build,
             mock.patch.object(build, "stage_static_libraries") as stage,
             mock.patch.object(build, "resolve_msbuild_exe", return_value=Path("msbuild.exe")),
@@ -139,6 +473,12 @@ class RuntimeSDKTests(unittest.TestCase):
                 "3.13.14",
                 2,
             )
+        stage_pyconfig.assert_called_once_with(
+            self.root,
+            (3, 13, 14),
+            "Release",
+            "x64",
+        )
         pre_build.assert_called_once()
         stage.assert_called_once_with(self.root, "x64", {}, [integration])
         self.assertEqual(run.call_count, 1)
@@ -156,6 +496,43 @@ class RuntimeSDKTests(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text("legacy", encoding="utf-8")
         self.assertEqual(build.resolve_runtime_sdk_pyconfig_header(self.root, "x64"), generated)
+
+    def test_pack_only_build_stages_freezer_generated_pyconfig_header(self) -> None:
+        generated = build.generated_pyconfig_header_path(
+            self.root,
+            (3, 13, 15),
+            "Release",
+            "x64",
+            "_freeze_module",
+        )
+        generated.parent.mkdir(parents=True)
+        generated.write_text("#define STATICPYTHON_TEST 1\n", encoding="utf-8")
+        target = build.stage_pack_build_pyconfig_header(
+            self.root,
+            (3, 13, 15),
+            "Release",
+            "x64",
+        )
+        self.assertEqual(
+            target,
+            build.generated_pyconfig_header_path(
+                self.root,
+                (3, 13, 15),
+                "Release",
+                "x64",
+                "pythoncore",
+            ),
+        )
+        self.assertEqual(target.read_bytes(), generated.read_bytes())
+
+    def test_pack_only_build_rejects_missing_generated_pyconfig_header(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "did not produce a usable pyconfig.h"):
+            build.stage_pack_build_pyconfig_header(
+                self.root,
+                (3, 13, 15),
+                "Release",
+                "x64",
+            )
 
     def test_parse_cpython_version_preserves_prerelease_suffix(self) -> None:
         include = self.root / "Include"
@@ -239,6 +616,100 @@ struct _inittab _PyImport_Inittab[] = {
         with mock.patch("build.subprocess.run", return_value=result):
             self.assertEqual(build.resolve_cpython_tag_commit("3.13.14"), peeled)
 
+    def test_cpython_source_dependency_tags_skip_custom_integrations(self) -> None:
+        script = self.root / "PCbuild" / "get_externals.bat"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "\n".join(
+                [
+                    "set libraries=",
+                    "set libraries=%libraries% bzip2-1.0.8",
+                    'if NOT "%IncludeLibffiSrc%"=="false" set libraries=%libraries% libffi-3.4.4',
+                    'if NOT "%IncludeSSLSrc%"=="false" set libraries=%libraries% openssl-3.0.16',
+                    'if NOT "%IncludeTkinterSrc%"=="false" set libraries=%libraries% tcl-core-8.6.15.0',
+                    "set libraries=%libraries% sqlite-3.49.1.0",
+                    "set libraries=%libraries% xz-5.2.5",
+                    "set libraries=%libraries% zlib-1.3.1",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            build.cpython_source_dependency_tags(self.root),
+            ["bzip2-1.0.8", "sqlite-3.49.1.0", "xz-5.2.5", "zlib-1.3.1"],
+        )
+
+    def test_get_externals_uses_mirror_and_validates_materialized_sources(self) -> None:
+        script = self.root / "PCbuild" / "get_externals.bat"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "set libraries=\nset libraries=%libraries% zlib-1.3.1\n",
+            encoding="utf-8",
+        )
+        used_urls: list[str] = []
+
+        def fake_download(urls, destination):
+            used_urls.extend(urls)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"archive")
+            return urls[-1]
+
+        def fake_extract(_archive, destination_root, *, final_name=None):
+            destination = destination_root / final_name
+            destination.mkdir(parents=True)
+            (destination / "adler32.c").write_text("", encoding="utf-8")
+            (destination / "zlib.h").write_text("", encoding="utf-8")
+            return destination
+
+        with (
+            mock.patch.object(build, "DOWNLOAD_ROOT", self.root / "downloads"),
+            mock.patch.object(build, "download_first_available", side_effect=fake_download),
+            mock.patch.object(build, "extract_source_archive", side_effect=fake_extract),
+        ):
+            build.maybe_get_externals(self.root)
+
+        self.assertEqual(len(used_urls), 2)
+        self.assertIn("github.com/python/cpython-source-deps", used_urls[0])
+        self.assertIn("codeload.github.com/python/cpython-source-deps", used_urls[1])
+        self.assertTrue((self.root / "externals" / "zlib-1.3.1" / "zlib.h").is_file())
+
+    def test_get_externals_rejects_unreviewed_dependency(self) -> None:
+        script = self.root / "PCbuild" / "get_externals.bat"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "set libraries=\nset libraries=%libraries% surprise-1.0\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(RuntimeError, "unreviewed source dependency"):
+            build.maybe_get_externals(self.root)
+
+    def test_get_externals_rejects_incomplete_materialized_source(self) -> None:
+        script = self.root / "PCbuild" / "get_externals.bat"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "set libraries=\nset libraries=%libraries% zlib-1.3.1\n",
+            encoding="utf-8",
+        )
+
+        def fake_download(urls, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"archive")
+            return urls[0]
+
+        def fake_extract(_archive, destination_root, *, final_name=None):
+            destination = destination_root / final_name
+            destination.mkdir(parents=True)
+            (destination / "zlib.h").write_text("", encoding="utf-8")
+            return destination
+
+        with (
+            mock.patch.object(build, "DOWNLOAD_ROOT", self.root / "downloads"),
+            mock.patch.object(build, "download_first_available", side_effect=fake_download),
+            mock.patch.object(build, "extract_source_archive", side_effect=fake_extract),
+            self.assertRaisesRegex(RuntimeError, r"zlib-1\.3\.1 is incomplete; missing: adler32\.c"),
+        ):
+            build.maybe_get_externals(self.root)
+
     def test_prompt_toolkit_3053_lazy_version_patch_is_strict(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "staticpython_prompt_toolkit_setup_test",
@@ -312,6 +783,53 @@ struct _inittab _PyImport_Inittab[] = {
         spec.loader.exec_module(module)
         self.assertEqual(module.LIBRARY_INTEGRATION.release_version, "6.164.0")
         self.assertEqual(module.LIBRARY_INTEGRATION.license_expression, "MPL-2.0")
+        self.assertIn(
+            "Lib/_hypothesis_globals.py",
+            module.LIBRARY_INTEGRATION.materialized_paths,
+        )
+        self.assertIn(
+            "_hypothesis_globals",
+            module.LIBRARY_INTEGRATION.python_packages,
+        )
+        self.assertIn(
+            "_hypothesis_globals",
+            module.LIBRARY_INTEGRATION.top_level_import_names,
+        )
+
+        frozen = self.root / "Python" / "frozen_modules"
+        frozen.mkdir(parents=True)
+        (frozen / "_hypothesis_globals.h").write_text(
+            "const unsigned char _Py_M___hypothesis_globals[] = {1, 2, 3,};\n",
+            encoding="utf-8",
+        )
+        (frozen / "hypothesis.h").write_text(
+            "const unsigned char _Py_M__hypothesis[] = {4, 5, 6,};\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            [
+                record["name"]
+                for record in build._integration_frozen_modules(
+                    self.root,
+                    module.LIBRARY_INTEGRATION,
+                )
+            ],
+            ["_hypothesis_globals", "hypothesis"],
+        )
+        module._configure_hypothesis_globals_module(False)
+        self.assertNotIn(
+            "Lib/_hypothesis_globals.py",
+            module.LIBRARY_INTEGRATION.materialized_paths,
+        )
+        self.assertNotIn(
+            "_hypothesis_globals",
+            module.LIBRARY_INTEGRATION.python_packages,
+        )
+        self.assertNotIn(
+            "_hypothesis_globals",
+            module.LIBRARY_INTEGRATION.top_level_import_names,
+        )
+        module._configure_hypothesis_globals_module(True)
 
         internal = self.root / "Lib" / "hypothesis" / "internal"
         internal.mkdir(parents=True)
@@ -645,6 +1163,49 @@ struct _inittab _PyImport_Inittab[] = {
             ["wx-native-modules", "wx-window-lifecycle"],
         )
 
+    def test_libui_pack_declares_required_gdi_system_library(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_libui_pack_test",
+            REPO_ROOT / "Lib" / "libui" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        integration = module.LIBRARY_INTEGRATION
+        self.assertIn("gdi32.lib", integration.python_link_dependencies_release_x64)
+        self.assertTrue(build.is_windows_system_library("gdi32.lib"))
+
+    def test_libui_native_module_embeds_static_common_controls_manifest(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_libui_manifest_patch_test",
+            REPO_ROOT / "Lib" / "libui" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        for source in (
+            '#include "module.h"\nPyMODINIT_FUNC PyInit_core(void);\n',
+            (
+                '#include "module.h"\n'
+                "#ifdef _WIN32\n"
+                "#include <windows.h>\n"
+                "#endif\n"
+                "PyMODINIT_FUNC PyInit_core(void);\n"
+            ),
+        ):
+            with self.subTest(has_windows_include="#include <windows.h>" in source):
+                patched = module._patch_libui_native_module_text(source)
+
+                self.assertIn("PyInit__libui_core", patched)
+                self.assertNotIn("PyInit_core", patched)
+                self.assertIn(module.LIBUI_COMMON_CONTROLS_MANIFEST_PRAGMA, patched)
+                self.assertIn("Microsoft.Windows.Common-Controls", patched)
+                self.assertIn("version='6.0.0.0'", patched)
+                self.assertEqual(patched.count("/manifestdependency:"), 1)
+                self.assertEqual(module._patch_libui_native_module_text(patched), patched)
+
     def test_wxpython_link_metadata_tracks_bundled_wxwidgets_version(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "staticpython_wxpython_versioned_libraries_test",
@@ -876,6 +1437,39 @@ struct _inittab _PyImport_Inittab[] = {
         native_output = self.root / "PCbuild" / "amd64"
         native_output.mkdir(parents=True)
         (native_output / "demo-native.lib").write_bytes(b"library")
+        provisional_output = self.root / "provisional-dist"
+        provisional_path = build.export_library_pack(
+            self.root,
+            provisional_output,
+            (3, 13, 0),
+            "3.13.0",
+            "x64",
+            integration,
+        )
+        with ZipFile(provisional_path) as archive:
+            provisional_metadata = json.loads(archive.read("pack.json"))
+        verification_report = {
+            "schema_version": 1,
+            "kind": "staticpython-pack-sdk-verification",
+            "status": "passed",
+            "failures": [],
+            "runtime_sdk": _passed_runtime_sdk(),
+            "pe_audit": _passed_pe_audit(),
+            "executable_sha256": "e" * 64,
+            "packs": [{
+                "name": "demo",
+                "version": "1.2.3",
+                "sha256": (provisional_sha := build.sha256_file(provisional_path)),
+                "provisional_sha256": provisional_sha,
+                "payload_manifest_sha256": build.pack_payload_manifest_sha256(provisional_metadata),
+                "metadata_without_verification_sha256": (
+                    build.pack_metadata_without_verification_sha256(provisional_metadata)
+                ),
+            }],
+            "integration_smoke_tests": [
+                _passed_report_smoke("demo", "import-demo", "import"),
+            ],
+        }
         output = self.root / "dist"
         archive_path = build.export_library_pack(
             self.root,
@@ -885,16 +1479,17 @@ struct _inittab _PyImport_Inittab[] = {
             "x64",
             integration,
             verification_status="passed",
-            verification_report={
-                "integration_smoke_tests": [
-                    {"integration": "demo", "name": "import-demo", "kind": "import", "status": "passed"},
-                    {"integration": "other", "name": "import-other", "kind": "import", "status": "passed"},
-                ]
-            },
+            verification_report=verification_report,
         )
         with ZipFile(archive_path) as archive:
             metadata = json.loads(archive.read("pack.json"))
             descriptor = archive.read("src/pack.c").decode("utf-8")
+            frozen_header = archive.read("src/frozen/demo.h").decode("utf-8")
+            pack_frozen_symbol = build.staticpython_pack_frozen_symbol(
+                "demo",
+                "1.2.3",
+                "demo",
+            )
             self.assertEqual(metadata["frozen_modules"], ["demo"])
             self.assertNotIn("other", metadata["frozen_modules"])
             self.assertIn("Lib/demo/data.json", [item["path"] for item in metadata["resources"]])
@@ -909,9 +1504,328 @@ struct _inittab _PyImport_Inittab[] = {
                 metadata["verification"]["smoke_tests"],
                 [{"name": "import-demo", "kind": "import", "status": "passed"}],
             )
+            self.assertEqual(
+                metadata["verification"]["provisional_pack_sha256"],
+                build.sha256_file(provisional_path),
+            )
             self.assertIn('"demo"', descriptor)
+            self.assertIn(pack_frozen_symbol, descriptor)
+            self.assertIn(pack_frozen_symbol, frozen_header)
+            self.assertNotIn("_Py_M__demo[]", frozen_header)
             self.assertIn("staticpython_pack_demo_resource_", descriptor)
             self.assertNotIn('_Py_M__other', descriptor)
+        bound = build.bind_promoted_pack_evidence(verification_report, [archive_path])
+        self.assertEqual(bound["promotion"]["packs"][0]["final_sha256"], build.sha256_file(archive_path))
+
+    def test_pack_frozen_symbols_do_not_alias_cpython_module_encoding(self) -> None:
+        stdlib_symbol = "_Py_M__importlib_metadata"
+        backport_symbol = build.staticpython_pack_frozen_symbol(
+            "importlib-metadata",
+            "8.7.0",
+            "importlib_metadata",
+        )
+        dotted_symbol = build.staticpython_pack_frozen_symbol(
+            "example-pack",
+            "1.0",
+            "importlib.metadata",
+        )
+        self.assertNotEqual(backport_symbol, stdlib_symbol)
+        self.assertNotEqual(dotted_symbol, stdlib_symbol)
+        self.assertNotEqual(backport_symbol, dotted_symbol)
+
+    def test_promoted_pack_evidence_binds_final_archive_to_verified_payload(self) -> None:
+        staging = self.root / "pack-stage"
+        staging.mkdir()
+        (staging / "payload.bin").write_bytes(b"verified payload")
+        payload_record = {
+            "path": "payload.bin",
+            "size": 16,
+            "sha256": hashlib.sha256(b"verified payload").hexdigest(),
+        }
+        provisional_metadata = {
+            "schema_version": 1,
+            "kind": "staticpython-library-pack",
+            "name": "demo",
+            "version": "1.0",
+            "files": [payload_record],
+            "verification": {"status": "not-run", "smoke_tests": []},
+        }
+        (staging / "pack.json").write_text(json.dumps(provisional_metadata), encoding="utf-8")
+        provisional = self.root / "provisional.zip"
+        build.write_deterministic_zip(staging, provisional)
+        payload_manifest_sha = build.pack_payload_manifest_sha256(provisional_metadata)
+        metadata_sha = build.pack_metadata_without_verification_sha256(provisional_metadata)
+        report = {
+            "schema_version": 1,
+            "kind": "staticpython-pack-sdk-verification",
+            "status": "passed",
+            "failures": [],
+            "runtime_sdk": _passed_runtime_sdk(),
+            "pe_audit": _passed_pe_audit(),
+            "executable_sha256": "e" * 64,
+            "packs": [{
+                "name": "demo",
+                "version": "1.0",
+                "sha256": (provisional_sha := build.sha256_file(provisional)),
+                "provisional_sha256": provisional_sha,
+                "payload_manifest_sha256": payload_manifest_sha,
+                "metadata_without_verification_sha256": metadata_sha,
+            }],
+            "integration_smoke_tests": [
+                _passed_report_smoke("demo", "demo", "import"),
+            ],
+        }
+        final_metadata = dict(provisional_metadata)
+        final_metadata["verification"] = {
+            "status": "passed",
+            "smoke_tests": [{"name": "demo", "kind": "import", "status": "passed"}],
+            "provisional_pack_sha256": build.sha256_file(provisional),
+            "payload_manifest_sha256": payload_manifest_sha,
+            "metadata_without_verification_sha256": metadata_sha,
+        }
+        (staging / "pack.json").write_text(json.dumps(final_metadata), encoding="utf-8")
+        final = self.root / "final.zip"
+        build.write_deterministic_zip(staging, final)
+
+        bound = build.bind_promoted_pack_evidence(report, [final])
+
+        self.assertEqual(bound["promotion"]["status"], "passed")
+        self.assertEqual(bound["promotion"]["packs"][0]["final_sha256"], build.sha256_file(final))
+
+    def test_promoted_pack_evidence_rejects_payload_drift(self) -> None:
+        staging = self.root / "pack-stage"
+        staging.mkdir()
+        (staging / "payload.bin").write_bytes(b"changed")
+        changed_record = {
+            "path": "payload.bin",
+            "size": 7,
+            "sha256": hashlib.sha256(b"changed").hexdigest(),
+        }
+        metadata = {
+            "schema_version": 1,
+            "kind": "staticpython-library-pack",
+            "name": "demo",
+            "version": "1.0",
+            "files": [changed_record],
+            "verification": {
+                "status": "passed",
+                "smoke_tests": [
+                    {"name": "demo", "kind": "import", "status": "passed"}
+                ],
+                "provisional_pack_sha256": "a" * 64,
+                "payload_manifest_sha256": "b" * 64,
+                "metadata_without_verification_sha256": "c" * 64,
+            },
+        }
+        (staging / "pack.json").write_text(json.dumps(metadata), encoding="utf-8")
+        final = self.root / "final.zip"
+        build.write_deterministic_zip(staging, final)
+        report = {
+            "schema_version": 1,
+            "kind": "staticpython-pack-sdk-verification",
+            "status": "passed",
+            "failures": [],
+            "runtime_sdk": _passed_runtime_sdk(),
+            "pe_audit": _passed_pe_audit(),
+            "executable_sha256": "e" * 64,
+            "packs": [{
+                "name": "demo",
+                "version": "1.0",
+                "sha256": "a" * 64,
+                "provisional_sha256": "a" * 64,
+                "payload_manifest_sha256": "b" * 64,
+                "metadata_without_verification_sha256": "c" * 64,
+            }],
+            "integration_smoke_tests": [
+                _passed_report_smoke("demo", "demo", "import"),
+            ],
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "payload manifest evidence does not match"):
+            build.bind_promoted_pack_evidence(report, [final])
+
+    def test_promoted_pack_evidence_rejects_smoke_projection_drift(self) -> None:
+        report, final, metadata = self._write_pack_promotion_fixture()
+        metadata["verification"]["smoke_tests"] = [
+            {"name": "forged-smoke", "kind": "script", "status": "passed"},
+        ]
+        staging = self.root / "promotion-fixture"
+        (staging / "pack.json").write_text(json.dumps(metadata), encoding="utf-8")
+        build.write_deterministic_zip(staging, final)
+
+        with self.assertRaisesRegex(RuntimeError, "verification metadata does not match"):
+            build.bind_promoted_pack_evidence(report, [final])
+
+    def test_promoted_pack_evidence_rejects_non_verification_metadata_drift(self) -> None:
+        report, final, metadata = self._write_pack_promotion_fixture()
+        metadata["platform"] = "arm64"
+        staging = self.root / "promotion-fixture"
+        (staging / "pack.json").write_text(json.dumps(metadata), encoding="utf-8")
+        build.write_deterministic_zip(staging, final)
+
+        with self.assertRaisesRegex(RuntimeError, "metadata evidence does not match"):
+            build.bind_promoted_pack_evidence(report, [final])
+
+    def test_promoted_pack_evidence_rejects_provisional_report_drift(self) -> None:
+        report, final, _metadata = self._write_pack_promotion_fixture()
+        report["packs"][0]["payload_manifest_sha256"] = "b" * 64
+
+        with self.assertRaisesRegex(RuntimeError, "verification metadata does not match"):
+            build.bind_promoted_pack_evidence(report, [final])
+
+    def test_promoted_pack_validator_rejects_recorded_final_sha_drift(self) -> None:
+        report, final, _metadata = self._write_pack_promotion_fixture()
+        bound = build.bind_promoted_pack_evidence(report, [final])
+        bound["promotion"]["packs"][0]["final_sha256"] = "f" * 64
+
+        with self.assertRaisesRegex(RuntimeError, "recorded pack promotion evidence"):
+            pack_evidence.validate_promoted_pack_evidence(bound, [final])
+
+    def test_pack_reader_rejects_windows_drive_and_ads_members(self) -> None:
+        for index, unsafe_name in enumerate(
+            ("C:evil", "dir/file:stream", "C:evil/", "NUL.txt", "trailing.")
+        ):
+            with self.subTest(unsafe_name=unsafe_name):
+                archive_path = self.root / f"unsafe-{index}.zip"
+                with ZipFile(archive_path, "w") as archive:
+                    archive.writestr(unsafe_name, b"")
+                    archive.writestr("pack.json", json.dumps({"files": []}))
+                with self.assertRaisesRegex(RuntimeError, "unsafe .*ZIP member"):
+                    pack_evidence.read_pack_metadata(archive_path)
+
+    def test_pack_promotion_rejects_contradictory_verifier_status(self) -> None:
+        for mutation, message in (
+            (lambda report: report["failures"].append({"kind": "smoke"}), "contains failures"),
+            (
+                lambda report: report["runtime_sdk"].pop("archive_sha256"),
+                "runtime SDK provenance",
+            ),
+            (lambda report: report["pe_audit"].update(status="failed"), "PE dependency audit"),
+            (
+                lambda report: report["pe_audit"]["forbidden_dependencies"].append(
+                    "python313.dll"
+                ),
+                "PE dependency audit",
+            ),
+            (
+                lambda report: report["pe_audit"].update(
+                    executable_sha256="0" * 64
+                ),
+                "PE dependency audit",
+            ),
+        ):
+            with self.subTest(message=message):
+                report, final, _metadata = self._write_pack_promotion_fixture()
+                mutation(report)
+                with self.assertRaisesRegex(RuntimeError, message):
+                    build.bind_promoted_pack_evidence(report, [final])
+
+    def test_pack_evidence_rejects_malformed_smoke_records(self) -> None:
+        report, _final, metadata = self._write_pack_promotion_fixture()
+        metadata["verification"]["smoke_tests"] = [{"status": "passed"}]
+        with self.assertRaisesRegex(RuntimeError, "invalid or non-passing smoke"):
+            pack_evidence.validate_pack_verification_metadata(metadata)
+
+        report["integration_smoke_tests"] = [
+            {"integration": "demo", "status": "passed"}
+        ]
+        with self.assertRaisesRegex(RuntimeError, "invalid or non-passing smoke"):
+            pack_evidence.validate_sdk_verification_report(report)
+
+        for field, value in (
+            ("returncode", 17),
+            ("timed_out", True),
+            ("released_files", ["secret.tmp"]),
+        ):
+            with self.subTest(field=field):
+                report, _final, _metadata = self._write_pack_promotion_fixture()
+                report["integration_smoke_tests"][0][field] = value
+                with self.assertRaisesRegex(RuntimeError, "invalid or non-passing smoke"):
+                    pack_evidence.validate_sdk_verification_report(report)
+
+    def test_release_index_binds_every_pack_to_its_runtime_promotion_report(self) -> None:
+        report, final, metadata = self._write_pack_promotion_fixture()
+        staticpython_commit = "d" * 40
+        assets = self.root / "verified-assets"
+        runtime_stage = self.root / "verified-runtime"
+        (runtime_stage / "metadata").mkdir(parents=True)
+        assets.mkdir()
+        runtime_metadata = {
+            "cpython_abi": "cp313",
+            "cpython_version": "3.13.0",
+            "runtime_abi": "staticpython-pack-v1-cp313",
+            "staticpython_commit": staticpython_commit,
+            "verification": {"status": "passed"},
+            "cpython_commit": "c" * 40,
+            "cpython_tag": "v3.13.0",
+            "cpython_source": {
+                "commit": "c" * 40,
+                "archive_sha256": "a" * 64,
+            },
+            "toolchain": metadata["toolchain"],
+        }
+        (runtime_stage / build.RUNTIME_SDK_METADATA_RELATIVE_PATH).write_text(
+            json.dumps(runtime_metadata), encoding="utf-8"
+        )
+        runtime_asset = assets / "runtime.zip"
+        build.write_deterministic_zip(runtime_stage, runtime_asset)
+        runtime_sha = build.sha256_file(runtime_asset)
+        final_asset = assets / final.name
+        final_asset.write_bytes(final.read_bytes())
+        report["runtime_sdk"] = {
+            "archive_sha256": runtime_sha,
+            "cpython_version": "3.13.0",
+            "runtime_abi": "staticpython-pack-v1-cp313",
+            "staticpython_commit": staticpython_commit,
+        }
+        build.bind_promoted_pack_evidence(report, [final_asset])
+        report_path = assets / "staticpython-pack-verification-3.13.0-a-f.json"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        runtimes = {
+            "cp313": {
+                "sha256": runtime_sha,
+                "metadata": {
+                    "cpython_version": "3.13.0",
+                    "runtime_abi": "staticpython-pack-v1-cp313",
+                    "staticpython_commit": staticpython_commit,
+                },
+            }
+        }
+
+        evidence = build_release_index.validate_pack_promotion_reports(
+            assets,
+            [(final_asset, metadata)],
+            runtimes,
+        )
+
+        self.assertEqual(
+            evidence[final_asset]["final_pack_sha256"], build.sha256_file(final_asset)
+        )
+        self.assertEqual(evidence[final_asset]["runtime_sdk_sha256"], runtime_sha)
+        index = build_release_index.build_index(
+            assets,
+            "xqy2006/StaticPython",
+            staticpython_commit,
+            "runtime-tag",
+            "pack-tag",
+            require_all_targets=False,
+            require_verified=True,
+        )
+        indexed_pack = index["packs"]["demo"]["1.0"]["cp313"]
+        self.assertEqual(
+            indexed_pack["verification_evidence"]["report"]["filename"],
+            report_path.name,
+        )
+        self.assertEqual(index["release_families"]["a-f"]["asset_count"], 2)
+        self.assertEqual(index["verification_reports"]["a-f"][0]["filename"], report_path.name)
+
+        report_path.unlink()
+        with self.assertRaisesRegex(RuntimeError, "no SDK promotion reports"):
+            build_release_index.validate_pack_promotion_reports(
+                assets,
+                [(final_asset, metadata)],
+                runtimes,
+            )
 
     def test_system_library_suppression_resolves_pack_link_collisions(self) -> None:
         consumer = libs.LibraryIntegration(
@@ -1336,6 +2250,92 @@ struct _inittab _PyImport_Inittab[] = {
         )
         self.assertEqual(build._integration_frozen_modules(self.root, integration), [])
 
+    def test_release_pack_ownership_covers_auxiliary_top_level_modules(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        integrations = libs.load_integration_definitions(
+            REPO_ROOT / "Lib",
+            library_catalog=config["third_party_library_catalog"],
+        )
+        by_name = {integration.name: integration for integration in integrations}
+        expected_ownership = {
+            "black": {"_black_version", "black", "blackd", "blib2to3"},
+            "ipykernel": {"ipykernel", "ipykernel_launcher"},
+            "matplotlib": {"matplotlib", "mpl_toolkits", "pylab"},
+            "plotly": {"_plotly_utils", "plotly"},
+            "pytest": {"_pytest", "pytest"},
+        }
+        for name, expected in expected_ownership.items():
+            self.assertTrue(
+                expected.issubset(set(by_name[name].python_packages)),
+                name,
+            )
+        self.assertEqual(
+            by_name["black"].top_level_import_names,
+            ["black", "blackd", "blib2to3"],
+        )
+        self.assertEqual(by_name["ipykernel"].top_level_import_names, ["ipykernel"])
+        self.assertEqual(
+            by_name["matplotlib"].top_level_import_names,
+            ["matplotlib", "mpl_toolkits"],
+        )
+        self.assertEqual(by_name["plotly"].top_level_import_names, ["plotly"])
+        self.assertEqual(by_name["pytest"].top_level_import_names, ["pytest"])
+
+        unowned_roots: list[str] = []
+        for integration in integrations:
+            for raw_path in integration.materialized_paths:
+                path = Path(raw_path.replace("\\", "/"))
+                if len(path.parts) < 2 or path.parts[0].casefold() != "lib":
+                    continue
+                root = path.parts[1]
+                if root.casefold() in {"test", "tests"}:
+                    continue
+                module_root = root[:-3] if root.endswith(".py") else root
+                if not any(
+                    package == module_root
+                    or package.startswith(module_root + ".")
+                    or module_root.startswith(package + ".")
+                    for package in integration.python_packages
+                ):
+                    unowned_roots.append(f"{integration.name}:{raw_path}")
+        self.assertEqual(unowned_roots, [])
+
+    def test_optional_auxiliary_module_ownership_tracks_selected_source(self) -> None:
+        black_spec = importlib.util.spec_from_file_location(
+            "staticpython_black_ownership_test",
+            REPO_ROOT / "Lib" / "black" / "setup.py",
+        )
+        assert black_spec is not None and black_spec.loader is not None
+        black = importlib.util.module_from_spec(black_spec)
+        black_spec.loader.exec_module(black)
+        black._configure_black_version_module(False)
+        self.assertNotIn("_black_version", black.LIBRARY_INTEGRATION.python_packages)
+        self.assertIn("Lib/_black_version.py", black.LIBRARY_INTEGRATION.cleanup_paths)
+        black._configure_black_version_module(True)
+        self.assertIn("_black_version", black.LIBRARY_INTEGRATION.python_packages)
+        self.assertNotIn(
+            "_black_version",
+            black.LIBRARY_INTEGRATION.top_level_import_names,
+        )
+
+        plotly_spec = importlib.util.spec_from_file_location(
+            "staticpython_plotly_ownership_test",
+            REPO_ROOT / "Lib" / "plotly" / "setup.py",
+        )
+        assert plotly_spec is not None and plotly_spec.loader is not None
+        plotly = importlib.util.module_from_spec(plotly_spec)
+        plotly_spec.loader.exec_module(plotly)
+        context = SimpleNamespace(source_root=self.root)
+        plotly.configure_plotly_auxiliary_modules(context)
+        self.assertNotIn("_plotly_utils", plotly.LIBRARY_INTEGRATION.python_packages)
+        (self.root / "Lib" / "_plotly_utils").mkdir(parents=True)
+        plotly.configure_plotly_auxiliary_modules(context)
+        self.assertIn("_plotly_utils", plotly.LIBRARY_INTEGRATION.python_packages)
+        self.assertNotIn(
+            "_plotly_utils",
+            plotly.LIBRARY_INTEGRATION.top_level_import_names,
+        )
+
     def test_pack_shards_partition_current_full_catalog(self) -> None:
         config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
         expected = config["profiles"]["full"]["third_party_libraries"]
@@ -1360,6 +2360,158 @@ struct _inittab _PyImport_Inittab[] = {
             shard_config["profiles"]["pack-shard"]["third_party_library_version_overrides"],
             globally_resolved,
         )
+
+    def test_current_profile_has_one_canonical_pack_per_distribution(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        catalog = {
+            item["name"]: item
+            for item in config["third_party_library_catalog"]["libraries"]
+        }
+        full = config["profiles"]["full"]["third_party_libraries"]
+        historical = config["profiles"]["full"][
+            "historical_library_contract_libraries"
+        ]
+        self.assertIn("attr", catalog)
+        self.assertNotIn("attr", full)
+        self.assertIn("attr", historical)
+        self.assertEqual(catalog["attrs"]["python_packages"], ["attrs", "attr"])
+        self.assertIn("cattr", catalog)
+        self.assertNotIn("cattr", full)
+        self.assertIn("cattr", historical)
+        self.assertEqual(catalog["cattrs"]["python_packages"], ["cattrs", "cattr"])
+        self.assertEqual(
+            catalog["cattrs"]["top_level_import_names"],
+            ["cattrs", "cattr"],
+        )
+        self.assertEqual(
+            catalog["cattrs"]["source_mapping"],
+            {
+                "cattrs||src/cattrs||cattr||src/cattr": "Lib/cattrs",
+                "?cattr||?src/cattr||?cattrs||?src/cattrs": "Lib/cattr",
+            },
+        )
+
+    def test_pack_verification_groups_isolate_native_dependency_closures(self) -> None:
+        assets = self.root / "group-assets"
+        assets.mkdir()
+
+        def write_pack(name: str, *, dependencies: list[str] | None = None, native: bool = False) -> Path:
+            staging = self.root / f"group-{name}"
+            staging.mkdir()
+            metadata = {
+                "name": name,
+                "version": "1.0",
+                "dependencies": list(dependencies or []),
+                "libraries": [f"{name}.lib"] if native else [],
+                "builtin_modules": [{"name": f"{name}._native"}] if native else [],
+                "files": [],
+            }
+            (staging / "pack.json").write_text(json.dumps(metadata), encoding="utf-8")
+            destination = assets / f"{name}.zip"
+            build.write_deterministic_zip(staging, destination)
+            return destination
+
+        pure_dependency = write_pack("pure_dependency")
+        pure_first = write_pack("pure_first", dependencies=["pure_dependency"])
+        pure_second = write_pack("pure_second")
+        native_dependency = write_pack("native_dependency", native=True)
+        native_root = write_pack("native_root", dependencies=["native_dependency"])
+
+        groups = build.pack_verification_groups(
+            [pure_dependency, pure_first, pure_second, native_dependency, native_root],
+            ["pure_first", "pure_second", "native_root"],
+        )
+
+        self.assertEqual(groups[0]["roots"], ["pure_first", "pure_second"])
+        self.assertEqual(
+            [build.read_pack_metadata(path)["name"] for path in groups[0]["packs"]],
+            ["pure_dependency", "pure_first", "pure_second"],
+        )
+        self.assertEqual(groups[1]["roots"], ["native_root"])
+        self.assertEqual(
+            [build.read_pack_metadata(path)["name"] for path in groups[1]["packs"]],
+            ["native_dependency", "native_root"],
+        )
+
+    def test_pack_verification_report_set_preserves_each_root_evidence(self) -> None:
+        def report(root: str, dependency: str | None, suffix: str) -> dict:
+            names = [name for name in (dependency, root) if name]
+            return {
+                "schema_version": 1,
+                "kind": "staticpython-pack-sdk-verification",
+                "status": "passed",
+                "failures": [],
+                "runtime_sdk": _passed_runtime_sdk(),
+                "verification_roots": [root],
+                "packs": [
+                    {
+                        "name": name,
+                        "version": "1.0",
+                        "sha256": suffix * 64,
+                        "provisional_sha256": suffix * 64,
+                        "payload_manifest_sha256": suffix * 64,
+                        "metadata_without_verification_sha256": suffix * 64,
+                    }
+                    for name in names
+                ],
+                "namespace_packages": [],
+                "executable_sha256": suffix * 64,
+                "pe_audit": {
+                    **_passed_pe_audit(),
+                    "executable_sha256": suffix * 64,
+                    "map_sha256": suffix * 64,
+                },
+                "integration_smoke_tests": [
+                    _passed_report_smoke(name, "import-1", "import")
+                    for name in names
+                ],
+            }
+
+        first = report("first", "shared", "a")
+        second = report("second", "shared", "a")
+        first["integration_smoke_tests"][0]["duration_seconds"] = 0.125
+        first["integration_smoke_tests"][0]["stdout"] = "first run"
+        second["integration_smoke_tests"][0]["duration_seconds"] = 0.875
+        second["integration_smoke_tests"][0]["stdout"] = "second run"
+        aggregate = build._aggregate_pack_verification_reports([first, second])
+
+        self.assertEqual(aggregate["status"], "passed")
+        self.assertEqual(aggregate["verification_mode"], "dependency-closure-set")
+        self.assertEqual(
+            [record["name"] for record in aggregate["packs"]],
+            ["first", "second", "shared"],
+        )
+        self.assertEqual(len(aggregate["closure_verifications"]), 2)
+        self.assertEqual(aggregate["verification_roots"], ["first", "second"])
+        self.assertTrue(
+            all(
+                "duration_seconds" not in record
+                and "stdout" not in record
+                and "stderr" not in record
+                for record in aggregate["integration_smoke_tests"]
+            )
+        )
+        pack_evidence.validate_sdk_verification_report(aggregate)
+
+    def test_pack_promotion_rejects_dependency_only_evidence(self) -> None:
+        report, final, _metadata = self._write_pack_promotion_fixture()
+        report["packs"].append(
+            {
+                "name": "root",
+                "version": "1.0",
+                "sha256": "a" * 64,
+                "provisional_sha256": "a" * 64,
+                "payload_manifest_sha256": "b" * 64,
+                "metadata_without_verification_sha256": "c" * 64,
+            }
+        )
+        report["integration_smoke_tests"].append(
+            _passed_report_smoke("root", "root-behavior", "script")
+        )
+        report["verification_roots"] = ["root"]
+
+        with self.assertRaisesRegex(RuntimeError, "only a dependency"):
+            build.bind_promoted_pack_evidence(report, [final])
 
     def test_global_pack_version_lock_preserves_cross_family_solution(self) -> None:
         config = build.load_config()
@@ -1873,6 +3025,7 @@ from Crypto.Hash import SHA512
             ],
             "verification": {"status": "not-run"},
             "license": {"status": "complete"},
+            "files": [],
         }
         (pack_stage / "pack.json").write_text(json.dumps(pack_metadata), encoding="utf-8")
         pack_zip = assets / "attrs.zip"
@@ -1996,11 +3149,86 @@ from Crypto.Hash import SHA512
                 "staticpython_commit": commit,
                 "verification": {"status": "passed"},
                 "license": {"status": "missing"},
+                "files": [],
             }
             (stage / "pack.json").write_text(json.dumps(metadata), encoding="utf-8")
             build.write_deterministic_zip(stage, assets / f"{name}.zip")
 
         with self.assertRaisesRegex(RuntimeError, r"alpha\.zip[\s\S]*beta\.zip"):
+            build_release_index.build_index(
+                assets,
+                "xqy2006/StaticPython",
+                commit,
+                "runtime-tag",
+                "pack-tag",
+                require_all_targets=False,
+                require_verified=True,
+            )
+
+    def test_release_index_rejects_pack_without_promotion_binding(self) -> None:
+        assets = self.root / "binding-assets"
+        runtime_stage = self.root / "binding-runtime"
+        pack_stage = self.root / "binding-pack"
+        (runtime_stage / "metadata").mkdir(parents=True)
+        pack_stage.mkdir()
+        assets.mkdir()
+        commit = "d" * 40
+        cpython_commit = "c" * 40
+        toolchain = {
+            "visual_studio_version": "17.0",
+            "vscmd_version": "17.14.36",
+            "vc_tools_version": "14.44.35207",
+            "windows_sdk_version": "10.0.26100.0\\",
+            "platform_toolset": "v143",
+            "runtime_library": "MultiThreaded",
+        }
+        provenance = {
+            "commit": cpython_commit,
+            "archive_sha256": "a" * 64,
+        }
+        runtime_metadata = {
+            "cpython_abi": "cp313",
+            "cpython_version": "3.13.0",
+            "runtime_abi": "staticpython-pack-v1-cp313",
+            "staticpython_commit": commit,
+            "verification": {"status": "passed"},
+            "cpython_commit": cpython_commit,
+            "cpython_tag": "v3.13.0",
+            "cpython_source": provenance,
+            "toolchain": toolchain,
+        }
+        (runtime_stage / build.RUNTIME_SDK_METADATA_RELATIVE_PATH).write_text(
+            json.dumps(runtime_metadata), encoding="utf-8"
+        )
+        build.write_deterministic_zip(runtime_stage, assets / "runtime.zip")
+        pack_metadata = {
+            "schema_version": 1,
+            "kind": "staticpython-library-pack",
+            "name": "demo",
+            "version": "1.0",
+            "cpython_abi": "cp313",
+            "cpython_version": "3.13.0",
+            "runtime_abi": "staticpython-pack-v1-cp313",
+            "staticpython_commit": commit,
+            "verification": {
+                "status": "passed",
+                "smoke_tests": [
+                    {"name": "behavior", "kind": "import", "status": "passed"}
+                ],
+            },
+            "license": {"status": "complete"},
+            "cpython_commit": cpython_commit,
+            "cpython_tag": "v3.13.0",
+            "cpython_source": provenance,
+            "toolchain": toolchain,
+            "files": [],
+        }
+        (pack_stage / "pack.json").write_text(
+            json.dumps(pack_metadata), encoding="utf-8"
+        )
+        build.write_deterministic_zip(pack_stage, assets / "demo.zip")
+
+        with self.assertRaisesRegex(RuntimeError, "incomplete or unknown verification"):
             build_release_index.build_index(
                 assets,
                 "xqy2006/StaticPython",

@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 import build_library_contract_config as contract_config  # noqa: E402
 import library_contract_build as contract_build  # noqa: E402
 import library_history_evidence as history_evidence  # noqa: E402
+import pack_evidence  # noqa: E402
 
 
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -55,6 +56,7 @@ def _validate_verifier_report(
 ) -> dict:
     if report.get("status") != "passed" or report.get("failures"):
         raise RuntimeError("SDK-linked pack verifier did not pass")
+    pack_evidence.validate_promoted_pack_evidence(report, [pack_path])
     runtime = report.get("runtime_sdk")
     if not isinstance(runtime, dict):
         raise RuntimeError("SDK-linked pack verifier has no runtime_sdk record")
@@ -70,57 +72,30 @@ def _validate_verifier_report(
                 f"SDK-linked pack verifier runtime {key} mismatch: "
                 f"expected {expected!r}, got {runtime.get(key)!r}"
             )
-    expected_pack_sha = history_evidence.file_sha256(pack_path)
     packs = report.get("packs")
     if not isinstance(packs, list) or not packs:
         raise RuntimeError("SDK-linked pack verifier must describe at least one pack")
-    verified_packs = []
-    pack_identities: set[tuple[str, str]] = set()
-    for pack in packs:
-        if not isinstance(pack, dict):
-            raise RuntimeError(
-                "SDK-linked pack verifier contains an invalid pack record"
-            )
-        pack_name = pack.get("name")
-        pack_version = pack.get("version")
-        pack_sha = pack.get("sha256")
-        if not isinstance(pack_name, str) or not pack_name:
-            raise RuntimeError("SDK-linked pack verifier pack has no name")
-        if not isinstance(pack_version, str) or not pack_version:
-            raise RuntimeError("SDK-linked pack verifier pack has no version")
-        if not isinstance(pack_sha, str) or not SHA256_PATTERN.fullmatch(pack_sha):
-            raise RuntimeError(
-                f"SDK-linked pack verifier pack {pack_name} {pack_version} "
-                "has no SHA-256"
-            )
-        identity = (pack_name.casefold(), pack_version)
-        if identity in pack_identities:
-            raise RuntimeError(
-                f"SDK-linked pack verifier repeats pack {pack_name} {pack_version}"
-            )
-        pack_identities.add(identity)
-        verified_packs.append(
-            {
-                "name": pack_name,
-                "version": pack_version,
-                "sha256": pack_sha.lower(),
-            }
-        )
+    verified_packs = [
+        {
+            "name": record["name"],
+            "version": record["version"],
+            "sha256": record["sha256"].lower(),
+        }
+        for record in packs
+    ]
     matching_packs = [
-        pack
-        for pack in verified_packs
-        if pack["name"] == library and pack["version"] == version
+        record
+        for record in verified_packs
+        if record["name"] == library and record["version"] == version
     ]
     if len(matching_packs) != 1:
         raise RuntimeError(
-            "SDK-linked pack verifier must describe exactly one target pack "
-            f"{library} {version}"
+            "SDK-linked pack verifier must describe the exact root pack once: "
+            f"{library} {version} matched {len(matching_packs)} records"
         )
-    provisional_pack_sha = matching_packs[0]["sha256"]
-    # The verified archive is provisional. Exporting the final pack replaces its
-    # verification metadata, so its whole-archive digest is intentionally different.
-    # Both digests remain in the immutable combination evidence so downstream
-    # promotion policy can bind them without conflating the two archive formats.
+    root_pack = matching_packs[0]
+    expected_pack_sha = history_evidence.file_sha256(pack_path)
+    provisional_pack_sha = root_pack["sha256"]
     verified_packs.sort(
         key=lambda pack: (pack["name"].casefold(), pack["version"], pack["sha256"])
     )

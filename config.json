@@ -182,10 +182,16 @@
       {
         "name": "cattrs",
         "source_mapping": {
-          "cattrs||src/cattrs||cattr||src/cattr": "Lib/cattrs"
+          "cattrs||src/cattrs||cattr||src/cattr": "Lib/cattrs",
+          "?cattr||?src/cattr||?cattrs||?src/cattrs": "Lib/cattr"
         },
         "python_packages": [
-          "cattrs"
+          "cattrs",
+          "cattr"
+        ],
+        "top_level_import_names": [
+          "cattrs",
+          "cattr"
         ],
         "source_provider": "pypi"
       },
@@ -1089,6 +1095,13 @@
           "pytest": "Lib/pytest",
           "_pytest": "Lib/_pytest"
         },
+        "python_packages": [
+          "pytest",
+          "_pytest"
+        ],
+        "top_level_import_names": [
+          "pytest"
+        ],
         "source_provider": "pypi"
       },
       {
@@ -1615,9 +1628,23 @@
         "enabled": false
       }
     },
+    "tkinter-experimental": {
+      "description": "Experimental no-extraction tkinter pack using static Tcl/Tk 9 and an in-memory ZipFS. Kept outside full until dedicated SDK-linked verification is green.",
+      "core_libraries": "all",
+      "third_party_libraries": [
+        "tkinter"
+      ],
+      "verification": {
+        "enabled": false
+      }
+    },
     "full": {
       "description": "Build CPython plus every configured third-party library integration. Pure libraries come from third_party_library_catalog; native or patched libraries remain under Lib/<name>/setup.py.",
       "core_libraries": "all",
+      "historical_library_contract_libraries": [
+        "attr",
+        "cattr"
+      ],
       "third_party_libraries": [
         "aiohappyeyeballs",
         "aiohttp",
@@ -1629,7 +1656,6 @@
         "asgiref",
         "asttokens",
         "async_lru",
-        "attr",
         "attrs",
         "babel",
         "black",
@@ -1640,7 +1666,6 @@
         "bokeh",
         "bs4",
         "cachetools",
-        "cattr",
         "cattrs",
         "certifi",
         "chardet",

@@ -1,0 +1,1019 @@
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import re
+import shutil
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+from libs import LibraryIntegration, inline_verification_step, source_path, write_source_text
+from tools import (
+    download_first_available,
+    ensure_tool,
+    extract_source_archive,
+    find_direct_child,
+    find_direct_children,
+    get_pcbuild_output_dir,
+    load_msbuild_project,
+    merge_msbuild_semicolon_list,
+    msbuild_tag,
+    remove_msbuild_items,
+    remove_msbuild_targets,
+    run,
+    save_msbuild_project,
+    set_or_create_property,
+)
+
+
+def _load_zipfs_writer():
+    helper_path = Path(__file__).resolve().parents[2] / "scripts" / "tcltk_zipfs.py"
+    spec = importlib.util.spec_from_file_location("_staticpython_tcltk_zipfs", helper_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load Tcl/Tk ZipFS helper: {helper_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.write_tcltk_zipfs_artifacts
+
+
+write_tcltk_zipfs_artifacts = _load_zipfs_writer()
+
+
+TCLTK_RELEASE = "9.0.4"
+TCLTK_ABI = "9.0"
+TCL_COMMIT = "c655b4770b1d6d32a8cbffd6cef59db6029fe19e"
+TK_COMMIT = "584f8fcf62c320d7c341e77171188cb4d79c3725"
+TCL_ARCHIVE_SHA256 = "b7765cfb10c747c22f32f54668eded51b2d29d386e302274911038c6a609be9f"
+TK_ARCHIVE_SHA256 = "9d1a731333424682d7980c3469aeefadd01886a516bb53860d3772bd6b184ff7"
+TCL_SOURCE_NAME = f"staticpython-tcl-{TCLTK_RELEASE}"
+TK_SOURCE_NAME = f"staticpython-tk-{TCLTK_RELEASE}"
+TCL_STAGED_LIBRARY = "staticpython_tcl.lib"
+TCL_STUB_STAGED_LIBRARY = "staticpython_tclstub.lib"
+TK_STAGED_LIBRARY = "staticpython_tk.lib"
+OPTIONAL_FREEZE_MARKER = "PCbuild/staticpython_optional_frozen_trees.txt"
+ZIP_RESOURCE = "Lib/tkinter/_staticpython/tcltk-library.zip"
+ZIPFS_SOURCE = "tkinter_builtin/staticpython_tkinter_zipfs.c"
+PROVENANCE_FILE = "tkinter_builtin/staticpython_tcltk_provenance.json"
+TCL_LICENSE = "licenses/tkinter/tcl-license.terms"
+TK_LICENSE = "licenses/tkinter/tk-license.terms"
+ZLIB_LICENSE = "licenses/tkinter/zlib-LICENSE"
+LIBTOMMATH_LICENSE = "licenses/tkinter/libtommath-LICENSE"
+INFOZIP_LICENSE = "licenses/tkinter/minizip-LICENSE.Info-Zip"
+CPYTHON_LICENSE = "LICENSE"
+
+TCL9_COMPAT_MARKER = (
+    "As suggested by "
+    "https://core.tcl-lang.org/tcl/wiki?name=Migrating+C+extensions+to+Tcl+9"
+)
+
+TCL9_COMPAT_PREAMBLE_REPLACEMENTS = (
+    (
+        "#define USE_DEPRECATED_TOMMATH_API 1\n"
+        "#endif\n\n"
+        "#if !(defined(MS_WINDOWS) || defined(__CYGWIN__))",
+        "#define USE_DEPRECATED_TOMMATH_API 1\n"
+        "#endif\n\n"
+        f"// {TCL9_COMPAT_MARKER}\n"
+        "#ifndef TCL_SIZE_MAX\n"
+        "typedef int Tcl_Size;\n"
+        "#define TCL_SIZE_MAX INT_MAX\n"
+        "#endif\n\n"
+        "#if !(defined(MS_WINDOWS) || defined(__CYGWIN__))",
+    ),
+    (
+        "#include <tclTomMath.h>\n\n"
+        "#if !(defined(MS_WINDOWS) || defined(__CYGWIN__))",
+        "#include <tclTomMath.h>\n\n"
+        f"// {TCL9_COMPAT_MARKER}\n"
+        "#ifndef TCL_SIZE_MAX\n"
+        "typedef int Tcl_Size;\n"
+        "#define TCL_SIZE_MAX INT_MAX\n"
+        "#endif\n\n"
+        "#if !(defined(MS_WINDOWS) || defined(__CYGWIN__))",
+    ),
+)
+
+TCL9_COMPAT_REPLACEMENTS = (
+    ("{\n    int len;\n#if USE_TCL_UNICODE", "{\n    Tcl_Size len;\n#if USE_TCL_UNICODE"),
+    (
+        "/**** Tkapp Object ****/\n\n#ifndef WITH_APPINIT",
+        "/**** Tkapp Object ****/\n\n"
+        "#if TK_MAJOR_VERSION >= 9\n"
+        "int Tcl_AppInit(Tcl_Interp *);\n"
+        "#endif\n\n"
+        "#ifndef WITH_APPINIT",
+    ),
+    (
+        "if (value->typePtr == tkapp->ByteArrayType) {\n        int size;\n"
+        "        char *data = (char*)Tcl_GetByteArrayFromObj(value, &size);",
+        "if (value->typePtr == tkapp->ByteArrayType) {\n        Tcl_Size size;\n"
+        "        char *data = (char*)Tcl_GetByteArrayFromObj(value, &size);",
+    ),
+    (
+        "if (value->typePtr == tkapp->ListType) {\n        int size;\n"
+        "        int i, status;",
+        "if (value->typePtr == tkapp->ListType) {\n        Tcl_Size i, size;\n"
+        "        int status;",
+    ),
+    (
+        "Tkapp_CallDeallocArgs(Tcl_Obj** objv, Tcl_Obj** objStore, int objc)\n"
+        "{\n    int i;",
+        "Tkapp_CallDeallocArgs(Tcl_Obj** objv, Tcl_Obj** objStore, Tcl_Size objc)\n"
+        "{\n    Tcl_Size i;",
+    ),
+    (
+        "Tkapp_CallArgs(PyObject *args, Tcl_Obj** objStore, int *pobjc)",
+        "Tkapp_CallArgs(PyObject *args, Tcl_Obj** objStore, Tcl_Size *pobjc)",
+    ),
+    ("    *pobjc = (int)objc;", "    *pobjc = (Tcl_Size)objc;"),
+    (
+        "    Tkapp_CallDeallocArgs(objv, objStore, (int)objc);",
+        "    Tkapp_CallDeallocArgs(objv, objStore, (Tcl_Size)objc);",
+    ),
+    (
+        "Tkapp_CallProc(Tkapp_CallEvent *e, int flags)\n"
+        "{\n    Tcl_Obj *objStore[ARGSZ];\n    Tcl_Obj **objv;\n    int objc;",
+        "Tkapp_CallProc(Tkapp_CallEvent *e, int flags)\n"
+        "{\n    Tcl_Obj *objStore[ARGSZ];\n    Tcl_Obj **objv;\n    Tcl_Size objc;",
+    ),
+    (
+        "Tkapp_Call(PyObject *selfptr, PyObject *args)\n"
+        "{\n    Tcl_Obj *objStore[ARGSZ];\n    Tcl_Obj **objv = NULL;\n"
+        "    int objc, i;",
+        "Tkapp_Call(PyObject *selfptr, PyObject *args)\n"
+        "{\n    Tcl_Obj *objStore[ARGSZ];\n    Tcl_Obj **objv = NULL;\n"
+        "    Tcl_Size objc;",
+    ),
+    (
+        "    else\n    {\n\n"
+        "        objv = Tkapp_CallArgs(args, objStore, &objc);",
+        "    else\n    {\n        int i;\n\n"
+        "        objv = Tkapp_CallArgs(args, objStore, &objc);",
+    ),
+    (
+        "{\n    char *list;\n    int argc;\n    const char **argv;\n"
+        "    PyObject *v;\n    int i;\n\n"
+        "    if (PyTclObject_Check(arg)) {\n        int objc;\n        Tcl_Obj **objv;",
+        "{\n    char *list;\n    Tcl_Size argc, i;\n    const char **argv;\n"
+        "    PyObject *v;\n\n"
+        "    if (PyTclObject_Check(arg)) {\n        Tcl_Size objc;\n        Tcl_Obj **objv;",
+    ),
+)
+
+TCLTK_SYSTEM_LIBRARIES = [
+    "kernel32.lib",
+    "advapi32.lib",
+    "netapi32.lib",
+    "user32.lib",
+    "userenv.lib",
+    "ws2_32.lib",
+    "gdi32.lib",
+    "uxtheme.lib",
+    "winspool.lib",
+    "shell32.lib",
+    "ole32.lib",
+    "oleaut32.lib",
+    "uuid.lib",
+    "oleacc.lib",
+    "comdlg32.lib",
+    "comctl32.lib",
+    "imm32.lib",
+]
+
+TCLTK_INCLUDE_DIRECTORIES = [
+    rf"..\externals\{TCL_SOURCE_NAME}\generic",
+    rf"..\externals\{TCL_SOURCE_NAME}\win",
+    rf"..\externals\{TCL_SOURCE_NAME}\libtommath",
+    rf"..\externals\{TK_SOURCE_NAME}\generic",
+    rf"..\externals\{TK_SOURCE_NAME}\win",
+    rf"..\externals\{TK_SOURCE_NAME}\xlib",
+]
+
+
+def _tcl_source(context) -> Path:
+    return source_path(context, f"externals/{TCL_SOURCE_NAME}")
+
+
+def _tk_source(context) -> Path:
+    return source_path(context, f"externals/{TK_SOURCE_NAME}")
+
+
+def _verify_archive_hash(path: Path, expected: str, *, component: str) -> None:
+    observed = hashlib.sha256(path.read_bytes()).hexdigest()
+    if observed != expected:
+        raise RuntimeError(
+            f"{component} {TCLTK_RELEASE} source archive hash mismatch: "
+            f"expected {expected}, observed {observed}"
+        )
+
+
+def _ensure_source_tree(
+    context,
+    *,
+    component: str,
+    repository: str,
+    commit: str,
+    archive_sha256: str,
+    destination: Path,
+    required: tuple[str, ...],
+) -> Path:
+    if all((destination / relative).is_file() for relative in required):
+        return destination
+
+    archive = (
+        context.download_cache_root
+        / "tcltk"
+        / TCLTK_RELEASE
+        / f"{component.lower()}-{commit}.zip"
+    )
+    used_source = download_first_available(
+        context.log,
+        [f"https://codeload.github.com/{repository}/zip/{commit}"],
+        archive,
+    )
+    _verify_archive_hash(archive, archive_sha256, component=component)
+    extract_source_archive(
+        context.log,
+        archive,
+        destination.parent,
+        final_name=destination.name,
+    )
+    missing = [relative for relative in required if not (destination / relative).is_file()]
+    if missing:
+        raise RuntimeError(
+            f"{component} {TCLTK_RELEASE} source is incomplete: " + ", ".join(missing)
+        )
+    context.log(f"materialized {component} {TCLTK_RELEASE} from {used_source}")
+    return destination
+
+
+def _require_supported_cpython(context) -> None:
+    if context.version_info < (3, 11, 0):
+        raise RuntimeError(
+            "experimental tkinter ZipFS requires CPython 3.11 or newer"
+        )
+    source = source_path(context, "Modules/_tkinter.c").read_text(
+        encoding="utf-8",
+        errors="strict",
+    )
+    if context.version_info < (3, 12, 0):
+        _patch_tcl9_compat_text(source)
+        return
+    missing = [marker for marker in ("Tcl_Size", "TCL_SIZE_MAX") if marker not in source]
+    if missing:
+        raise RuntimeError(
+            "CPython _tkinter is missing required Tcl 9 compatibility markers: "
+            + ", ".join(missing)
+        )
+
+
+def _patch_tcl9_compat_text(text: str) -> str:
+    """Strictly backport CPython's gh-112672 Tcl 9 fix to the 3.11 source."""
+
+    patched_preambles = tuple(
+        replacement for _, replacement in TCL9_COMPAT_PREAMBLE_REPLACEMENTS
+    )
+    patched_anchors = tuple(replacement for _, replacement in TCL9_COMPAT_REPLACEMENTS)
+    marker_present = TCL9_COMPAT_MARKER in text
+    preamble_present = [replacement in text for replacement in patched_preambles]
+    patched_present = [replacement in text for replacement in patched_anchors]
+    if marker_present or any(preamble_present) or any(patched_present):
+        if (
+            not marker_present
+            or sum(preamble_present) != 1
+            or not all(patched_present)
+        ):
+            raise RuntimeError("CPython 3.11 _tkinter Tcl 9 compatibility patch is partial")
+        stale = [
+            anchor
+            for anchor, _ in (
+                TCL9_COMPAT_PREAMBLE_REPLACEMENTS + TCL9_COMPAT_REPLACEMENTS
+            )
+            if anchor in text
+        ]
+        if stale:
+            raise RuntimeError("CPython 3.11 _tkinter Tcl 9 compatibility patch left stale anchors")
+        return text
+
+    preamble_matches = [
+        (anchor, replacement, text.count(anchor))
+        for anchor, replacement in TCL9_COMPAT_PREAMBLE_REPLACEMENTS
+    ]
+    total_preamble_matches = sum(count for _, _, count in preamble_matches)
+    if total_preamble_matches != 1:
+        raise RuntimeError(
+            "CPython 3.11 _tkinter Tcl 9 compatibility preamble expected one "
+            f"supported layout, found {total_preamble_matches}"
+        )
+    for anchor, replacement, matches in preamble_matches:
+        if matches == 1:
+            text = text.replace(anchor, replacement, 1)
+            break
+
+    for anchor, replacement in TCL9_COMPAT_REPLACEMENTS:
+        matches = text.count(anchor)
+        if matches != 1:
+            raise RuntimeError(
+                "CPython 3.11 _tkinter Tcl 9 compatibility anchor expected once, "
+                f"found {matches}: {anchor.splitlines()[0]!r}"
+            )
+        text = text.replace(anchor, replacement, 1)
+    return text
+
+
+def _write_archive_manifest_uuid(source_root: Path, commit: str, *, component: str) -> None:
+    template = source_root / "win" / "gitmanifest.in"
+    prefix = template.read_text(encoding="ascii")
+    if prefix not in {"git-", "git-\n", "git-\r\n"}:
+        raise RuntimeError(
+            f"{component} gitmanifest.in drifted from the expected 'git-' prefix"
+        )
+    (source_root / "manifest.uuid").write_text(
+        f"git-{commit}\n",
+        encoding="ascii",
+        newline="\n",
+    )
+
+
+def prepare_tcltk_sources(context) -> None:
+    _require_supported_cpython(context)
+    tcl_source = _ensure_source_tree(
+        context,
+        component="Tcl",
+        repository="tcltk/tcl",
+        commit=TCL_COMMIT,
+        archive_sha256=TCL_ARCHIVE_SHA256,
+        destination=_tcl_source(context),
+        required=(
+            "generic/tcl.h",
+            "generic/tclZipfs.c",
+            "library/init.tcl",
+            "library/encoding/cp1252.enc",
+            "library/tzdata/UTC",
+            "win/makefile.vc",
+            "win/gitmanifest.in",
+            "compat/zlib/LICENSE",
+            "compat/zlib/contrib/minizip/LICENSE.Info-Zip",
+            "libtommath/tommath.h",
+            "libtommath/LICENSE",
+            "license.terms",
+        ),
+    )
+    tk_source = _ensure_source_tree(
+        context,
+        component="Tk",
+        repository="tcltk/tk",
+        commit=TK_COMMIT,
+        archive_sha256=TK_ARCHIVE_SHA256,
+        destination=_tk_source(context),
+        required=(
+            "generic/tk.h",
+            "library/tk.tcl",
+            "library/ttk/ttk.tcl",
+            "library/ttk/clamTheme.tcl",
+            "library/ttk/vistaTheme.tcl",
+            "library/ttk/xpTheme.tcl",
+            "win/makefile.vc",
+            "win/gitmanifest.in",
+            "license.terms",
+        ),
+    )
+    # Tcl/Tk's nmake rules call `git rev-parse` whenever manifest.uuid is
+    # absent. Immutable GitHub source archives intentionally have no .git
+    # directory, so materialize the exact pinned commit before nmake runs.
+    _write_archive_manifest_uuid(tcl_source, TCL_COMMIT, component="Tcl")
+    _write_archive_manifest_uuid(tk_source, TK_COMMIT, component="Tk")
+
+    write_tcltk_zipfs_artifacts(
+        tcl_source / "library",
+        tk_source / "library",
+        zip_path=source_path(context, ZIP_RESOURCE),
+        c_path=source_path(context, ZIPFS_SOURCE),
+        release_version=TCLTK_RELEASE,
+        tcl_version=TCLTK_ABI,
+        tk_version=TCLTK_ABI,
+    )
+    write_source_text(
+        context,
+        OPTIONAL_FREEZE_MARKER,
+        "# Optional stdlib trees selected by StaticPython integrations.\ntkinter\n",
+    )
+
+    source_path(context, TCL_LICENSE).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(tcl_source / "license.terms", source_path(context, TCL_LICENSE))
+    shutil.copy2(tk_source / "license.terms", source_path(context, TK_LICENSE))
+    shutil.copy2(tcl_source / "compat/zlib/LICENSE", source_path(context, ZLIB_LICENSE))
+    shutil.copy2(
+        tcl_source / "libtommath/LICENSE",
+        source_path(context, LIBTOMMATH_LICENSE),
+    )
+    shutil.copy2(
+        tcl_source / "compat/zlib/contrib/minizip/LICENSE.Info-Zip",
+        source_path(context, INFOZIP_LICENSE),
+    )
+    provenance = {
+        "schema_version": 1,
+        "release": TCLTK_RELEASE,
+        "tcl": {
+            "repository": "tcltk/tcl",
+            "commit": TCL_COMMIT,
+            "archive_sha256": TCL_ARCHIVE_SHA256,
+        },
+        "tk": {
+            "repository": "tcltk/tk",
+            "commit": TK_COMMIT,
+            "archive_sha256": TK_ARCHIVE_SHA256,
+        },
+        "bundled_components": [
+            {
+                "name": "zlib",
+                "source_path": "tcl/compat/zlib",
+                "license": "Zlib",
+            },
+            {
+                "name": "LibTomMath",
+                "source_path": "tcl/libtommath",
+                "license": "Unlicense",
+            },
+            {
+                "name": "Info-ZIP minizip code",
+                "source_path": "tcl/compat/zlib/contrib/minizip",
+                "license": "Info-ZIP",
+            },
+        ],
+        "zipfs": {
+            "mount": f"//zipfs:/staticpython/tcltk-{TCLTK_RELEASE}",
+            "tcl_library": f"tcl{TCLTK_ABI}",
+            "tk_library": f"tk{TCLTK_ABI}",
+            "runtime_extraction": False,
+        },
+    }
+    write_source_text(
+        context,
+        PROVENANCE_FILE,
+        json.dumps(provenance, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def _remove_c_function(text: str, function_name: str) -> tuple[str, bool]:
+    pattern = re.compile(
+        rf"(?m)^static\s+PyObject\s*\*\s*\r?\n"
+        rf"{re.escape(function_name)}\((?:void)?\)\s*\r?\n\{{"
+    )
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return text, False
+    if len(matches) != 1:
+        raise RuntimeError(f"expected one {function_name} definition, found {len(matches)}")
+    start = matches[0].start()
+    brace = text.find("{", matches[0].start(), matches[0].end())
+    depth = 0
+    end = None
+    for index in range(brace, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                break
+    if end is None:
+        raise RuntimeError(f"could not find the end of {function_name}")
+    while end < len(text) and text[end] in "\r\n":
+        end += 1
+    return text[:start] + text[end:], True
+
+
+def _preprocessor_block_containing(text: str, token_index: int) -> tuple[int, int]:
+    lines = text.splitlines(keepends=True)
+    offsets: list[int] = []
+    offset = 0
+    token_line = None
+    for index, line in enumerate(lines):
+        offsets.append(offset)
+        if offset <= token_index < offset + len(line):
+            token_line = index
+        offset += len(line)
+    if token_line is None:
+        raise RuntimeError("could not locate TCL_LIBRARY preprocessor line")
+
+    stack: list[int] = []
+    candidate = None
+    for index, line in enumerate(lines[: token_line + 1]):
+        directive = line.lstrip()
+        if re.match(r"#\s*(?:if|ifdef|ifndef)\b", directive):
+            stack.append(index)
+        elif re.match(r"#\s*endif\b", directive):
+            if not stack:
+                raise RuntimeError("unbalanced preprocessor directives around TCL_LIBRARY")
+            stack.pop()
+    for index in reversed(stack):
+        if re.match(r"#\s*ifdef\s+MS_WINDOWS\b", lines[index].lstrip()):
+            candidate = index
+            break
+    if candidate is None:
+        raise RuntimeError("TCL_LIBRARY lookup is not guarded by #ifdef MS_WINDOWS")
+
+    depth = 0
+    end_line = None
+    for index in range(candidate, len(lines)):
+        directive = lines[index].lstrip()
+        if re.match(r"#\s*(?:if|ifdef|ifndef)\b", directive):
+            depth += 1
+        elif re.match(r"#\s*endif\b", directive):
+            depth -= 1
+            if depth == 0:
+                end_line = index
+                break
+    if end_line is None:
+        raise RuntimeError("unterminated #ifdef MS_WINDOWS around TCL_LIBRARY")
+    start_offset = offsets[candidate]
+    end_offset = offsets[end_line] + len(lines[end_line])
+    return start_offset, end_offset
+
+
+def _remove_tcl_library_environment_blocks(text: str) -> tuple[str, int]:
+    token = 'GetEnvironmentVariableW(L"TCL_LIBRARY"'
+    removed = 0
+    while token in text:
+        token_index = text.index(token)
+        start, end = _preprocessor_block_containing(text, token_index)
+        block = text[start:end]
+        find_executable = "Tcl_FindExecutable(PyBytes_AS_STRING(cexe));"
+        if find_executable in block:
+            if block.count(find_executable) != 2:
+                raise RuntimeError(
+                    "unexpected Tcl_FindExecutable layout in TCL_LIBRARY environment block"
+                )
+            indent = re.search(
+                r"(?m)^(\s*)Tcl_FindExecutable\(PyBytes_AS_STRING\(cexe\)\);",
+                block,
+            )
+            if indent is None:
+                raise RuntimeError("could not preserve Tcl_FindExecutable indentation")
+            replacement = (
+                f"{indent.group(1)}/* StaticPython never injects an external Tcl script path. */\n"
+                f"{indent.group(1)}{find_executable}\n"
+            )
+        else:
+            replacement = "    /* StaticPython resolves Tcl scripts only from the mounted ZipFS. */\n"
+        text = text[:start] + replacement + text[end:]
+        removed += 1
+    return text, removed
+
+
+def _patch_tkinter_text(text: str) -> str:
+    marker = "StaticPython resolves Tcl scripts only from the mounted ZipFS"
+    if marker in text and "TCL_LIBRARY" not in text and "_get_tcl_lib_path" not in text:
+        return text
+    text, removed_function = _remove_c_function(text, "_get_tcl_lib_path")
+    text, removed_blocks = _remove_tcl_library_environment_blocks(text)
+    if not removed_function:
+        raise RuntimeError("CPython _tkinter.c no longer contains the expected _get_tcl_lib_path helper")
+    if removed_blocks < 1:
+        raise RuntimeError("CPython _tkinter.c has no guarded TCL_LIBRARY lookup to remove")
+    if "TCL_LIBRARY" in text or "_get_tcl_lib_path" in text:
+        raise RuntimeError("CPython _tkinter.c still contains external Tcl library discovery")
+    return text
+
+
+def _patch_tkappinit_text(text: str) -> str:
+    declaration = "extern int StaticPython_TkinterZipfsMount(Tcl_Interp *interp);"
+    restrict_declaration = (
+        "extern int StaticPython_TkinterZipfsRestrictAutoPath(Tcl_Interp *interp);"
+    )
+    restrict_tk_declaration = (
+        "extern int StaticPython_TkinterZipfsRestrictTkPaths(Tcl_Interp *interp);"
+    )
+    if declaration in text:
+        if (
+            restrict_declaration not in text
+            or restrict_tk_declaration not in text
+            or text.count("StaticPython_TkinterZipfsMount(interp)") != 1
+            or text.count("StaticPython_TkinterZipfsRestrictAutoPath(interp)") != 1
+            or text.count("StaticPython_TkinterZipfsRestrictTkPaths(interp)") != 1
+        ):
+            raise RuntimeError("tkappinit.c contains an invalid StaticPython ZipFS mount patch")
+        return text
+    include_anchor = '#include "tkinter.h"'
+    if text.count(include_anchor) != 1:
+        raise RuntimeError("tkappinit.c tkinter.h include anchor did not match exactly once")
+    text = text.replace(
+        include_anchor,
+        (
+            include_anchor
+            + "\n\n"
+            + declaration
+            + "\n"
+            + restrict_declaration
+            + "\n"
+            + restrict_tk_declaration
+        ),
+        1,
+    )
+    pattern = re.compile(r"(?m)^(\s*)if \(Tcl_Init\s*\(interp\) == TCL_ERROR\)")
+    matches = list(pattern.finditer(text))
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"tkappinit.c Tcl_Init anchor expected once, found {len(matches)}"
+        )
+    indent = matches[0].group(1)
+    mount = (
+        f"{indent}if (StaticPython_TkinterZipfsMount(interp) == TCL_ERROR)\n"
+        f"{indent}    return TCL_ERROR;\n\n"
+    )
+    text = text[: matches[0].start()] + mount + text[matches[0].start() :]
+    init_pattern = re.compile(
+        r"(?m)^(\s*)if \(Tcl_Init\s*\(interp\) == TCL_ERROR\)\r?\n"
+        r"\1    return TCL_ERROR;"
+    )
+    init_matches = list(init_pattern.finditer(text))
+    if len(init_matches) != 1:
+        raise RuntimeError(
+            f"tkappinit.c completed Tcl_Init block expected once, found {len(init_matches)}"
+        )
+    init_match = init_matches[0]
+    restrict = (
+        f"\n\n{init_match.group(1)}if (StaticPython_TkinterZipfsRestrictAutoPath(interp) == TCL_ERROR)\n"
+        f"{init_match.group(1)}    return TCL_ERROR;"
+    )
+    text = text[: init_match.end()] + restrict + text[init_match.end() :]
+
+    tk_patterns = (
+        re.compile(
+            r"(?m)^(\s*)if \((?:Tk_Init|Tkinter_TkInit)\s*\(interp\) == TCL_ERROR\) \{\r?\n"
+            r"\1    return TCL_ERROR;\r?\n"
+            r"\1\}"
+        ),
+        re.compile(
+            r"(?m)^(\s*)if \((?:Tk_Init|Tkinter_TkInit)\s*\(interp\) == TCL_ERROR\) \{\r?\n"
+            r"#ifdef TKINTER_PROTECT_LOADTK\r?\n"
+            r"\1    tk_load_failed = 1;\r?\n"
+            r"\1    Tcl_SetVar\(interp, \"_tkinter_tk_failed\", \"1\", TCL_GLOBAL_ONLY\);\r?\n"
+            r"#endif\r?\n"
+            r"\1    return TCL_ERROR;\r?\n"
+            r"\1\}"
+        ),
+    )
+    tk_matches = [match for pattern in tk_patterns for match in pattern.finditer(text)]
+    if len(tk_matches) != 1:
+        raise RuntimeError(
+            f"tkappinit.c completed Tk_Init block expected once, found {len(tk_matches)}"
+        )
+    tk_match = tk_matches[0]
+    restrict_tk = (
+        f"\n\n{tk_match.group(1)}if (StaticPython_TkinterZipfsRestrictTkPaths(interp) == TCL_ERROR)\n"
+        f"{tk_match.group(1)}    return TCL_ERROR;"
+    )
+    return text[: tk_match.end()] + restrict_tk + text[tk_match.end() :]
+
+
+def patch_tkinter_sources(context) -> None:
+    def patch_tkinter(text: str) -> str:
+        if context.version_info < (3, 12, 0):
+            text = _patch_tcl9_compat_text(text)
+        return _patch_tkinter_text(text)
+
+    targets = (
+        ("Modules/_tkinter.c", patch_tkinter),
+        ("Modules/tkappinit.c", _patch_tkappinit_text),
+    )
+    for relative, transform in targets:
+        path = source_path(context, relative)
+        original = path.read_text(encoding="utf-8")
+        updated = transform(original)
+        if updated != original:
+            path.write_text(updated, encoding="utf-8", newline="\n")
+            context.log(f"strictly patched {relative} for in-memory Tcl/Tk ZipFS")
+
+
+def _replace_tcltk_props_import(root: ET.Element) -> None:
+    replaced = 0
+    for parent in root.iter():
+        for child in list(parent):
+            if child.tag != msbuild_tag("Import"):
+                continue
+            project = (child.get("Project") or "").replace("/", "\\").casefold()
+            if project.endswith("tcltk.props"):
+                # tcltk.props also imports pyproject.props, which supplies the
+                # CPython Include/, PC/, and generated pyconfig.h paths.  Keep
+                # that generic project wiring while dropping all dynamic
+                # Tcl/Tk configuration from the property sheet.
+                child.set("Project", "pyproject.props")
+                child.set("Condition", "$(__PyProject_Props_Imported) != 'true'")
+                replaced += 1
+    if replaced != 1:
+        raise RuntimeError(
+            f"_tkinter.vcxproj tcltk.props import expected once, found {replaced}"
+        )
+
+
+def patch_tkinter_project(context) -> None:
+    project = source_path(context, "PCbuild/_tkinter.vcxproj")
+    tree, root = load_msbuild_project(project)
+    _replace_tcltk_props_import(root)
+    set_or_create_property(root, "ConfigurationType", "StaticLibrary")
+    set_or_create_property(root, "TargetExt", ".lib")
+    set_or_create_property(root, "TargetName", "_tkinter")
+
+    includes = TCLTK_INCLUDE_DIRECTORIES
+    definitions = [
+        "WITH_APPINIT",
+        "STATIC_BUILD",
+        "Py_NO_ENABLE_SHARED",
+        "UNICODE",
+        "_UNICODE",
+    ]
+    compile_nodes = []
+    for group in root.iter(msbuild_tag("ItemDefinitionGroup")):
+        compile_node = find_direct_child(group, "ClCompile")
+        if compile_node is None:
+            continue
+        compile_nodes.append(compile_node)
+        include_node = find_direct_child(compile_node, "AdditionalIncludeDirectories")
+        if include_node is None:
+            include_node = ET.SubElement(compile_node, msbuild_tag("AdditionalIncludeDirectories"))
+        current_includes = (include_node.text or "").replace(
+            "$(tcltkDir)include;",
+            "",
+        )
+        include_node.text = merge_msbuild_semicolon_list(
+            current_includes,
+            includes,
+            "%(AdditionalIncludeDirectories)",
+        )
+        for child in list(compile_node):
+            if child.tag == msbuild_tag("PreprocessorDefinitions") and "Py_TCLTK_DIR" in (child.text or ""):
+                compile_node.remove(child)
+        definitions_node = find_direct_child(compile_node, "PreprocessorDefinitions")
+        if definitions_node is None:
+            definitions_node = ET.SubElement(compile_node, msbuild_tag("PreprocessorDefinitions"))
+        definitions_node.text = merge_msbuild_semicolon_list(
+            definitions_node.text,
+            definitions,
+            "%(PreprocessorDefinitions)",
+        )
+        runtime_node = find_direct_child(compile_node, "RuntimeLibrary")
+        if runtime_node is None:
+            runtime_node = ET.SubElement(compile_node, msbuild_tag("RuntimeLibrary"))
+        runtime_node.text = "MultiThreaded"
+    if not compile_nodes:
+        raise RuntimeError("_tkinter.vcxproj has no ClCompile definition group")
+
+    for link_node in root.iter(msbuild_tag("Link")):
+        dependencies = find_direct_child(link_node, "AdditionalDependencies")
+        if dependencies is not None:
+            dependencies.text = "%(AdditionalDependencies)"
+
+    compile_items = [
+        child
+        for group in find_direct_children(root, "ItemGroup")
+        for child in group
+        if child.tag == msbuild_tag("ClCompile")
+    ]
+    generated_include = r"..\tkinter_builtin\staticpython_tkinter_zipfs.c"
+    if not any((item.get("Include") or "").casefold() == generated_include.casefold() for item in compile_items):
+        group = next(
+            group
+            for group in find_direct_children(root, "ItemGroup")
+            if any(child.tag == msbuild_tag("ClCompile") for child in group)
+        )
+        item = ET.SubElement(group, msbuild_tag("ClCompile"))
+        item.set("Include", generated_include)
+
+    remove_msbuild_items(root, "ResourceCompile")
+    remove_msbuild_items(root, "_TclTkDLL")
+    remove_msbuild_targets(
+        root,
+        {"_CopyTclTkDLL", "_CleanTclTkDLL", "_WriteTCL_LIBRARY", "_CleanTCL_LIBRARY"},
+    )
+    save_msbuild_project(project, tree)
+
+    rendered = project.read_text(encoding="utf-8")
+    forbidden = (
+        "tcltk.props",
+        "$(tcltkLib)",
+        "_TclTkDLL",
+        "TCL_LIBRARY.env",
+        "DynamicLibrary",
+        ".pyd",
+    )
+    remaining = [value for value in forbidden if value in rendered]
+    if remaining:
+        raise RuntimeError(
+            "_tkinter.vcxproj still contains dynamic Tcl/Tk wiring: " + ", ".join(remaining)
+        )
+    context.log("patched PCbuild/_tkinter.vcxproj as a /MT static Tcl/Tk extension")
+
+
+def _find_built_library(root: Path, pattern: str, *, excluded: tuple[str, ...]) -> Path:
+    candidates = [
+        path
+        for path in root.rglob(pattern)
+        if path.is_file() and not any(token in path.name.casefold() for token in excluded)
+    ]
+    if len(candidates) != 1:
+        rendered = ", ".join(str(path) for path in candidates) or "<none>"
+        raise RuntimeError(
+            f"expected exactly one Tcl/Tk static library matching {pattern}, found: {rendered}"
+        )
+    return candidates[0]
+
+
+def prepare_tcltk_artifacts(context) -> None:
+    if context.configuration != "Release" or context.platform != "x64":
+        raise RuntimeError("experimental tkinter static pack currently supports Release|x64 only")
+    staged_dir = source_path(context, "tkinter_builtin/lib")
+    staged_tcl = staged_dir / TCL_STAGED_LIBRARY
+    staged_tcl_stub = staged_dir / TCL_STUB_STAGED_LIBRARY
+    staged_tk = staged_dir / TK_STAGED_LIBRARY
+    if staged_tcl.is_file() and staged_tcl_stub.is_file() and staged_tk.is_file():
+        context.log("using already built Tcl/Tk static archives")
+        return
+
+    ensure_tool("cl")
+    ensure_tool("nmake")
+    tcl_source = _tcl_source(context)
+    tk_source = _tk_source(context)
+    common = [
+        "nmake",
+        "/nologo",
+        "/f",
+        "makefile.vc",
+    ]
+    build_options = [
+        "OPTS=static,nomsvcrt,noembed",
+        "MACHINE=AMD64",
+    ]
+    # Tk is deliberately compiled against Tcl's stubs ABI even for a static
+    # build.  Tcl's `core` target does not produce tclstub.lib, while `shell`
+    # depends on both the core and stub archives.  The temporary tclsh is not
+    # staged or exported; invoking this upstream target avoids a fragile build
+    # directory guess or a patch to Tcl's makefile.
+    run(
+        context.log,
+        [*common, "shell", *build_options],
+        cwd=tcl_source / "win",
+        timeout=60 * 45,
+    )
+    run(
+        context.log,
+        [*common, "core", *build_options, f"TCLDIR={tcl_source}"],
+        cwd=tk_source / "win",
+        timeout=60 * 45,
+    )
+
+    tcl_library = _find_built_library(
+        tcl_source / "win",
+        "tcl90*.lib",
+        excluded=("stub", "reg", "dde", "tcl9tk"),
+    )
+    tcl_stub_library = _find_built_library(
+        tcl_source / "win",
+        "tclstub.lib",
+        excluded=(),
+    )
+    tk_library = _find_built_library(
+        tk_source / "win",
+        "tcl9tk90*.lib",
+        excluded=("stub",),
+    )
+    staged_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(tcl_library, staged_tcl)
+    shutil.copy2(tcl_stub_library, staged_tcl_stub)
+    shutil.copy2(tk_library, staged_tk)
+    context.log(
+        "staged Tcl/Tk static archives from "
+        f"{tcl_library.name}, {tcl_stub_library.name}, and {tk_library.name}"
+    )
+
+
+LIBRARY_INTEGRATION = LibraryIntegration(
+    name="tkinter",
+    source_provider="github",
+    project_name="tcltk/tcl+tcltk/tk",
+    release_version=TCLTK_RELEASE,
+    source_resolver="github-immutable-commit-pair+sha256",
+    materialized_paths=[
+        OPTIONAL_FREEZE_MARKER,
+        ZIP_RESOURCE,
+        ZIPFS_SOURCE,
+        PROVENANCE_FILE,
+        TCL_LICENSE,
+        TK_LICENSE,
+        ZLIB_LICENSE,
+        LIBTOMMATH_LICENSE,
+        INFOZIP_LICENSE,
+    ],
+    cleanup_paths=[
+        f"externals/{TCL_SOURCE_NAME}",
+        f"externals/{TK_SOURCE_NAME}",
+        "tkinter_builtin",
+        ZIP_RESOURCE,
+        OPTIONAL_FREEZE_MARKER,
+        "licenses/tkinter",
+    ],
+    python_packages=["tkinter"],
+    static_library_projects_release_x64=["_tkinter.vcxproj"],
+    builtin_module_registrations=[
+        {
+            "name": "_tkinter",
+            "pyinit": "PyInit__tkinter",
+        }
+    ],
+    staged_static_libraries_release_x64=[
+        {
+            "source_glob": f"tkinter_builtin/lib/{TK_STAGED_LIBRARY}",
+            "target_name": TK_STAGED_LIBRARY,
+        },
+        {
+            "source_glob": f"tkinter_builtin/lib/{TCL_STAGED_LIBRARY}",
+            "target_name": TCL_STAGED_LIBRARY,
+        },
+        {
+            "source_glob": f"tkinter_builtin/lib/{TCL_STUB_STAGED_LIBRARY}",
+            "target_name": TCL_STUB_STAGED_LIBRARY,
+        },
+    ],
+    python_link_dependencies_release_x64=[
+        "_tkinter.lib",
+        TK_STAGED_LIBRARY,
+        TCL_STUB_STAGED_LIBRARY,
+        TCL_STAGED_LIBRARY,
+        *TCLTK_SYSTEM_LIBRARIES,
+    ],
+    top_level_import_names=["tkinter"],
+    resource_rules=[
+        {
+            "action": "include",
+            "path": ZIP_RESOURCE,
+        }
+    ],
+    license_expression="Python-2.0 AND TCL AND Zlib AND Unlicense AND Info-ZIP",
+    license_files=[
+        CPYTHON_LICENSE,
+        TCL_LICENSE,
+        TK_LICENSE,
+        ZLIB_LICENSE,
+        LIBTOMMATH_LICENSE,
+        INFOZIP_LICENSE,
+    ],
+    smoke_tests=[
+        inline_verification_step(
+            "tcl-zipfs-no-extraction",
+            """import os
+for name in ("TCL_LIBRARY", "TK_LIBRARY", "TCLLIBPATH", "TCL9.0_TM_PATH", "TCL9_0_TM_PATH"):
+    os.environ[name] = r"C:\\Windows"
+import tkinter
+interp = tkinter.Tcl()
+assert interp.eval("info patchlevel") == "9.0.4"
+mount = interp.getvar("staticpython_tkinter_zipfs")
+assert mount == "//zipfs:/staticpython/tcltk-9.0.4"
+tcl_library = interp.getvar("tcl_library")
+tk_library = interp.getvar("tk_library")
+assert tcl_library == mount + "/tcl9.0", (tcl_library, mount)
+assert tk_library == mount + "/tk9.0", (tk_library, mount)
+auto_path = interp.tk.splitlist(interp.getvar("auto_path"))
+assert auto_path and all(path.startswith(mount + "/") for path in auto_path), auto_path
+assert interp.eval("::tcl::tm::path list") == ""
+encoding_dirs = interp.tk.splitlist(interp.eval("encoding dirs"))
+assert encoding_dirs == (mount + "/tcl9.0/encoding",), encoding_dirs
+assert interp.eval("file exists [file join $tcl_library encoding cp1252.enc]") == "1"
+assert "cp1252" in interp.tk.splitlist(interp.eval("encoding names"))
+assert interp.eval("clock format 0 -timezone :UTC -format %Y") == "1970"
+""",
+        ),
+        inline_verification_step(
+            "tk-ttk-themes",
+            """import os
+for name in ("TCL_LIBRARY", "TK_LIBRARY", "TCLLIBPATH", "TCL9.0_TM_PATH", "TCL9_0_TM_PATH"):
+    os.environ[name] = r"C:\\Windows"
+import tkinter
+from tkinter import ttk
+root = tkinter.Tk()
+try:
+    root.withdraw()
+    mount = root.tk.getvar("staticpython_tkinter_zipfs")
+    tcl_library = root.tk.getvar("tcl_library")
+    tk_library = root.tk.getvar("tk_library")
+    assert tcl_library == mount + "/tcl9.0", (tcl_library, mount)
+    assert tk_library == mount + "/tk9.0", (tk_library, mount)
+    auto_path = root.tk.splitlist(root.tk.getvar("auto_path"))
+    assert auto_path and all(path.startswith(mount + "/") for path in auto_path), auto_path
+    assert root.tk.eval("::tcl::tm::path list") == ""
+    encoding_dirs = root.tk.splitlist(root.tk.eval("encoding dirs"))
+    assert encoding_dirs == (mount + "/tcl9.0/encoding",), encoding_dirs
+    themes = set(ttk.Style(root).theme_names())
+    assert {"clam", "vista", "xpnative"} & themes
+    root.update_idletasks()
+finally:
+    root.destroy()
+""",
+        ),
+    ],
+    prepare_source_hooks=[prepare_tcltk_sources],
+    pre_patch_hooks=[patch_tkinter_sources],
+    post_patch_hooks=[patch_tkinter_project],
+    pre_build_hooks=[prepare_tcltk_artifacts],
+)

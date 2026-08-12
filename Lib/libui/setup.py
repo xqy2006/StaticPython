@@ -29,6 +29,10 @@ def __dir__():
 """
 
 
+LIBUI_COMMON_CONTROLS_MANIFEST_PRAGMA = r'''#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+'''
+
+
 def _patch_libui_init(text: str) -> str:
     text = ensure_package_markers(text, "libui")
     return replace_text_once(
@@ -75,26 +79,48 @@ def _patch_libui_declarative_app(text: str) -> str:
     return text
 
 
+def _patch_libui_native_module_text(text: str) -> str:
+    text = replace_text_once(
+        text,
+        "PyInit_core",
+        "PyInit__libui_core",
+        label="libui native module initializer",
+    )
+    text = replace_text_once(
+        text,
+        '#include "module.h"\n',
+        '#include "module.h"\n\n' + LIBUI_COMMON_CONTROLS_MANIFEST_PRAGMA,
+        label="libui static Common Controls manifest",
+    )
+    return text.replace('"core"', '"_libui_core"')
+
+
 def _patch_libui_native_module(context) -> None:
     py_module_root = source_path(context, "libui_builtin/py_module")
     if not py_module_root.exists():
         raise RuntimeError("libui native py_module source is missing")
 
-    patched = False
+    found_initializer = False
     for path in py_module_root.glob("*.[ch]"):
         if path.name == "builtin_alias.c":
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        if "PyInit_core" not in text and '"core"' not in text:
+        if (
+            "PyInit_core" not in text
+            and "PyInit__libui_core" not in text
+            and '"core"' not in text
+        ):
             continue
-        updated = text.replace("PyInit_core", "PyInit__libui_core")
-        updated = updated.replace('"core"', '"_libui_core"')
+        if "PyInit_core" in text or "PyInit__libui_core" in text:
+            found_initializer = True
+            updated = _patch_libui_native_module_text(text)
+        else:
+            updated = text.replace('"core"', '"_libui_core"')
         if updated != text:
             path.write_text(updated, encoding="utf-8", newline="\n")
             context.log(f"updated {path.relative_to(context.source_root)}")
-            patched = True
 
-    if not patched:
+    if not found_initializer:
         raise RuntimeError("libui native module initializer PyInit_core was not found")
 
     # The original module is now emitted with the final builtin name.  Keep the
@@ -164,6 +190,7 @@ LIBRARY_INTEGRATION = pypi_library(
         "oleacc.lib",
         "uuid.lib",
         "windowscodecs.lib",
+        "gdi32.lib",
         "_libui_core.lib",
     ],
     post_patch_hooks=[patch_libui_sources],

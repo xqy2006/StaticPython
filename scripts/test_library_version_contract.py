@@ -45,6 +45,49 @@ def file_info(
 
 
 class LibraryVersionContractTests(unittest.TestCase):
+    def test_historical_alias_is_discovered_outside_current_release_roots(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        payload = {"releases": {"1.0": [file_info("attrs-1.0.tar.gz")]}}
+        result = contract.discover_contract(
+            config,
+            ["3.13.15"],
+            selected_libraries=["attr"],
+            payload_loader=lambda _name: payload,
+        )
+        self.assertEqual(list(result["libraries"]), ["attr"])
+        self.assertNotIn("attr", config["profiles"]["full"]["third_party_libraries"])
+
+    def test_default_discovery_includes_current_and_historical_catalogs(self) -> None:
+        config = {
+            "third_party_library_catalog": {
+                "libraries": [
+                    {
+                        "name": "current",
+                        "source_provider": "pypi",
+                        "overlay_entries": ["Lib/current"],
+                    },
+                    {
+                        "name": "historical",
+                        "source_provider": "pypi",
+                        "overlay_entries": ["Lib/historical"],
+                    },
+                ]
+            },
+            "profiles": {
+                "full": {
+                    "third_party_libraries": ["current"],
+                    "historical_library_contract_libraries": ["historical"],
+                }
+            },
+        }
+        payload = {"releases": {"1.0": [file_info("demo-1.0.tar.gz")]}}
+        result = contract.discover_contract(
+            config,
+            ["3.13.15"],
+            payload_loader=lambda _name: payload,
+        )
+        self.assertEqual(list(result["libraries"]), ["current", "historical"])
+
     def test_contract_excludes_prerelease_dev_and_yanked_only_versions(self) -> None:
         integration = libs.LibraryIntegration(
             name="demo",

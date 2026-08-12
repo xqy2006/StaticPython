@@ -16,6 +16,9 @@ if str(SCRIPTS_ROOT) not in sys.path:
 
 import verify_pack_with_runtime_sdk as verifier
 
+sys.path.insert(0, str(REPO_ROOT))
+import build
+
 
 def _file_records(root: Path) -> list[dict]:
     return [
@@ -142,6 +145,19 @@ class VerifyPackWithRuntimeSDKTests(unittest.TestCase):
             archive.writestr("lib/DEMO.txt", "two")
         with self.assertRaisesRegex(RuntimeError, "case-colliding"):
             verifier.safe_extract_zip(collision, self.root / "extract-collision")
+
+        for index, unsafe_name in enumerate(
+            ("C:evil", "dir/file:stream", "NUL.txt", "trailing.")
+        ):
+            with self.subTest(unsafe_name=unsafe_name):
+                archive_path = self.root / f"windows-unsafe-{index}.zip"
+                with ZipFile(archive_path, "w") as archive:
+                    archive.writestr(unsafe_name, "bad")
+                with self.assertRaisesRegex(RuntimeError, "unsafe ZIP member"):
+                    verifier.safe_extract_zip(
+                        archive_path,
+                        self.root / f"extract-windows-unsafe-{index}",
+                    )
 
     def test_runtime_and_pack_hashes_and_provenance_are_validated(self) -> None:
         runtime_root, runtime = self._make_runtime()
@@ -281,6 +297,27 @@ class VerifyPackWithRuntimeSDKTests(unittest.TestCase):
             ("google", "native", "zope"),
         )
 
+    def test_verification_root_must_be_selected(self) -> None:
+        runtime_root, runtime = self._make_runtime()
+        pack_root, _metadata = self._make_pack(runtime)
+        pack_archive = self.root / "demo.zip"
+        with ZipFile(pack_archive, "w") as archive:
+            for path in pack_root.rglob("*"):
+                if path.is_file():
+                    archive.write(path, path.relative_to(pack_root).as_posix())
+        args = mock.Mock(
+            runtime_sdk=runtime_root,
+            pack=[pack_archive],
+            root_pack=["missing"],
+            repo_root=REPO_ROOT,
+            work_dir=self.root / "work",
+            report_json=self.root / "report.json",
+            build_workers=1,
+            skip_group=[],
+        )
+        with self.assertRaisesRegex(RuntimeError, "verification root is not selected"):
+            verifier.verify_assets(args)
+
     def test_smoke_sources_are_embedded_with_virtual_script_paths(self) -> None:
         script = self.root / "smoke.py"
         script.write_text("assert __name__ == '__main__'\n", encoding="utf-8")
@@ -346,6 +383,12 @@ class VerifyPackWithRuntimeSDKTests(unittest.TestCase):
             ["comdlg32.lib", "user32.lib", "kernel32.lib", "advapi32.lib", "shell32.lib"],
         )
 
+    def test_windows_link_library_allowlist_matches_the_builder(self) -> None:
+        self.assertEqual(
+            verifier.WINDOWS_LINK_LIBRARY_NAMES,
+            build.WINDOWS_SYSTEM_LIBRARY_NAMES | build.WINDOWS_SDK_LIBRARY_NAMES,
+        )
+
     def test_dependency_parser_is_stable(self) -> None:
         output = """
 Dump of file demo.exe
@@ -359,6 +402,21 @@ Dump of file demo.exe
   Summary
 """
         self.assertEqual(verifier._dependency_names(output), ["KERNEL32.dll", "USER32.dll"])
+
+    def test_failure_log_includes_structured_smoke_details(self) -> None:
+        line = verifier._failure_log_line(
+            2,
+            {
+                "integration": "tkinter",
+                "name": "tcl-zipfs-no-extraction",
+                "returncode": 1,
+                "stderr": "Tcl_Init error",
+            },
+        )
+        self.assertTrue(line.startswith("[pack-sdk-verify] issue 2: "))
+        payload = json.loads(line.split(": ", 1)[1])
+        self.assertEqual(payload["integration"], "tkinter")
+        self.assertEqual(payload["stderr"], "Tcl_Init error")
 
     def test_existing_msvc_developer_environment_is_reused(self) -> None:
         environment = {

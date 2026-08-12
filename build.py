@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -11,9 +12,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zlib
 import xml.etree.ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile, ZipInfo
@@ -38,6 +40,12 @@ from libs import (
     run_post_patch_hooks,
 )
 from tools import resolve_tool_exe
+from pack_evidence import (
+    bind_promoted_pack_evidence,
+    pack_metadata_without_verification_sha256,
+    pack_payload_manifest_sha256,
+    read_pack_metadata,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -49,8 +57,36 @@ WORK_CACHE_ROOT = REPO_ROOT / ".vendor-stage"
 MANIFEST_PATH = REPO_ROOT / "manifest.json"
 CONFIG_PATH = REPO_ROOT / "config.json"
 CPYTHON_ARCHIVE_URL_TEMPLATE = "https://github.com/python/cpython/archive/refs/tags/v{version}.zip"
+CPYTHON_CODELOAD_URL_TEMPLATE = "https://codeload.github.com/python/cpython/zip/refs/tags/v{version}"
+CPYTHON_PYTHON_ORG_URL_TEMPLATE = (
+    "https://www.python.org/ftp/python/{base_version}/Python-{version}.tgz"
+)
 CPYTHON_SOURCE_PROVENANCE_RELATIVE_PATH = Path(".staticpython-cpython-source.json")
 DEFAULT_CPYTHON_VERSION = "3.13.2"
+DOWNLOAD_MAX_ATTEMPTS = 4
+DOWNLOAD_RETRY_DELAYS_SECONDS = (1, 2, 4)
+TRANSIENT_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+CPYTHON_SOURCE_DEPS_ARCHIVE_URL_TEMPLATES = (
+    "https://github.com/python/cpython-source-deps/archive/refs/tags/{tag}.zip",
+    "https://codeload.github.com/python/cpython-source-deps/zip/refs/tags/{tag}",
+)
+CPYTHON_CUSTOM_SOURCE_DEPENDENCY_PREFIXES = (
+    "libffi-",
+    "openssl-",
+    "tcl-",
+    "tcl-core-",
+    "tix-",
+    "tk-",
+)
+CPYTHON_SOURCE_DEPENDENCY_MARKERS = {
+    "bzip2-": ("bzlib.c", "bzlib.h"),
+    "mpdecimal-": ("libmpdec/basearith.c",),
+    "sqlite-": ("sqlite3.c", "sqlite3.h"),
+    "xz-": ("src/liblzma/api/lzma.h",),
+    "zlib-ng-": ("zlib-ng.h.in",),
+    "zlib-": ("adler32.c", "zlib.h"),
+    "zstd-": ("lib/zstd.h",),
+}
 WINDOWS_RESERVED_BASENAMES = {
     "CON",
     "PRN",
@@ -1519,6 +1555,12 @@ def _c_identifier(value: str) -> str:
     return identifier
 
 
+def staticpython_pack_frozen_symbol(pack_name: str, pack_version: str, module_name: str) -> str:
+    """Return a pack-private symbol that cannot alias CPython's module-name encoding."""
+    identity = "\0".join((pack_name, pack_version, module_name)).encode("utf-8")
+    return f"_Py_M__staticpython_pack_{hashlib.sha256(identity).hexdigest()}"
+
+
 def staticpython_pack_asset_name(
     name: str,
     version: str,
@@ -1725,15 +1767,30 @@ def _write_pack_descriptor_source(
     frozen_dir = source_dir / "frozen"
     source_dir.mkdir(parents=True, exist_ok=True)
     frozen_dir.mkdir(parents=True, exist_ok=True)
+    pack_frozen_records: list[dict] = []
     for record in frozen_records:
-        shutil.copy2(record["header"], frozen_dir / record["header"].name)
+        copied_header = frozen_dir / record["header"].name
+        shutil.copy2(record["header"], copied_header)
+        copied_record = dict(record)
+        copied_record["symbol"] = staticpython_pack_frozen_symbol(
+            integration.name,
+            integration.release_version,
+            record["name"],
+        )
+        copied_record["header"] = copied_header
+        rewrite_frozen_header_symbol(
+            copied_header,
+            record["symbol"],
+            copied_record["symbol"],
+        )
+        pack_frozen_records.append(copied_record)
 
-    include_lines = [f'#include "frozen/{record["header"].name}"' for record in frozen_records]
+    include_lines = [f'#include "frozen/{record["header"].name}"' for record in pack_frozen_records]
     frozen_lines = [
         "    STATICPYTHON_FROZEN_ENTRY("
         f"{_c_bytes_literal(record['name'])}, {record['symbol']}, {record['size']}, "
         f"{1 if record['is_package'] else 0}),"
-        for record in frozen_records
+        for record in pack_frozen_records
     ]
     builtin_lines = []
     builtin_externs = []
@@ -1941,6 +1998,42 @@ def export_library_pack(
                     for key in ("name", "kind", "status", "skip_group")
                     if key in record
                 })
+        pack_verification_evidence: dict[str, str] = {}
+        if (
+            verification_status == "passed"
+            and isinstance(verification_report, dict)
+            and verification_report.get("kind") == "staticpython-pack-sdk-verification"
+        ):
+            if verification_report.get("status") != "passed":
+                raise RuntimeError("cannot promote a pack from a failed SDK verification report")
+            provisional_records = verification_report.get("packs")
+            if not isinstance(provisional_records, list):
+                raise RuntimeError("SDK verification report has no provisional pack records")
+            matching_records = [
+                record
+                for record in provisional_records
+                if isinstance(record, dict)
+                and record.get("name") == integration.name
+                and record.get("version") == integration.release_version
+            ]
+            if len(matching_records) != 1:
+                raise RuntimeError(
+                    f"pack {integration.name} {integration.release_version} has "
+                    f"{len(matching_records)} matching provisional verification records"
+                )
+            provisional_record = matching_records[0]
+            evidence_fields = {
+                "provisional_pack_sha256": "sha256",
+                "payload_manifest_sha256": "payload_manifest_sha256",
+                "metadata_without_verification_sha256": "metadata_without_verification_sha256",
+            }
+            for output_name, report_name in evidence_fields.items():
+                value = provisional_record.get(report_name)
+                if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                    raise RuntimeError(
+                        f"pack {integration.name} provisional verification record has invalid {report_name}"
+                    )
+                pack_verification_evidence[output_name] = value
         metadata = {
             "schema_version": STATICPYTHON_PACK_SCHEMA_VERSION,
             "kind": "staticpython-library-pack",
@@ -1999,6 +2092,7 @@ def export_library_pack(
             "verification": {
                 "status": verification_status,
                 "smoke_tests": smoke_test_records,
+                **pack_verification_evidence,
             },
             "files": artifact_files,
         }
@@ -2550,6 +2644,38 @@ def _is_runtime_resource_file(path: Path, relative: str) -> bool:
 
 
 def _runtime_resource_candidate_paths(integration) -> list[str]:
+    resource_rules = getattr(integration, "resource_rules", [])
+    if resource_rules:
+        candidates: list[str] = []
+        for index, rule in enumerate(resource_rules, start=1):
+            if not isinstance(rule, dict):
+                raise RuntimeError(
+                    f"{integration.name} resource rule #{index} must be an object"
+                )
+            unknown = sorted(set(rule) - {"action", "path"})
+            if unknown:
+                raise RuntimeError(
+                    f"{integration.name} resource rule #{index} has unsupported keys: "
+                    + ", ".join(unknown)
+                )
+            if rule.get("action") != "include":
+                raise RuntimeError(
+                    f"{integration.name} resource rule #{index} action must be 'include'"
+                )
+            relative = rule.get("path")
+            if not isinstance(relative, str) or not relative:
+                raise RuntimeError(
+                    f"{integration.name} resource rule #{index} requires a non-empty path"
+                )
+            normalized = relative.replace("\\", "/")
+            parts = PurePosixPath(normalized)
+            if parts.is_absolute() or any(part in {"", ".", ".."} for part in parts.parts):
+                raise RuntimeError(
+                    f"{integration.name} resource rule #{index} has an unsafe path: {relative!r}"
+                )
+            candidates.append(normalized)
+        return list(dict.fromkeys(candidates))
+
     candidates: list[str] = []
     for relative in getattr(integration, "materialized_paths", []):
         candidates.append(relative)
@@ -3696,11 +3822,38 @@ def download_file(url: str, destination: Path, *, force: bool = False) -> None:
         log(f"using cached download {destination}")
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
-    log(f"downloading {url}")
     temporary = Path(str(destination) + ".tmp")
-    with urlopen(url) as response, temporary.open("wb") as out_file:
-        shutil.copyfileobj(response, out_file)
-    temporary.replace(destination)
+    for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
+        if temporary.exists():
+            temporary.unlink()
+        log(f"downloading {url} (attempt {attempt}/{DOWNLOAD_MAX_ATTEMPTS})")
+        try:
+            with urlopen(url, timeout=60) as response, temporary.open("wb") as out_file:
+                shutil.copyfileobj(response, out_file)
+            temporary.replace(destination)
+            return
+        except HTTPError as exc:
+            if temporary.exists():
+                temporary.unlink()
+            if exc.code not in TRANSIENT_HTTP_STATUS_CODES or attempt == DOWNLOAD_MAX_ATTEMPTS:
+                raise
+            delay = DOWNLOAD_RETRY_DELAYS_SECONDS[attempt - 1]
+            log(
+                f"transient download failure from {url} on attempt "
+                f"{attempt}/{DOWNLOAD_MAX_ATTEMPTS}: {exc}; retrying in {delay}s"
+            )
+            time.sleep(delay)
+        except (URLError, OSError, http.client.HTTPException) as exc:
+            if temporary.exists():
+                temporary.unlink()
+            if attempt == DOWNLOAD_MAX_ATTEMPTS:
+                raise
+            delay = DOWNLOAD_RETRY_DELAYS_SECONDS[attempt - 1]
+            log(
+                f"transient download failure from {url} on attempt "
+                f"{attempt}/{DOWNLOAD_MAX_ATTEMPTS}: {exc}; retrying in {delay}s"
+            )
+            time.sleep(delay)
 
 
 def validate_source_archive(archive_path: Path) -> None:
@@ -3740,15 +3893,23 @@ def download_first_available(urls: list[str], destination: Path) -> str:
 
     errors: list[str] = []
     for url in urls:
-        for attempt in range(1, 3):
-            try:
-                download_file(url, destination, force=True)
-                validate_source_archive(destination)
-                return url
-            except (BadZipFile, EOFError, HTTPError, OSError, RuntimeError, tarfile.TarError, URLError) as exc:
-                errors.append(f"{url} (attempt {attempt}/2): {exc}")
-                _cleanup_failed_download(destination)
-                log(f"download failed from {url} on attempt {attempt}/2: {exc}")
+        try:
+            download_file(url, destination, force=True)
+            validate_source_archive(destination)
+            return url
+        except (
+            BadZipFile,
+            EOFError,
+            HTTPError,
+            OSError,
+            RuntimeError,
+            tarfile.TarError,
+            URLError,
+            http.client.HTTPException,
+        ) as exc:
+            errors.append(f"{url}: {exc}")
+            _cleanup_failed_download(destination)
+            log(f"download failed from {url}: {exc}")
     raise RuntimeError("all download sources failed:\n" + "\n".join(errors))
 
 
@@ -3804,6 +3965,10 @@ def safe_extract_zip(archive: ZipFile, destination_root: Path) -> None:
 
 def safe_extract_tar(archive: tarfile.TarFile, destination_root: Path) -> None:
     for member in archive.getmembers():
+        if not (member.isfile() or member.isdir()):
+            raise RuntimeError(
+                f"tar archive contains unsupported link or special member: {member.name}"
+            )
         if ensure_safe_archive_member(destination_root, member.name):
             archive.extract(member, destination_root)
 
@@ -3860,10 +4025,77 @@ def download_cpython_source(
     reuse_existing: bool = False,
 ) -> Path:
     download_root.mkdir(parents=True, exist_ok=True)
-    archive_url = source_archive_url or CPYTHON_ARCHIVE_URL_TEMPLATE.format(version=version)
-    archive_path = download_root / f"cpython-v{version}.zip"
-    download_file(archive_url, archive_path)
-    source_root = extract_zip_archive(archive_path, download_root, reuse_existing=reuse_existing)
+    if source_archive_url is not None:
+        lower_url = source_archive_url.partition("?")[0].lower()
+        archive_suffix = next(
+            (
+                suffix
+                for suffix in (".tar.gz", ".tgz", ".tar", ".zip")
+                if lower_url.endswith(suffix)
+            ),
+            ".zip",
+        )
+        candidates = [
+            (source_archive_url, download_root / f"cpython-v{version}-custom{archive_suffix}")
+        ]
+    else:
+        base_version = Version(version).base_version
+        candidates = [
+            (
+                CPYTHON_ARCHIVE_URL_TEMPLATE.format(version=version),
+                download_root / f"cpython-v{version}.zip",
+            ),
+            (
+                CPYTHON_CODELOAD_URL_TEMPLATE.format(version=version),
+                download_root / f"cpython-v{version}-codeload.zip",
+            ),
+            (
+                CPYTHON_PYTHON_ORG_URL_TEMPLATE.format(
+                    base_version=base_version,
+                    version=version,
+                ),
+                download_root / f"cpython-v{version}-python-org.tgz",
+            ),
+        ]
+
+    errors: list[str] = []
+    archive_url: str | None = None
+    archive_path: Path | None = None
+    for candidate_url, candidate_path in candidates:
+        try:
+            download_file(candidate_url, candidate_path)
+            validate_source_archive(candidate_path)
+        except (
+            BadZipFile,
+            EOFError,
+            HTTPError,
+            OSError,
+            RuntimeError,
+            tarfile.TarError,
+            URLError,
+            http.client.HTTPException,
+        ) as exc:
+            _cleanup_failed_download(candidate_path)
+            errors.append(f"{candidate_url}: {exc}")
+            log(f"CPython source download failed from {candidate_url}: {exc}")
+            continue
+        archive_url = candidate_url
+        archive_path = candidate_path
+        break
+    if archive_url is None or archive_path is None:
+        raise RuntimeError("all CPython source downloads failed:\n" + "\n".join(errors))
+
+    final_name = f"cpython-{version}"
+    existing_root = download_root / final_name
+    if reuse_existing and (existing_root / "Include" / "patchlevel.h").is_file():
+        source_root = existing_root
+        log(f"reusing existing extracted source tree at {source_root}")
+    else:
+        source_root = extract_source_archive(
+            archive_path,
+            download_root,
+            final_name=final_name,
+        )
     commit = resolve_cpython_tag_commit(version) if source_archive_url is None else None
     write_cpython_source_provenance(
         source_root,
@@ -3925,6 +4157,80 @@ def platform_output_dir_name(platform: str) -> str:
 
 def get_pcbuild_output_dir(source_root: Path, platform: str) -> Path:
     return source_root / "PCbuild" / platform_output_dir_name(platform)
+
+
+def generated_pyconfig_header_path(
+    source_root: Path,
+    version_info: tuple[int, int, int],
+    configuration: str,
+    platform: str,
+    project_name: str,
+) -> Path:
+    arch_name = {
+        "x64": "amd64",
+        "Win32": "win32",
+        "ARM64": "arm64",
+        "ARM": "arm32",
+    }.get(platform, platform.casefold())
+    return (
+        source_root
+        / "PCbuild"
+        / "obj"
+        / f"{version_info[0]}{version_info[1]}{arch_name}_{configuration}"
+        / project_name
+        / "pyconfig.h"
+    )
+
+
+def stage_pack_build_pyconfig_header(
+    source_root: Path,
+    version_info: tuple[int, int, int],
+    configuration: str,
+    platform: str,
+) -> Path:
+    """Populate the pythoncore include location expected by pyproject.props.
+
+    Pack-only builds intentionally do not build pythoncore.  The already-built
+    freeze tool generated the same configuration header in its own intermediate
+    directory, so copy that audited build input into pythoncore's expected path.
+    """
+    target = generated_pyconfig_header_path(
+        source_root,
+        version_info,
+        configuration,
+        platform,
+        "pythoncore",
+    )
+    candidates = [
+        get_pcbuild_output_dir(source_root, platform) / "pyconfig.h",
+        generated_pyconfig_header_path(
+            source_root,
+            version_info,
+            configuration,
+            platform,
+            "_freeze_module",
+        ),
+        target,
+        source_root / "PC" / "pyconfig.h",
+    ]
+    source = next(
+        (candidate for candidate in candidates if candidate.is_file() and candidate.stat().st_size),
+        None,
+    )
+    if source is None:
+        rendered = "\n".join(f"- {candidate}" for candidate in candidates)
+        raise RuntimeError(
+            "pack-only build did not produce a usable pyconfig.h; checked:\n"
+            + rendered
+        )
+    if source.resolve() != target.resolve():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        log(
+            "staged pack-build pyconfig.h from "
+            f"{source.relative_to(source_root)} to {target.relative_to(source_root)}"
+        )
+    return target
 
 
 def find_external_source(source_root: Path, prefix: str, *, require_file: str) -> Path | None:
@@ -4579,6 +4885,12 @@ def build_pack_static_libraries(
 ) -> None:
     """Build only native projects owned by selected third-party packs."""
     pcbuild = source_root / "PCbuild"
+    stage_pack_build_pyconfig_header(
+        source_root,
+        version_info,
+        configuration,
+        platform,
+    )
     run_pre_build_hooks(
         integrations,
         make_library_hook_context(
@@ -4613,35 +4925,284 @@ def build_pack_static_libraries(
     log("pack-only build intentionally skipped pythoncore.vcxproj and python.vcxproj")
 
 
+def _pack_dependency_closure(
+    pack_by_name: dict[str, tuple[Path, dict]],
+    root_names: list[str],
+) -> list[tuple[Path, dict]]:
+    selected: set[str] = set()
+    visiting: set[str] = set()
+    ordered: list[tuple[Path, dict]] = []
+
+    def visit(name: str) -> None:
+        key = name.casefold()
+        if key in selected:
+            return
+        if key in visiting:
+            # Cyclic dependency components are supported by StaticPythonPackV1.
+            return
+        record = pack_by_name.get(key)
+        if record is None:
+            raise RuntimeError(f"pack dependency is missing from the provisional set: {name}")
+        visiting.add(key)
+        for dependency in record[1].get("dependencies", []):
+            visit(str(dependency))
+        visiting.remove(key)
+        selected.add(key)
+        ordered.append(record)
+
+    for name in root_names:
+        visit(name)
+    return ordered
+
+
+def _is_native_pack(metadata: dict) -> bool:
+    return bool(metadata.get("libraries") or metadata.get("builtin_modules"))
+
+
+def pack_verification_groups(
+    provisional_packs: list[Path],
+    root_names: list[str],
+) -> list[dict]:
+    """Partition release roots into independently executable dependency closures.
+
+    Release families are storage shards, not runtime compositions.  Pure-Python
+    roots can safely share one harness when their union is compatible.  Every
+    root whose transitive closure contains native code gets its own harness so
+    one native library cannot make unrelated packs fail before CPython starts.
+    """
+    records: list[tuple[Path, dict]] = []
+    by_name: dict[str, tuple[Path, dict]] = {}
+    for path in provisional_packs:
+        metadata = read_pack_metadata(path)
+        name = metadata.get("name")
+        if not isinstance(name, str) or not name:
+            raise RuntimeError(f"provisional pack has no valid name: {path}")
+        key = name.casefold()
+        if key in by_name:
+            raise RuntimeError(f"provisional pack set repeats name: {name}")
+        record = (path, metadata)
+        records.append(record)
+        by_name[key] = record
+
+    canonical_roots: list[str] = []
+    seen_roots: set[str] = set()
+    for requested in root_names:
+        key = requested.casefold()
+        record = by_name.get(key)
+        if record is None:
+            raise RuntimeError(f"verification root is missing from the provisional set: {requested}")
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+        canonical_roots.append(record[1]["name"])
+    if not canonical_roots:
+        canonical_roots = [metadata["name"] for _path, metadata in records]
+
+    native_groups: list[dict] = []
+    pure_roots: list[str] = []
+    pure_pack_keys: set[str] = set()
+    for root_name in canonical_roots:
+        closure = _pack_dependency_closure(by_name, [root_name])
+        if any(_is_native_pack(metadata) for _path, metadata in closure):
+            native_groups.append({
+                "roots": [root_name],
+                "packs": [path for path, _metadata in closure],
+            })
+            continue
+        pure_roots.append(root_name)
+        pure_pack_keys.update(metadata["name"].casefold() for _path, metadata in closure)
+
+    groups: list[dict] = []
+    if pure_roots:
+        groups.append({
+            "roots": pure_roots,
+            "packs": [
+                path
+                for path, metadata in records
+                if metadata["name"].casefold() in pure_pack_keys
+            ],
+        })
+    groups.extend(native_groups)
+    return groups
+
+
+def _aggregate_pack_verification_reports(reports: list[dict]) -> dict:
+    if not reports:
+        raise RuntimeError("pack verification produced no reports")
+    if len(reports) == 1:
+        return reports[0]
+
+    runtime = reports[0].get("runtime_sdk")
+    packs: dict[tuple[str, str], dict] = {}
+    smokes: dict[tuple[str, str], dict] = {}
+    closures: list[dict] = []
+    dependencies: set[str] = set()
+    executable_hashes: list[str] = []
+    map_hashes: list[str] = []
+    verification_roots: list[str] = []
+    seen_roots: set[str] = set()
+    for report in reports:
+        if report.get("status") != "passed" or report.get("failures") != []:
+            raise RuntimeError("cannot aggregate a failed SDK pack verification report")
+        if report.get("runtime_sdk") != runtime:
+            raise RuntimeError("SDK pack verification reports disagree on runtime provenance")
+        roots = report.get("verification_roots")
+        if (
+            not isinstance(roots, list)
+            or not roots
+            or any(not isinstance(root, str) or not root for root in roots)
+        ):
+            raise RuntimeError("SDK pack verification report has no verification roots")
+        for root in roots:
+            key = root.casefold()
+            if key in seen_roots:
+                raise RuntimeError(f"SDK pack verification root is repeated: {root}")
+            seen_roots.add(key)
+            verification_roots.append(root)
+        report_pack_names = {
+            record.get("name")
+            for record in report.get("packs", [])
+            if isinstance(record, dict)
+        }
+        if any(root not in report_pack_names for root in roots):
+            raise RuntimeError("SDK pack verification roots are not present in their closure")
+        for record in report.get("packs", []):
+            if not isinstance(record, dict):
+                raise RuntimeError("SDK pack verification report has an invalid pack record")
+            identity = (record.get("name"), record.get("version"))
+            previous = packs.get(identity)
+            if previous is not None and previous != record:
+                raise RuntimeError(f"SDK verification reports disagree on pack {identity!r}")
+            packs[identity] = record
+        for record in report.get("integration_smoke_tests", []):
+            if not isinstance(record, dict):
+                raise RuntimeError("SDK pack verification report has an invalid smoke record")
+            normalized_record = dict(record)
+            # A dependency can be exercised by more than one isolated native
+            # closure.  Wall-clock duration is diagnostic rather than
+            # identity evidence and will naturally differ between those runs.
+            # Drop it from the aggregate so otherwise identical passing smoke
+            # evidence remains deterministic.
+            for diagnostic_field in ("duration_seconds", "stdout", "stderr"):
+                normalized_record.pop(diagnostic_field, None)
+            identity = (record.get("integration"), record.get("name"))
+            previous = smokes.get(identity)
+            if previous is not None and previous != normalized_record:
+                raise RuntimeError(f"SDK verification reports disagree on smoke {identity!r}")
+            smokes[identity] = normalized_record
+        pe_audit = report.get("pe_audit")
+        if not isinstance(pe_audit, dict) or pe_audit.get("status") != "passed":
+            raise RuntimeError("SDK pack verification report has no passed PE audit")
+        dependencies.update(str(name) for name in pe_audit.get("dependencies", []))
+        executable_hashes.append(report["executable_sha256"])
+        map_hashes.append(pe_audit["map_sha256"])
+        closures.append({
+            "roots": roots,
+            "packs": sorted(report_pack_names, key=str.casefold),
+            "executable_sha256": report["executable_sha256"],
+            "map_sha256": pe_audit["map_sha256"],
+            "pe_dependencies": pe_audit["dependencies"],
+        })
+
+    aggregate_executable_sha = hashlib.sha256(
+        "\n".join(executable_hashes).encode("ascii")
+    ).hexdigest()
+    aggregate_map_sha = hashlib.sha256(
+        "\n".join(map_hashes).encode("ascii")
+    ).hexdigest()
+    return {
+        "schema_version": 1,
+        "kind": "staticpython-pack-sdk-verification",
+        "verification_mode": "dependency-closure-set",
+        "status": "passed",
+        "runtime_sdk": runtime,
+        "verification_roots": sorted(verification_roots, key=str.casefold),
+        "packs": sorted(
+            packs.values(),
+            key=lambda record: (record["name"].casefold(), record["version"]),
+        ),
+        "namespace_packages": sorted({
+            namespace
+            for report in reports
+            for namespace in report.get("namespace_packages", [])
+        }),
+        "executable_sha256": aggregate_executable_sha,
+        "pe_audit": {
+            "status": "passed",
+            "dependencies": sorted(dependencies, key=str.casefold),
+            "forbidden_dependencies": [],
+            "non_system_dependencies": [],
+            "forbidden_entry_symbols": [],
+            "main_object_records": [],
+            "failures": [],
+            "executable_sha256": aggregate_executable_sha,
+            "map_sha256": aggregate_map_sha,
+            "closure_audits": closures,
+        },
+        "integration_smoke_tests": sorted(
+            smokes.values(),
+            key=lambda record: (
+                str(record["integration"]).casefold(),
+                str(record["name"]).casefold(),
+            ),
+        ),
+        "failures": [],
+        "closure_verifications": closures,
+    }
+
+
 def verify_pack_only_with_runtime_sdk(
     source_root: Path,
     runtime_sdk: Path,
     provisional_packs: list[Path],
     host_python: str,
     build_workers: int | None,
+    root_names: list[str] | None = None,
 ) -> dict:
     report_path = source_root / "PCbuild" / "staticpython-pack-verify-report.json"
-    work_dir = source_root / "PCbuild" / "staticpython-pack-verify"
-    command = [
-        host_python,
-        str(REPO_ROOT / "scripts" / "verify_pack_with_runtime_sdk.py"),
-        "--runtime-sdk",
-        str(runtime_sdk),
-        "--repo-root",
-        str(REPO_ROOT),
-        "--work-dir",
-        str(work_dir),
-        "--report-json",
-        str(report_path),
-    ]
-    for pack in provisional_packs:
-        command.extend(["--pack", str(pack)])
-    if build_workers is not None:
-        command.extend(["--build-workers", str(build_workers)])
-    run(command, cwd=REPO_ROOT)
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    if not isinstance(report, dict) or report.get("status") != "passed":
-        raise RuntimeError("runtime SDK pack verification did not produce a passed report")
+    work_root = source_root / "PCbuild" / "staticpython-pack-verify"
+    groups = pack_verification_groups(provisional_packs, root_names or [])
+    reports: list[dict] = []
+    for index, group in enumerate(groups, start=1):
+        group_work_dir = work_root if len(groups) == 1 else work_root / f"closure-{index:04d}"
+        group_report_path = (
+            report_path
+            if len(groups) == 1
+            else source_root / "PCbuild" / f"staticpython-pack-verify-report-{index:04d}.json"
+        )
+        command = [
+            host_python,
+            str(REPO_ROOT / "scripts" / "verify_pack_with_runtime_sdk.py"),
+            "--runtime-sdk",
+            str(runtime_sdk),
+            "--repo-root",
+            str(REPO_ROOT),
+            "--work-dir",
+            str(group_work_dir),
+            "--report-json",
+            str(group_report_path),
+        ]
+        for root_name in group["roots"]:
+            command.extend(["--root-pack", root_name])
+        for pack in group["packs"]:
+            command.extend(["--pack", str(pack)])
+        if build_workers is not None:
+            command.extend(["--build-workers", str(build_workers)])
+        log(
+            f"verifying pack closure {index}/{len(groups)}: "
+            + ", ".join(group["roots"])
+        )
+        run(command, cwd=REPO_ROOT)
+        report = json.loads(group_report_path.read_text(encoding="utf-8"))
+        if not isinstance(report, dict) or report.get("status") != "passed":
+            raise RuntimeError("runtime SDK pack verification did not produce a passed report")
+        reports.append(report)
+    report = _aggregate_pack_verification_reports(reports)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     return report
 
 
@@ -4699,15 +5260,77 @@ def export_built_python(exe_path: Path, output_dir: Path, version_full: str, pla
     return destination
 
 
-def maybe_get_externals(source_root: Path) -> None:
+def cpython_source_dependency_tags(source_root: Path) -> list[str]:
     script = source_root / "PCbuild" / "get_externals.bat"
     text = script.read_text(encoding="utf-8", errors="ignore")
-    args = ["cmd", "/c", "get_externals.bat"]
-    if "--no-openssl" in text:
-        args.append("--no-openssl")
-    if "--no-libffi" in text:
-        args.append("--no-libffi")
-    run(args, cwd=source_root / "PCbuild")
+    tags: list[str] = []
+    for line in text.splitlines():
+        match = re.search(
+            r"\bset\s+libraries\s*=\s*%libraries%\s+([A-Za-z0-9][A-Za-z0-9._+-]*)",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            continue
+        tag = match.group(1)
+        if tag.lower().startswith(CPYTHON_CUSTOM_SOURCE_DEPENDENCY_PREFIXES):
+            continue
+        if tag not in tags:
+            tags.append(tag)
+    if not tags:
+        raise RuntimeError(f"could not resolve CPython source dependencies from {script}")
+    return tags
+
+
+def cpython_source_dependency_markers(tag: str) -> tuple[str, ...]:
+    for prefix, markers in CPYTHON_SOURCE_DEPENDENCY_MARKERS.items():
+        if tag.lower().startswith(prefix):
+            return markers
+    raise RuntimeError(
+        "CPython added an unreviewed source dependency to PCbuild/get_externals.bat: "
+        f"{tag}. Add strict content markers before enabling it."
+    )
+
+
+def source_dependency_is_complete(path: Path, markers: tuple[str, ...]) -> bool:
+    return all((path / Path(marker)).is_file() for marker in markers)
+
+
+def maybe_get_externals(source_root: Path) -> None:
+    """Materialize CPython's source dependencies with retries and a mirror.
+
+    Upstream get_externals.bat runs every fetch inside a parenthesized loop and
+    consequently returns success when an individual get_external.py invocation
+    fails.  That turns a transient GitHub outage into a much later compiler
+    error (typically a missing zlib.h).  StaticPython owns OpenSSL and libffi
+    source preparation, and optional tkinter owns Tcl/Tk, so fetch only the
+    remaining source dependencies and validate them before compilation.
+    """
+    externals = source_root / "externals"
+    externals.mkdir(parents=True, exist_ok=True)
+    cache_root = DOWNLOAD_ROOT / "cpython-source-deps"
+
+    for tag in cpython_source_dependency_tags(source_root):
+        markers = cpython_source_dependency_markers(tag)
+        destination = externals / tag
+        if source_dependency_is_complete(destination, markers):
+            log(f"using existing CPython source dependency {tag}")
+            continue
+        if destination.exists():
+            log(f"discarding incomplete CPython source dependency {destination}")
+            shutil.rmtree(destination)
+
+        archive_path = cache_root / f"{tag}.zip"
+        urls = [template.format(tag=tag) for template in CPYTHON_SOURCE_DEPS_ARCHIVE_URL_TEMPLATES]
+        used_source = download_first_available(urls, archive_path)
+        extract_source_archive(archive_path, externals, final_name=tag)
+        missing = [marker for marker in markers if not (destination / Path(marker)).is_file()]
+        if missing:
+            raise RuntimeError(
+                f"downloaded CPython source dependency {tag} is incomplete; missing: "
+                + ", ".join(missing)
+            )
+        log(f"materialized CPython source dependency {tag} from {used_source}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -5150,8 +5773,9 @@ def main() -> int:
                         provisional_packs,
                         args.host_python,
                         build_workers,
+                        [integration.name for integration in output_pack_integrations],
                     )
-            export_library_packs(
+            exported_packs = export_library_packs(
                 source_root,
                 args.output_pack_dir.resolve(),
                 version_info,
@@ -5165,6 +5789,19 @@ def main() -> int:
                 ),
                 verification_report=verification_report,
             )
+            if pack_only_mode and not args.skip_verify:
+                verification_report = bind_promoted_pack_evidence(
+                    verification_report,
+                    exported_packs,
+                )
+                verification_report_path = (
+                    source_root / "PCbuild" / "staticpython-pack-verify-report.json"
+                )
+                verification_report_path.write_text(
+                    json.dumps(verification_report, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
     finally:
         if sdk_temp_dir is not None:
             sdk_temp_dir.cleanup()

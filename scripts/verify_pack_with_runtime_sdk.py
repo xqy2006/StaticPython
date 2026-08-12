@@ -23,6 +23,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools import resolve_tool_exe
+from pack_evidence import (
+    pack_metadata_without_verification_sha256,
+    pack_payload_manifest_sha256,
+    safe_archive_member_name,
+)
 
 
 RUNTIME_METADATA_PATH = "metadata/runtime-sdk.v1.json"
@@ -96,6 +101,7 @@ WINDOWS_LINK_LIBRARY_NAMES = {
     "version.lib",
     "wbemuuid.lib",
     "windowscodecs.lib",
+    "wininet.lib",
     "winmm.lib",
     "winspool.lib",
     "ws2_32.lib",
@@ -129,14 +135,9 @@ def sha256_file(path: Path) -> str:
 
 
 def _safe_relative(value: object, *, description: str) -> PurePosixPath:
-    if not isinstance(value, str) or not value or "\\" in value:
-        raise RuntimeError(f"invalid {description}: {value!r}")
-    path = PurePosixPath(value)
-    if path.is_absolute() or value.startswith("/") or any(part in {"", ".", ".."} for part in path.parts):
-        raise RuntimeError(f"unsafe {description}: {value!r}")
-    if path.parts and ":" in path.parts[0]:
-        raise RuntimeError(f"unsafe {description}: {value!r}")
-    return path
+    return PurePosixPath(
+        safe_archive_member_name(value, description=description)
+    )
 
 
 def _safe_file(root: Path, relative: object, *, description: str = "asset path") -> Path:
@@ -1278,6 +1279,13 @@ def _write_report(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
+def _failure_log_line(index: int, failure: dict) -> str:
+    return (
+        f"[pack-sdk-verify] issue {index}: "
+        + json.dumps(failure, ensure_ascii=False, sort_keys=True)
+    )
+
+
 def verify_assets(args: argparse.Namespace) -> int:
     report: dict = {
         "schema_version": 1,
@@ -1309,6 +1317,20 @@ def verify_assets(args: argparse.Namespace) -> int:
             packs.append(MaterializedPack(archive, root, metadata))
         if not packs:
             raise RuntimeError("at least one --pack is required")
+        selected_names = {pack.metadata["name"].casefold(): pack.metadata["name"] for pack in packs}
+        verification_roots: list[str] = []
+        seen_roots: set[str] = set()
+        for requested in args.root_pack:
+            key = requested.casefold()
+            canonical = selected_names.get(key)
+            if canonical is None:
+                raise RuntimeError(f"verification root is not selected: {requested}")
+            if key in seen_roots:
+                continue
+            seen_roots.add(key)
+            verification_roots.append(canonical)
+        if not verification_roots:
+            verification_roots = [pack.metadata["name"] for pack in packs]
         validate_composition(runtime, packs)
         smoke_cases = build_smoke_cases(args.repo_root.resolve(), packs)
         executable, map_path, toolchain = build_harness(
@@ -1349,10 +1371,16 @@ def verify_assets(args: argparse.Namespace) -> int:
                         "name": pack.metadata["name"],
                         "version": pack.metadata["version"],
                         "path": str(pack.archive),
-                        "sha256": sha256_file(pack.archive),
+                        "sha256": (provisional_sha := sha256_file(pack.archive)),
+                        "provisional_sha256": provisional_sha,
+                        "payload_manifest_sha256": pack_payload_manifest_sha256(pack.metadata),
+                        "metadata_without_verification_sha256": (
+                            pack_metadata_without_verification_sha256(pack.metadata)
+                        ),
                     }
                     for pack in packs
                 ],
+                "verification_roots": verification_roots,
                 "namespace_packages": list(infer_namespace_packages(runtime, packs)),
                 "executable": str(executable),
                 "executable_sha256": sha256_file(executable),
@@ -1366,6 +1394,8 @@ def verify_assets(args: argparse.Namespace) -> int:
     _write_report(args.report_json.resolve(), report)
     if report["status"] != "passed":
         print(f"[pack-sdk-verify] failed with {len(report['failures'])} issue(s)", file=sys.stderr)
+        for index, failure in enumerate(report["failures"], start=1):
+            print(_failure_log_line(index, failure), file=sys.stderr)
         return 1
     print(
         f"[pack-sdk-verify] verified {len(report['packs'])} pack(s) and "
@@ -1380,6 +1410,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--runtime-sdk", type=Path, required=True)
     parser.add_argument("--pack", type=Path, action="append", default=[], required=True)
+    parser.add_argument(
+        "--root-pack",
+        action="append",
+        default=[],
+        help="Pack root whose exact dependency closure this harness verifies; may be repeated.",
+    )
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--report-json", type=Path, required=True)

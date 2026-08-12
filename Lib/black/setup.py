@@ -11,12 +11,22 @@ from libs import (
     _extract_archive,
     _normalized_project_name,
     _resolve_source_entry,
+    configure_python_module_ownership,
     transform_first_existing_source_text,
     replace_text_once,
     source_path,
     transform_source_text,
     write_source_text,
 )
+
+
+def _configure_black_version_module(enabled: bool) -> None:
+    configure_python_module_ownership(
+        LIBRARY_INTEGRATION,
+        module_name="_black_version",
+        materialized_path="Lib/_black_version.py",
+        enabled=enabled,
+    )
 
 
 def _candidate_archives(context, project_name: str, release_version: str | None):
@@ -64,9 +74,12 @@ def prepare_black_source(context) -> None:
                 _copy_entry(_resolve_source_entry(extracted_root, "black||src/black"), context.source_root / "Lib" / "black")
                 _copy_entry(_resolve_source_entry(extracted_root, "blackd||src/blackd"), context.source_root / "Lib" / "blackd")
                 _copy_entry(_resolve_source_entry(extracted_root, "blib2to3||src/blib2to3"), context.source_root / "Lib" / "blib2to3")
+                _configure_black_version_module(True)
             except RuntimeError:
+                (context.source_root / "Lib" / "_black_version.py").unlink(missing_ok=True)
                 _copy_entry(_resolve_source_entry(extracted_root, "black.py"), context.source_root / "Lib" / "black.py")
                 _copy_entry(_resolve_source_entry(extracted_root, "blib2to3"), context.source_root / "Lib" / "blib2to3")
+                _configure_black_version_module(False)
             return
         except RuntimeError as exc:
             failures.append(f"{archive_path.name}: {exc}")
@@ -215,10 +228,12 @@ LIBRARY_INTEGRATION = LibraryIntegration(
     auto_resolve_dependencies=True,
     overlay_entries=[],
     materialized_paths=[
+        "Lib/_black_version.py",
         "Lib/blib2to3/_staticpython_grammars.py",
     ],
-    cleanup_paths=[],
-    python_packages=["black", "blackd", "blib2to3"],
+    cleanup_paths=["Lib/_black_version.py"],
+    python_packages=["_black_version", "black", "blackd", "blib2to3"],
+    top_level_import_names=["black", "blackd", "blib2to3"],
     static_library_projects_release_x64=[],
     native_static_projects=[],
     builtin_module_registrations=[],

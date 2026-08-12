@@ -716,6 +716,7 @@ def ensure_sdl2_source(context) -> Path:
         context.log,
         [
             f"https://github.com/libsdl-org/SDL/archive/refs/tags/release-{version}.zip",
+            f"https://codeload.github.com/libsdl-org/SDL/zip/refs/tags/release-{version}",
         ],
         archive_path,
     )
@@ -762,6 +763,7 @@ def ensure_qhull_source(context) -> Path:
         context.log,
         [
             f"https://github.com/qhull/qhull/archive/v{QHULL_VERSION}/qhull-{QHULL_VERSION}.tar.gz",
+            f"https://codeload.github.com/qhull/qhull/tar.gz/refs/tags/v{QHULL_VERSION}",
         ],
         archive_path,
     )
@@ -1736,7 +1738,8 @@ LIBRARY_INTEGRATION = pypi_library(
         "matplotlib_builtin/source/extern/agg24-svn/include/agg_basics.h",
         *[f"PCbuild/{project}" for project, _guid in [*MATPLOTLIB_SUPPORT_PROJECT_ITEMS, *MATPLOTLIB_EXTENSION_PROJECT_ITEMS]],
     ],
-    python_packages=["matplotlib", "mpl_toolkits"],
+    python_packages=["matplotlib", "mpl_toolkits", "pylab"],
+    top_level_import_names=["matplotlib", "mpl_toolkits"],
     static_library_projects_release_x64=[
         *[project for project, _guid in MATPLOTLIB_SUPPORT_PROJECT_ITEMS],
         *[project for project, _guid in MATPLOTLIB_EXTENSION_PROJECT_ITEMS],
