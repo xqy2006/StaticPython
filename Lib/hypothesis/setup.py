@@ -23,6 +23,29 @@ _NATIVE_FLOATS_COMPAT = read_text_file(_COMPATIBILITY_ROOT / "floats.py")
 _NATIVE_CATHETUS_COMPAT = read_text_file(_COMPATIBILITY_ROOT / "cathetus.py")
 
 
+def _configure_hypothesis_globals_module(enabled: bool) -> None:
+    """Keep optional top-level module metadata aligned with the selected sdist."""
+    integration = LIBRARY_INTEGRATION
+    module_name = "_hypothesis_globals"
+    materialized_path = "Lib/_hypothesis_globals.py"
+
+    def update(values: list[str], value: str) -> list[str]:
+        filtered = [item for item in values if item != value]
+        if enabled:
+            return [value, *filtered]
+        return filtered
+
+    integration.materialized_paths = update(
+        integration.materialized_paths,
+        materialized_path,
+    )
+    integration.python_packages = update(integration.python_packages, module_name)
+    integration.top_level_import_names = update(
+        integration.top_level_import_names,
+        module_name,
+    )
+
+
 def _prepare_hypothesis_source(context) -> None:
     integration = LIBRARY_INTEGRATION
     project_name = integration.project_name or integration.name
@@ -81,6 +104,7 @@ def _prepare_hypothesis_source(context) -> None:
         globals_src = None
     if globals_src is not None:
         _copy_entry(globals_src, context.source_root / "Lib" / "_hypothesis_globals.py")
+    _configure_hypothesis_globals_module(globals_src is not None)
     _materialize_distribution_licenses(context, integration, extracted_root)
 
 
@@ -148,12 +172,18 @@ LIBRARY_INTEGRATION = LibraryIntegration(
     auto_resolve_dependencies=True,
     overlay_entries=[],
     materialized_paths=[
+        "Lib/_hypothesis_globals.py",
         "Lib/hypothesis",
     ],
     cleanup_paths=[
         "Lib/_hypothesis_globals.py",
     ],
     python_packages=[
+        "_hypothesis_globals",
+        "hypothesis",
+    ],
+    top_level_import_names=[
+        "_hypothesis_globals",
         "hypothesis",
     ],
     static_library_projects_release_x64=[],

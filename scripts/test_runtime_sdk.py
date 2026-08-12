@@ -494,6 +494,53 @@ struct _inittab _PyImport_Inittab[] = {
         spec.loader.exec_module(module)
         self.assertEqual(module.LIBRARY_INTEGRATION.release_version, "6.164.0")
         self.assertEqual(module.LIBRARY_INTEGRATION.license_expression, "MPL-2.0")
+        self.assertIn(
+            "Lib/_hypothesis_globals.py",
+            module.LIBRARY_INTEGRATION.materialized_paths,
+        )
+        self.assertIn(
+            "_hypothesis_globals",
+            module.LIBRARY_INTEGRATION.python_packages,
+        )
+        self.assertIn(
+            "_hypothesis_globals",
+            module.LIBRARY_INTEGRATION.top_level_import_names,
+        )
+
+        frozen = self.root / "Python" / "frozen_modules"
+        frozen.mkdir(parents=True)
+        (frozen / "_hypothesis_globals.h").write_text(
+            "const unsigned char _Py_M___hypothesis_globals[] = {1, 2, 3,};\n",
+            encoding="utf-8",
+        )
+        (frozen / "hypothesis.h").write_text(
+            "const unsigned char _Py_M__hypothesis[] = {4, 5, 6,};\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            [
+                record["name"]
+                for record in build._integration_frozen_modules(
+                    self.root,
+                    module.LIBRARY_INTEGRATION,
+                )
+            ],
+            ["_hypothesis_globals", "hypothesis"],
+        )
+        module._configure_hypothesis_globals_module(False)
+        self.assertNotIn(
+            "Lib/_hypothesis_globals.py",
+            module.LIBRARY_INTEGRATION.materialized_paths,
+        )
+        self.assertNotIn(
+            "_hypothesis_globals",
+            module.LIBRARY_INTEGRATION.python_packages,
+        )
+        self.assertNotIn(
+            "_hypothesis_globals",
+            module.LIBRARY_INTEGRATION.top_level_import_names,
+        )
+        module._configure_hypothesis_globals_module(True)
 
         internal = self.root / "Lib" / "hypothesis" / "internal"
         internal.mkdir(parents=True)
