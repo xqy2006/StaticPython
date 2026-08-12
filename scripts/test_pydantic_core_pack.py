@@ -94,7 +94,7 @@ class PydanticCorePackTests(unittest.TestCase):
                 source_root=source_root,
                 version_info=(3, 15, 0),
                 version_mm="3.15",
-                version_full="3.15.0b4",
+                version_full="3.15.0rc1",
                 download_cache_root=source_root / "downloads",
                 work_cache_root=source_root / "work",
                 asset_overlay_root=REPO_ROOT / "assets" / "overlay",
