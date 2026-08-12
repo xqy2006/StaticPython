@@ -88,8 +88,8 @@ def _patch_libui_native_module_text(text: str) -> str:
     )
     text = replace_text_once(
         text,
-        "#include <windows.h>\n",
-        "#include <windows.h>\n\n" + LIBUI_COMMON_CONTROLS_MANIFEST_PRAGMA,
+        '#include "module.h"\n',
+        '#include "module.h"\n\n' + LIBUI_COMMON_CONTROLS_MANIFEST_PRAGMA,
         label="libui static Common Controls manifest",
     )
     return text.replace('"core"', '"_libui_core"')

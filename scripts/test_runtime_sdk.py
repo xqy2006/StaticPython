@@ -896,21 +896,26 @@ struct _inittab _PyImport_Inittab[] = {
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        source = (
-            "#ifdef _WIN32\n"
-            "#include <windows.h>\n"
-            "#endif\n"
-            "PyMODINIT_FUNC PyInit_core(void);\n"
-        )
-        patched = module._patch_libui_native_module_text(source)
+        for source in (
+            '#include "module.h"\nPyMODINIT_FUNC PyInit_core(void);\n',
+            (
+                '#include "module.h"\n'
+                "#ifdef _WIN32\n"
+                "#include <windows.h>\n"
+                "#endif\n"
+                "PyMODINIT_FUNC PyInit_core(void);\n"
+            ),
+        ):
+            with self.subTest(has_windows_include="#include <windows.h>" in source):
+                patched = module._patch_libui_native_module_text(source)
 
-        self.assertIn("PyInit__libui_core", patched)
-        self.assertNotIn("PyInit_core", patched)
-        self.assertIn(module.LIBUI_COMMON_CONTROLS_MANIFEST_PRAGMA, patched)
-        self.assertIn("Microsoft.Windows.Common-Controls", patched)
-        self.assertIn("version='6.0.0.0'", patched)
-        self.assertEqual(patched.count("/manifestdependency:"), 1)
-        self.assertEqual(module._patch_libui_native_module_text(patched), patched)
+                self.assertIn("PyInit__libui_core", patched)
+                self.assertNotIn("PyInit_core", patched)
+                self.assertIn(module.LIBUI_COMMON_CONTROLS_MANIFEST_PRAGMA, patched)
+                self.assertIn("Microsoft.Windows.Common-Controls", patched)
+                self.assertIn("version='6.0.0.0'", patched)
+                self.assertEqual(patched.count("/manifestdependency:"), 1)
+                self.assertEqual(module._patch_libui_native_module_text(patched), patched)
 
     def test_wxpython_link_metadata_tracks_bundled_wxwidgets_version(self) -> None:
         spec = importlib.util.spec_from_file_location(
