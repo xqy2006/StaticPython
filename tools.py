@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import os
 import shutil
 import struct
 import subprocess
 import tarfile
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
@@ -31,6 +33,9 @@ MSBUILD_TOOL_NAMES = {"msbuild", "msbuild.exe"}
 MSVC_TOOL_NAMES = {"cl", "cl.exe", "lib", "lib.exe", "link", "link.exe"}
 _RESOLVED_TOOLS: dict[str, str] = {}
 _MSVC_ENV_READY = False
+DOWNLOAD_MAX_ATTEMPTS = 4
+DOWNLOAD_RETRY_DELAYS_SECONDS = (1, 2, 4)
+TRANSIENT_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _MSVC_ENV_NAMES = {
     "DevEnvDir",
     "ExtensionSdkDir",
@@ -354,11 +359,38 @@ def download_file(log: Callable[[str], None], url: str, destination: Path, *, fo
         log(f"using cached download {destination}")
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
-    log(f"downloading {url}")
     temporary = Path(str(destination) + ".tmp")
-    with urlopen(url) as response, temporary.open("wb") as out_file:
-        shutil.copyfileobj(response, out_file)
-    temporary.replace(destination)
+    for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
+        if temporary.exists():
+            temporary.unlink()
+        log(f"downloading {url} (attempt {attempt}/{DOWNLOAD_MAX_ATTEMPTS})")
+        try:
+            with urlopen(url, timeout=60) as response, temporary.open("wb") as out_file:
+                shutil.copyfileobj(response, out_file)
+            temporary.replace(destination)
+            return
+        except HTTPError as exc:
+            if temporary.exists():
+                temporary.unlink()
+            if exc.code not in TRANSIENT_HTTP_STATUS_CODES or attempt == DOWNLOAD_MAX_ATTEMPTS:
+                raise
+            delay = DOWNLOAD_RETRY_DELAYS_SECONDS[attempt - 1]
+            log(
+                f"transient download failure from {url} on attempt "
+                f"{attempt}/{DOWNLOAD_MAX_ATTEMPTS}: {exc}; retrying in {delay}s"
+            )
+            time.sleep(delay)
+        except (URLError, OSError, http.client.HTTPException) as exc:
+            if temporary.exists():
+                temporary.unlink()
+            if attempt == DOWNLOAD_MAX_ATTEMPTS:
+                raise
+            delay = DOWNLOAD_RETRY_DELAYS_SECONDS[attempt - 1]
+            log(
+                f"transient download failure from {url} on attempt "
+                f"{attempt}/{DOWNLOAD_MAX_ATTEMPTS}: {exc}; retrying in {delay}s"
+            )
+            time.sleep(delay)
 
 
 def validate_source_archive(archive_path: Path) -> None:
@@ -421,16 +453,24 @@ def download_first_available(
 
     errors: list[str] = []
     for url in urls:
-        for attempt in range(1, 3):
-            try:
-                download_file(log, url, destination, force=True)
-                validate_source_archive(destination)
-                _validate_download_sha256(destination, expected_sha256)
-                return url
-            except (BadZipFile, EOFError, HTTPError, OSError, RuntimeError, tarfile.TarError, URLError) as exc:
-                errors.append(f"{url} (attempt {attempt}/2): {exc}")
-                _cleanup_failed_download(destination)
-                log(f"download failed from {url} on attempt {attempt}/2: {exc}")
+        try:
+            download_file(log, url, destination, force=True)
+            validate_source_archive(destination)
+            _validate_download_sha256(destination, expected_sha256)
+            return url
+        except (
+            BadZipFile,
+            EOFError,
+            HTTPError,
+            OSError,
+            RuntimeError,
+            tarfile.TarError,
+            URLError,
+            http.client.HTTPException,
+        ) as exc:
+            errors.append(f"{url}: {exc}")
+            _cleanup_failed_download(destination)
+            log(f"download failed from {url}: {exc}")
     raise RuntimeError("all download sources failed:\n" + "\n".join(errors))
 
 

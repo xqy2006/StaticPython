@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
+import io
 import importlib.util
 import tempfile
 import unittest
@@ -30,6 +32,59 @@ def _zip_bytes(root: Path, name: str, content: str) -> bytes:
 
 
 class DownloadFirstAvailableTests(unittest.TestCase):
+    def test_download_file_retries_transient_disconnects_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "download.zip"
+            temporary = Path(str(destination) + ".tmp")
+            messages: list[str] = []
+            with (
+                mock.patch.object(
+                    tools,
+                    "urlopen",
+                    side_effect=[
+                        http.client.RemoteDisconnected("first disconnect"),
+                        tools.URLError("second disconnect"),
+                        io.BytesIO(b"archive payload"),
+                    ],
+                ) as urlopen,
+                mock.patch.object(tools.time, "sleep") as sleep,
+            ):
+                tools.download_file(
+                    messages.append,
+                    "https://example.invalid/archive.zip",
+                    destination,
+                )
+
+            self.assertEqual(destination.read_bytes(), b"archive payload")
+            self.assertFalse(temporary.exists())
+            self.assertEqual(urlopen.call_count, 3)
+            sleep.assert_has_calls([mock.call(1), mock.call(2)])
+
+    def test_download_file_exhausts_retries_without_partial_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "download.zip"
+            temporary = Path(str(destination) + ".tmp")
+            temporary.write_bytes(b"stale partial download")
+            with (
+                mock.patch.object(
+                    tools,
+                    "urlopen",
+                    side_effect=http.client.RemoteDisconnected("disconnect"),
+                ) as urlopen,
+                mock.patch.object(tools.time, "sleep") as sleep,
+                self.assertRaises(http.client.RemoteDisconnected),
+            ):
+                tools.download_file(
+                    lambda _message: None,
+                    "https://example.invalid/archive.zip",
+                    destination,
+                )
+
+            self.assertFalse(destination.exists())
+            self.assertFalse(temporary.exists())
+            self.assertEqual(urlopen.call_count, tools.DOWNLOAD_MAX_ATTEMPTS)
+            sleep.assert_has_calls([mock.call(1), mock.call(2), mock.call(4)])
+
     def test_valid_cached_archive_must_match_expected_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -71,7 +126,7 @@ class DownloadFirstAvailableTests(unittest.TestCase):
 
             self.assertEqual(source, urls[1])
             self.assertEqual(destination.read_bytes(), trusted)
-            self.assertEqual(download.call_count, 3)
+            self.assertEqual(download.call_count, 2)
 
     def test_invalid_expected_sha256_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

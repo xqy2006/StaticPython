@@ -27,6 +27,7 @@ from tools import (
 
 ARCHIVE_URL_TEMPLATES = [
     "https://github.com/libffi/libffi/releases/download/v{version}/libffi-{version}.tar.gz",
+    "https://codeload.github.com/libffi/libffi/tar.gz/refs/tags/v{version}",
     "https://github.com/libffi/libffi/archive/refs/tags/v{version}.tar.gz",
 ]
 COMMON_SOURCES = [
