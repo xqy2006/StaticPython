@@ -164,6 +164,7 @@ LIBRARY_INTEGRATION = pypi_library(
         "oleacc.lib",
         "uuid.lib",
         "windowscodecs.lib",
+        "gdi32.lib",
         "_libui_core.lib",
     ],
     post_patch_hooks=[patch_libui_sources],

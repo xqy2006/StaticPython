@@ -874,6 +874,19 @@ struct _inittab _PyImport_Inittab[] = {
             ["wx-native-modules", "wx-window-lifecycle"],
         )
 
+    def test_libui_pack_declares_required_gdi_system_library(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_libui_pack_test",
+            REPO_ROOT / "Lib" / "libui" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        integration = module.LIBRARY_INTEGRATION
+        self.assertIn("gdi32.lib", integration.python_link_dependencies_release_x64)
+        self.assertTrue(build.is_windows_system_library("gdi32.lib"))
+
     def test_wxpython_link_metadata_tracks_bundled_wxwidgets_version(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "staticpython_wxpython_versioned_libraries_test",
