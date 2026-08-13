@@ -193,15 +193,30 @@ jobs:
           Copy-Item `
             -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" `
             -Destination "$resultRoot\staticpython-pack-verify-report.json"
-          Copy-Item `
-            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.exe" `
-            -Destination "$resultRoot\staticpython-pack-verify.exe"
-          Copy-Item `
-            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.map" `
-            -Destination "$resultRoot\staticpython-pack-verify.map"
-          Copy-Item `
-            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.pdb" `
-            -Destination "$resultRoot\staticpython-pack-verify.pdb"
+          $verifierSource = Join-Path $sourceRoot "PCbuild\staticpython-pack-verify"
+          $verifierDestination = Join-Path $resultRoot "verifiers"
+          $closureSources = @(
+            Get-ChildItem -LiteralPath $verifierSource -Directory |
+              Where-Object { $_.Name -match '^closure-\d{4}$' } |
+              Sort-Object Name
+          )
+          if ($closureSources.Count -lt 2) {
+            throw "Expected dependency-closure verifier directories, found $($closureSources.Count)"
+          }
+          New-Item -ItemType Directory -Force $verifierDestination | Out-Null
+          foreach ($closureSource in $closureSources) {
+            $closureDestination = Join-Path $verifierDestination $closureSource.Name
+            New-Item -ItemType Directory -Force $closureDestination | Out-Null
+            foreach ($fileName in @(
+              'staticpython-pack-verify.exe',
+              'staticpython-pack-verify.map',
+              'staticpython-pack-verify.pdb'
+            )) {
+              Copy-Item `
+                -LiteralPath (Join-Path $closureSource.FullName $fileName) `
+                -Destination (Join-Path $closureDestination $fileName)
+            }
+          }
 
       - name: Audit SciPy packs, no-extraction, and PE contracts
         shell: pwsh
@@ -271,6 +286,90 @@ jobs:
           if ($report.status -ne 'passed' -or $report.pe_audit.status -ne 'passed') {
             throw "SDK-linked SciPy behavior or PE audit failed"
           }
+          if ($report.verification_mode -ne 'dependency-closure-set') {
+            throw "SciPy verification did not preserve isolated dependency closures"
+          }
+          $closures = @($report.closure_verifications)
+          $verifierDirectories = @(
+            Get-ChildItem -LiteralPath "$resultRoot\verifiers" -Directory |
+              Where-Object { $_.Name -match '^closure-\d{4}$' } |
+              Sort-Object Name
+          )
+          if ($closures.Count -lt 2 -or $verifierDirectories.Count -ne $closures.Count) {
+            throw "SciPy closure evidence count does not match its aggregate report"
+          }
+          $exeHashes = @()
+          $mapHashes = @()
+          for ($index = 0; $index -lt $closures.Count; $index++) {
+            $closure = $closures[$index]
+            $expectedDirectoryName = 'closure-{0:D4}' -f ($index + 1)
+            $verifierDirectory = $verifierDirectories[$index]
+            if ($verifierDirectory.Name -ne $expectedDirectoryName) {
+              throw "Unexpected SciPy verifier directory $($verifierDirectory.Name)"
+            }
+            $exePath = Join-Path $verifierDirectory.FullName 'staticpython-pack-verify.exe'
+            $mapPath = Join-Path $verifierDirectory.FullName 'staticpython-pack-verify.map'
+            $pdbPath = Join-Path $verifierDirectory.FullName 'staticpython-pack-verify.pdb'
+            foreach ($evidencePath in @($exePath, $mapPath, $pdbPath)) {
+              if (
+                -not (Test-Path -LiteralPath $evidencePath -PathType Leaf) -or
+                (Get-Item -LiteralPath $evidencePath).Length -le 0
+              ) {
+                throw "SciPy verifier evidence is missing or empty: $evidencePath"
+              }
+            }
+            $exeSha256 = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($exeSha256 -ne $closure.executable_sha256) {
+              throw "SciPy closure $expectedDirectoryName executable hash does not match its report"
+            }
+            $mapSha256 = (Get-FileHash -LiteralPath $mapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($mapSha256 -ne $closure.map_sha256) {
+              throw "SciPy closure $expectedDirectoryName map hash does not match its report"
+            }
+            $dependencyOutput = (& dumpbin /NOLOGO /DEPENDENTS $exePath | Out-String)
+            if ($LASTEXITCODE -ne 0) {
+              throw "dumpbin could not re-audit SciPy closure $expectedDirectoryName"
+            }
+            $observedDependencies = @(
+              $dependencyOutput -split "`r?`n" |
+                ForEach-Object { $_.Trim() } |
+                Where-Object { $_ -match '(?i)^[a-z0-9_.-]+\.dll$' } |
+                ForEach-Object { $_.ToUpperInvariant() } |
+                Sort-Object -Unique
+            )
+            $reportedDependencies = @(
+              $closure.pe_dependencies |
+                ForEach-Object { $_.ToUpperInvariant() } |
+                Sort-Object -Unique
+            )
+            if (
+              $observedDependencies.Count -eq 0 -or
+              @(Compare-Object $reportedDependencies $observedDependencies).Count -ne 0
+            ) {
+              throw "SciPy closure $expectedDirectoryName PE imports do not match its report"
+            }
+            $exeHashes += $exeSha256
+            $mapHashes += $mapSha256
+          }
+          function Get-CombinedEvidenceHash([string[]] $hashes) {
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            try {
+              $bytes = [Text.Encoding]::ASCII.GetBytes(($hashes -join "`n"))
+              return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+            } finally {
+              $algorithm.Dispose()
+            }
+          }
+          $combinedExeSha256 = Get-CombinedEvidenceHash $exeHashes
+          if (
+            $combinedExeSha256 -ne $report.executable_sha256 -or
+            $combinedExeSha256 -ne $report.pe_audit.executable_sha256
+          ) {
+            throw "SciPy aggregate executable hash does not match its closure evidence"
+          }
+          if ((Get-CombinedEvidenceHash $mapHashes) -ne $report.pe_audit.map_sha256) {
+            throw "SciPy aggregate map hash does not match its closure evidence"
+          }
           $releasedFiles = @(
             foreach ($smoke in @($report.integration_smoke_tests)) {
               if ($null -eq $smoke.PSObject.Properties['released_files']) {
@@ -292,13 +391,6 @@ jobs:
             throw "The extended SciPy API behavior smoke did not pass exactly once"
           }
 
-          $exePath = Join-Path $resultRoot "staticpython-pack-verify.exe"
-          $mapPath = Join-Path $resultRoot "staticpython-pack-verify.map"
-          $exeSha256 = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
-          $mapSha256 = (Get-FileHash -LiteralPath $mapPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($exeSha256 -ne $report.pe_audit.executable_sha256 -or $mapSha256 -ne $report.pe_audit.map_sha256) {
-            throw "Uploaded SciPy verifier evidence does not match the report"
-          }
           if (
             @($report.pe_audit.forbidden_dependencies).Count -ne 0 -or
             @($report.pe_audit.non_system_dependencies).Count -ne 0 -or
@@ -307,27 +399,6 @@ jobs:
           ) {
             throw "SciPy verifier report contains forbidden PE evidence"
           }
-          $dependencyOutput = (& dumpbin /NOLOGO /DEPENDENTS $exePath | Out-String)
-          if ($LASTEXITCODE -ne 0) { throw "dumpbin could not re-audit the uploaded SciPy verifier" }
-          $observedDependencies = @(
-            $dependencyOutput -split "`r?`n" |
-              ForEach-Object { $_.Trim() } |
-              Where-Object { $_ -match '(?i)^[a-z0-9_.-]+\.dll$' } |
-              ForEach-Object { $_.ToUpperInvariant() } |
-              Sort-Object -Unique
-          )
-          $reportedDependencies = @(
-            $report.pe_audit.dependencies |
-              ForEach-Object { $_.ToUpperInvariant() } |
-              Sort-Object -Unique
-          )
-          if (
-            $observedDependencies.Count -eq 0 -or
-            @(Compare-Object $reportedDependencies $observedDependencies).Count -ne 0
-          ) {
-            throw "Uploaded SciPy verifier PE imports do not match its report"
-          }
-
           @(
             "## Experimental SciPy static pack",
             "",
@@ -348,8 +419,8 @@ jobs:
           path: |
             dist/scipy-1.17.1/packs/*.zip
             dist/scipy-1.17.1/staticpython-pack-verify-report.json
-            dist/scipy-1.17.1/staticpython-pack-verify.exe
-            dist/scipy-1.17.1/staticpython-pack-verify.map
-            dist/scipy-1.17.1/staticpython-pack-verify.pdb
+            dist/scipy-1.17.1/verifiers/**/*.exe
+            dist/scipy-1.17.1/verifiers/**/*.map
+            dist/scipy-1.17.1/verifiers/**/*.pdb
           if-no-files-found: warn
           retention-days: 30
