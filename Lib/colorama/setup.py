@@ -6,6 +6,7 @@ from libs import (
     _copy_entry,
     _download_file,
     _extract_archive,
+    _record_source_archive_sha256,
     _resolve_source_entry,
     read_text_file,
     write_source_text,
@@ -63,6 +64,11 @@ def _prepare_colorama_source(context) -> None:
             context.log(f"reusing cached colorama {resolved_release_version} archive")
 
         try:
+            _record_source_archive_sha256(
+                integration,
+                resolved_release_version,
+                archive_path,
+            )
             extracted_root = _extract_archive(archive_path, extract_root, context.log)
             context.log(f"using colorama {resolved_release_version} source from {extracted_root}")
             _copy_colorama_package(context, extracted_root, release_version or resolved_release_version)
@@ -82,6 +88,10 @@ LIBRARY_INTEGRATION = LibraryIntegration(
     name="colorama",
     source_provider="pypi",
     project_name="colorama",
+    release_version="0.4.6",
+    source_archive_sha256_by_version={
+        "0.4.6": "08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44",
+    },
     dependencies=[],
     auto_resolve_dependencies=True,
     overlay_entries=[],

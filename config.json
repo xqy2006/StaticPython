@@ -444,6 +444,10 @@
         "overlay_entries": [
           "Lib/h11"
         ],
+        "release_version": "0.16.0",
+        "source_archive_sha256_by_version": {
+          "0.16.0": "4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1"
+        },
         "source_provider": "pypi"
       },
       {
@@ -1590,9 +1594,33 @@
         "source_provider": "pypi"
       },
       {
+        "dependencies": [
+          "click",
+          "h11"
+        ],
+        "dependency_constraints": {
+          "click": ">=7.0",
+          "h11": ">=0.8"
+        },
+        "license_expression": "BSD-3-Clause",
         "name": "uvicorn",
         "overlay_entries": [
           "Lib/uvicorn"
+        ],
+        "release_version": "0.52.1",
+        "smoke_tests": [
+          {
+            "kind": "script",
+            "name": "h11-loopback-asgi-server",
+            "script": "scripts/uvicorn_runtime.py",
+            "timeout": 30
+          }
+        ],
+        "source_archive_sha256_by_version": {
+          "0.52.1": "112ec661814189acbccd3f7b86460147cc065fc92c0821afa78918780e4354dd"
+        },
+        "source_ignore_patterns": [
+          "tests"
         ],
         "source_provider": "pypi"
       },
@@ -1813,6 +1841,22 @@
         "numpy": "2.4.4",
         "pybind11": "3.0.4",
         "scipy": "1.17.1"
+      },
+      "verification": {
+        "enabled": false
+      }
+    },
+    "uvicorn-experimental": {
+      "description": "Build current stable Uvicorn with its minimal pure-Python HTTP dependency closure as an experimental pack profile.",
+      "core_libraries": "all",
+      "third_party_libraries": [
+        "uvicorn"
+      ],
+      "third_party_library_version_overrides": {
+        "click": "8.4.2",
+        "colorama": "0.4.6",
+        "h11": "0.16.0",
+        "uvicorn": "0.52.1"
       },
       "verification": {
         "enabled": false
