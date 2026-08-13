@@ -1015,6 +1015,40 @@
         "source_provider": "pypi"
       },
       {
+        "name": "pydantic",
+        "release_version": "2.13.4",
+        "source_archive_sha256_by_version": {
+          "2.13.4": "c40756b57adaa8b1efeeced5c196f3f3b7c435f90e84ea7f443901bec8099ef6"
+        },
+        "dependencies": [
+          "annotated_types",
+          "pydantic_core",
+          "typing_extensions",
+          "typing_inspection"
+        ],
+        "dependency_constraints": {
+          "annotated_types": ">=0.6.0",
+          "pydantic_core": "==2.46.4",
+          "typing_extensions": ">=4.14.1",
+          "typing_inspection": ">=0.4.2"
+        },
+        "license_expression": "MIT",
+        "overlay_entries": [
+          "Lib/pydantic"
+        ],
+        "smoke_tests": [
+          {
+            "name": "model-validation-schema-and-json",
+            "kind": "inline",
+            "code": "from pydantic import BaseModel, Field, TypeAdapter\n\nclass User(BaseModel):\n    name: str\n    age: int = Field(ge=0)\n\nuser = User.model_validate({'name': 'Ada', 'age': '37'})\nassert user.age == 37\nassert User.model_json_schema()['properties']['age']['minimum'] == 0\nassert user.model_dump_json() == '{\\\"name\\\":\\\"Ada\\\",\\\"age\\\":37}'\nassert TypeAdapter(list[int]).validate_python(['1', 2]) == [1, 2]"
+          }
+        ],
+        "source_ignore_patterns": [
+          "tests"
+        ],
+        "source_provider": "pypi"
+      },
+      {
         "name": "pygments",
         "overlay_entries": [
           "Lib/pygments"
@@ -1672,6 +1706,23 @@
       ],
       "third_party_library_version_overrides": {
         "pydantic_core": "2.47.0"
+      },
+      "verification": {
+        "enabled": false
+      }
+    },
+    "pydantic-experimental": {
+      "description": "Build current stable Pydantic and its exact static pydantic-core dependency as experimental packs without adding them to the full supported catalog.",
+      "core_libraries": "all",
+      "third_party_libraries": [
+        "pydantic"
+      ],
+      "third_party_library_version_overrides": {
+        "annotated_types": "0.8.0",
+        "pydantic": "2.13.4",
+        "pydantic_core": "2.46.4",
+        "typing_extensions": "4.16.0",
+        "typing_inspection": "0.4.3"
       },
       "verification": {
         "enabled": false

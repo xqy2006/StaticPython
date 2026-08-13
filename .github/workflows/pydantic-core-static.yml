@@ -1,4 +1,4 @@
-name: Experimental pydantic-core static pack
+name: Experimental Pydantic static packs
 
 on:
   push:
@@ -12,6 +12,7 @@ on:
       - "config.json"
       - "libs.py"
       - "scripts/test_pydantic_core_pack.py"
+      - "scripts/test_pydantic_pack.py"
       - "scripts/verify_pack_with_runtime_sdk.py"
   pull_request:
     paths:
@@ -23,6 +24,7 @@ on:
       - "config.json"
       - "libs.py"
       - "scripts/test_pydantic_core_pack.py"
+      - "scripts/test_pydantic_pack.py"
       - "scripts/verify_pack_with_runtime_sdk.py"
   workflow_dispatch:
 
@@ -426,5 +428,301 @@ jobs:
             dist/pydantic-core-${{ matrix.pydantic_core_version }}/staticpython-pack-verify.exe
             dist/pydantic-core-${{ matrix.pydantic_core_version }}/staticpython-pack-verify.map
             dist/pydantic-core-${{ matrix.pydantic_core_version }}/staticpython-pack-verify.pdb
+          if-no-files-found: warn
+          retention-days: 30
+
+  sdk-linked-pydantic:
+    needs: runtime-sdk
+    runs-on: windows-2022
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cpython_version: "3.11.15"
+            python_tag: cp311
+          - cpython_version: "3.12.13"
+            python_tag: cp312
+          - cpython_version: "3.13.15"
+            python_tag: cp313
+          - cpython_version: "3.14.7"
+            python_tag: cp314
+          - cpython_version: "3.15.0rc1"
+            python_tag: cp315
+    env:
+      VERIFY_CPYTHON_VERSION: ${{ matrix.cpython_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pack build dependencies and pinned Rust
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install packaging
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --target $env:RUST_TARGET
+          rustup run $env:RUST_TOOLCHAIN rustc -Vv
+          rustup run $env:RUST_TOOLCHAIN cargo -V
+
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Run Pydantic pack contract tests
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\test_pydantic_pack.py
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pydantic-core-runtime-sdk-${{ matrix.python_tag }}
+          path: dist/runtime
+
+      - name: Build dependency-complete Pydantic packs and run behavior smoke
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $runtimeSdk = @(Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE\dist\runtime" -Filter *.zip -File)
+          if ($runtimeSdk.Count -ne 1) {
+            throw "Expected exactly one runtime SDK archive, found $($runtimeSdk.Count)"
+          }
+          $packRoot = Join-Path $env:RUNNER_TEMP "pydantic-pack-2.13.4"
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\pydantic-2.13.4"
+          $packDist = Join-Path $resultRoot "packs"
+          New-Item -ItemType Directory -Force $packDist | Out-Null
+          python .\build.py `
+            --cpython-version $env:VERIFY_CPYTHON_VERSION `
+            --download-root $packRoot `
+            --config .\config.json `
+            --profile pydantic-experimental `
+            --pack-only `
+            --pack-runtime-sdk $runtimeSdk[0].FullName `
+            --build-workers $env:STATICPYTHON_BUILD_WORKERS `
+            --output-pack-dir $packDist
+          $sourceRoot = Join-Path $packRoot "cpython-$env:VERIFY_CPYTHON_VERSION"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" `
+            -Destination "$resultRoot\staticpython-pack-verify-report.json"
+          $verifierSource = Join-Path $sourceRoot "PCbuild\staticpython-pack-verify"
+          $verifierDestination = Join-Path $resultRoot "verifiers"
+          $closureSources = @(
+            Get-ChildItem -LiteralPath $verifierSource -Directory |
+              Where-Object { $_.Name -match '^closure-\d{4}$' } |
+              Sort-Object Name
+          )
+          if ($closureSources.Count -lt 2) {
+            throw "Expected dependency-closure verifier directories, found $($closureSources.Count)"
+          }
+          New-Item -ItemType Directory -Force $verifierDestination | Out-Null
+          foreach ($closureSource in $closureSources) {
+            $closureDestination = Join-Path $verifierDestination $closureSource.Name
+            New-Item -ItemType Directory -Force $closureDestination | Out-Null
+            foreach ($fileName in @(
+              'staticpython-pack-verify.exe',
+              'staticpython-pack-verify.map',
+              'staticpython-pack-verify.pdb'
+            )) {
+              Copy-Item `
+                -LiteralPath (Join-Path $closureSource.FullName $fileName) `
+                -Destination (Join-Path $closureDestination $fileName)
+            }
+          }
+
+      - name: Audit Pydantic pack contract
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\pydantic-2.13.4"
+          $packs = @(Get-ChildItem -LiteralPath "$resultRoot\packs" -Filter *.zip -File)
+          if ($packs.Count -ne 5) { throw "Expected five dependency-complete Pydantic packs, found $($packs.Count)" }
+
+          $metadataByName = @{}
+          foreach ($pack in $packs) {
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($pack.FullName)
+            try {
+              $names = @($archive.Entries | ForEach-Object FullName)
+              $forbidden = @($names | Where-Object { [IO.Path]::GetExtension($_) -in @('.dll', '.pyd', '.exe') })
+              if ($forbidden.Count -gt 0) { throw "$($pack.Name) contains dynamic/executable files: $($forbidden -join ', ')" }
+              $entry = $archive.GetEntry("pack.json")
+              if (-not $entry) { throw "$($pack.Name) has no pack.json" }
+              $reader = [IO.StreamReader]::new($entry.Open())
+              try { $metadata = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+            } finally {
+              $archive.Dispose()
+            }
+            if ($metadataByName.ContainsKey($metadata.name)) { throw "Duplicate pack identity $($metadata.name)" }
+            if ($metadata.verification.status -ne 'passed') { throw "$($metadata.name) was not verified" }
+            if ($metadata.license.status -ne 'complete') { throw "$($metadata.name) has incomplete license evidence" }
+            $metadataByName[$metadata.name] = $metadata
+          }
+
+          $expected = [ordered]@{
+            annotated_types = '0.8.0'
+            pydantic = '2.13.4'
+            pydantic_core = '2.46.4'
+            typing_extensions = '4.16.0'
+            typing_inspection = '0.4.3'
+          }
+          foreach ($name in $expected.Keys) {
+            if (-not $metadataByName.ContainsKey($name)) { throw "Missing dependency pack $name" }
+            if ($metadataByName[$name].version -ne $expected[$name]) {
+              throw "Unexpected $name version $($metadataByName[$name].version)"
+            }
+          }
+
+          $pydantic = $metadataByName['pydantic']
+          if ($pydantic.source_archive_sha256 -ne 'c40756b57adaa8b1efeeced5c196f3f3b7c435f90e84ea7f443901bec8099ef6') {
+            throw "Pydantic source archive hash is not the pinned sdist"
+          }
+          if ($pydantic.license.expression -ne 'MIT') { throw "Pydantic license expression is not MIT" }
+          $expectedDependencies = @('annotated_types', 'pydantic_core', 'typing_extensions', 'typing_inspection')
+          if ((@($pydantic.dependencies) -join ',') -ne ($expectedDependencies -join ',')) {
+            throw "Pydantic dependency metadata does not match the locked closure"
+          }
+
+          $report = Get-Content -LiteralPath "$resultRoot\staticpython-pack-verify-report.json" -Raw | ConvertFrom-Json
+          if ($report.status -ne 'passed' -or $report.pe_audit.status -ne 'passed') {
+            throw "SDK-linked Pydantic behavior or PE audit failed"
+          }
+          if ($report.verification_mode -ne 'dependency-closure-set') {
+            throw "Pydantic verification did not preserve isolated dependency closures"
+          }
+          $closures = @($report.closure_verifications)
+          $verifierDirectories = @(
+            Get-ChildItem -LiteralPath "$resultRoot\verifiers" -Directory |
+              Where-Object { $_.Name -match '^closure-\d{4}$' } |
+              Sort-Object Name
+          )
+          if ($closures.Count -lt 2 -or $verifierDirectories.Count -ne $closures.Count) {
+            throw "Pydantic closure evidence count does not match its aggregate report"
+          }
+          $exeHashes = @()
+          $mapHashes = @()
+          for ($index = 0; $index -lt $closures.Count; $index++) {
+            $closure = $closures[$index]
+            $expectedDirectoryName = 'closure-{0:D4}' -f ($index + 1)
+            $verifierDirectory = $verifierDirectories[$index]
+            if ($verifierDirectory.Name -ne $expectedDirectoryName) {
+              throw "Unexpected Pydantic verifier directory $($verifierDirectory.Name)"
+            }
+            $exePath = Join-Path $verifierDirectory.FullName 'staticpython-pack-verify.exe'
+            $mapPath = Join-Path $verifierDirectory.FullName 'staticpython-pack-verify.map'
+            $pdbPath = Join-Path $verifierDirectory.FullName 'staticpython-pack-verify.pdb'
+            foreach ($evidencePath in @($exePath, $mapPath, $pdbPath)) {
+              if (
+                -not (Test-Path -LiteralPath $evidencePath -PathType Leaf) -or
+                (Get-Item -LiteralPath $evidencePath).Length -le 0
+              ) {
+                throw "Pydantic verifier evidence is missing or empty: $evidencePath"
+              }
+            }
+            $exeSha256 = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($exeSha256 -ne $closure.executable_sha256) {
+              throw "Pydantic closure $expectedDirectoryName executable hash does not match its report"
+            }
+            $mapSha256 = (Get-FileHash -LiteralPath $mapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($mapSha256 -ne $closure.map_sha256) {
+              throw "Pydantic closure $expectedDirectoryName map hash does not match its report"
+            }
+            $dependencyOutput = (& dumpbin /NOLOGO /DEPENDENTS $exePath | Out-String)
+            if ($LASTEXITCODE -ne 0) {
+              throw "dumpbin could not re-audit Pydantic closure $expectedDirectoryName"
+            }
+            $observedDependencies = @(
+              $dependencyOutput -split "`r?`n" |
+                ForEach-Object { $_.Trim() } |
+                Where-Object { $_ -match '(?i)^[a-z0-9_.-]+\.dll$' } |
+                ForEach-Object { $_.ToUpperInvariant() } |
+                Sort-Object -Unique
+            )
+            $reportedDependencies = @(
+              $closure.pe_dependencies |
+                ForEach-Object { $_.ToUpperInvariant() } |
+                Sort-Object -Unique
+            )
+            if (
+              $observedDependencies.Count -eq 0 -or
+              @(Compare-Object $reportedDependencies $observedDependencies).Count -ne 0
+            ) {
+              throw "Pydantic closure $expectedDirectoryName PE imports do not match its report"
+            }
+            $exeHashes += $exeSha256
+            $mapHashes += $mapSha256
+          }
+          function Get-CombinedEvidenceHash([string[]] $hashes) {
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            try {
+              $bytes = [Text.Encoding]::ASCII.GetBytes(($hashes -join "`n"))
+              return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+            } finally {
+              $algorithm.Dispose()
+            }
+          }
+          $combinedExeSha256 = Get-CombinedEvidenceHash $exeHashes
+          if (
+            $combinedExeSha256 -ne $report.executable_sha256 -or
+            $combinedExeSha256 -ne $report.pe_audit.executable_sha256
+          ) {
+            throw "Pydantic aggregate executable hash does not match its closure evidence"
+          }
+          if ((Get-CombinedEvidenceHash $mapHashes) -ne $report.pe_audit.map_sha256) {
+            throw "Pydantic aggregate map hash does not match its closure evidence"
+          }
+          if (
+            @($report.pe_audit.forbidden_dependencies).Count -ne 0 -or
+            @($report.pe_audit.non_system_dependencies).Count -ne 0 -or
+            @($report.pe_audit.forbidden_entry_symbols).Count -ne 0 -or
+            @($report.pe_audit.main_object_records).Count -ne 0
+          ) {
+            throw "Pydantic verifier report contains forbidden PE evidence"
+          }
+          $releasedFiles = @(
+            foreach ($smoke in @($report.integration_smoke_tests)) {
+              if ($null -eq $smoke.PSObject.Properties['released_files']) {
+                throw "Pydantic verification smoke $($smoke.name) has no released_files evidence"
+              }
+              foreach ($path in @($smoke.released_files)) {
+                "$($smoke.integration):$($smoke.name):$path"
+              }
+            }
+          )
+          if ($releasedFiles.Count -ne 0) {
+            throw "Pydantic verification released runtime files: $($releasedFiles -join ', ')"
+          }
+          $pydanticSmokes = @($report.integration_smoke_tests | Where-Object {
+            $_.integration -eq 'pydantic' -and $_.status -eq 'passed'
+          })
+          if ($pydanticSmokes.Count -ne 1) { throw "Pydantic behavior smoke did not pass exactly once" }
+          @(
+            "## Experimental Pydantic static pack",
+            "",
+            "- CPython: ``$env:VERIFY_CPYTHON_VERSION``",
+            "- Pydantic: ``$($pydantic.version)``",
+            "- pydantic-core: ``$($metadataByName['pydantic_core'].version)``",
+            "- Runtime ABI: ``$($pydantic.runtime_abi)``",
+            "- Packs: $($expected.Keys -join ', ')",
+            "- PE dependencies: $(@($report.pe_audit.dependencies) -join ', ')"
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload Pydantic static evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pydantic-static-2.13.4-${{ matrix.python_tag }}
+          path: |
+            dist/pydantic-2.13.4/packs/*.zip
+            dist/pydantic-2.13.4/staticpython-pack-verify-report.json
+            dist/pydantic-2.13.4/verifiers/**/*.exe
+            dist/pydantic-2.13.4/verifiers/**/*.map
+            dist/pydantic-2.13.4/verifiers/**/*.pdb
           if-no-files-found: warn
           retention-days: 30
