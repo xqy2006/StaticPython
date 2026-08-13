@@ -186,7 +186,10 @@ class FastAPIPackTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         job = workflow.split("  sdk-linked-fastapi:\n", 1)[1]
 
-        self.assertIn("staticpython-pack-verify.exe", job)
+        self.assertIn("$report.verification_mode -ne 'dependency-closure-set'", job)
+        self.assertIn("$report.closure_verifications", job)
+        self.assertIn("closure-{0:D4}", job)
+        self.assertIn("Get-CombinedEvidenceHash", job)
         self.assertIn("$report.pe_audit.executable_sha256", job)
         self.assertIn("$report.pe_audit.map_sha256", job)
         self.assertIn("@($report.pe_audit.main_object_records).Count -ne 0", job)
