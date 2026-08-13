@@ -1029,6 +1029,9 @@ def prepare_numpy_artifacts(context) -> None:
 LIBRARY_INTEGRATION = pypi_library(
     name="numpy",
     release_version="2.4.4",
+    source_archive_sha256_by_version={
+        "2.4.4": "2d390634c5182175533585cc89f3608a4682ccb173cc9bb940b2881c8d6f8fa0",
+    },
     source_mapping={
         "numpy": "Lib/numpy",
         "?LICENSE.txt": "numpy_builtin/source/LICENSE.txt",

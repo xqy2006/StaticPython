@@ -318,7 +318,7 @@ BOOTSTRAP = {
 def _package_markers(fullname):
     return (
         f"__package__ = '{fullname}'".encode("utf-8"),
-        b"__path__ = [__name__]",
+        b"__path__ = list(getattr(__spec__, 'submodule_search_locations', ()) or ())",
     )
 
 
@@ -451,7 +451,13 @@ def _inject_package_header(content, fullname):
         lines[insert_pos - 1] += newline
     lines[insert_pos:insert_pos] = [
         f"__package__ = '{fullname}'".encode('utf-8') + newline,
-        b"__path__ = [__name__]" + newline,
+        b"try:" + newline,
+        b"    __path__ = list(getattr(__spec__, 'submodule_search_locations', ()) or ())" + newline,
+        b"except Exception:" + newline,
+        b"    __path__ = []" + newline,
+        b"if not __path__:" + newline,
+        b"    import os as _staticpython_os" + newline,
+        b"    __path__ = [_staticpython_os.path.dirname(__file__)]" + newline,
     ]
     return bom + b''.join(lines), True
 

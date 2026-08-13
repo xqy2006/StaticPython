@@ -63,6 +63,9 @@ def patch_pybind11_sources(context) -> None:
 LIBRARY_INTEGRATION = pypi_library(
     name="pybind11",
     release_version="3.0.4",
+    source_archive_sha256_by_version={
+        "3.0.4": "3286b59c8a774b9ee650169302dd5a4eedc30a8617905a0560dd8ee44775130c",
+    },
     source_mapping={
         "pybind11/include/pybind11||include/pybind11": "pybind11_builtin/include/pybind11",
         "pybind11": "Lib/pybind11",

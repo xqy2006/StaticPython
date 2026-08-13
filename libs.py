@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import ast
 from dataclasses import dataclass, field
 import fnmatch
 import hashlib
@@ -380,14 +381,75 @@ def replace_function_block_once(
     return text[:start] + replacement + text[end:]
 
 
+def _package_marker_insert_index(text: str) -> int:
+    tree = ast.parse(text)
+    body = list(tree.body)
+    insert_line = 1
+    if body:
+        first = body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(getattr(first, "value", None), ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            insert_line = getattr(first, "end_lineno", first.lineno) + 1
+            body = body[1:]
+    for node in body:
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            insert_line = getattr(node, "end_lineno", node.lineno) + 1
+            continue
+        break
+
+    lines = text.splitlines(keepends=True)
+    index = max(0, min(insert_line - 1, len(lines)))
+    while index < min(2, len(lines)):
+        stripped = lines[index].lstrip()
+        if stripped.startswith("#!") or (
+            stripped.startswith("#") and "coding" in stripped
+        ):
+            index += 1
+            continue
+        break
+    return index
+
+
 def ensure_package_markers(text: str, package_name: str) -> str:
     package_line = f"__package__ = '{package_name}'"
-    path_line = "__path__ = [__name__]"
-    if package_line in text and path_line in text:
+    path_block = (
+        "try:\n"
+        "    __path__ = list(getattr(__spec__, 'submodule_search_locations', ()) or ())\n"
+        "except Exception:\n"
+        "    __path__ = []\n"
+        "if not __path__:\n"
+        "    import os as _staticpython_os\n"
+        "    __path__ = [_staticpython_os.path.dirname(__file__)]"
+    )
+    legacy_path_line = "__path__ = [__name__]"
+    normalized_text = text.replace("\r\n", "\n")
+    if package_line in text and path_block in normalized_text:
         return text
 
-    header = f"{package_line}\n\n{path_line}\n\n"
-    return header + text.lstrip("\ufeff")
+    bom = "\ufeff" if text.startswith("\ufeff") else ""
+    text = text.lstrip("\ufeff")
+    if package_line in text and legacy_path_line in text:
+        return bom + text.replace(legacy_path_line, path_block, 1)
+    if package_line in text:
+        newline = "\r\n" if "\r\n" in text else "\n"
+        formatted_path_block = path_block.replace("\n", newline)
+        return bom + text.replace(
+            package_line,
+            f"{package_line}{newline}{newline}{formatted_path_block}",
+            1,
+        )
+
+    newline = "\r\n" if "\r\n" in text else "\n"
+    header = f"{package_line}{newline}{newline}{path_block.replace(chr(10), newline)}{newline}{newline}"
+    lines = text.splitlines(keepends=True)
+    insert_at = _package_marker_insert_index(text)
+    if insert_at > 0 and not lines[insert_at - 1].endswith(("\n", "\r")):
+        lines[insert_at - 1] += newline
+    lines.insert(insert_at, header)
+    return bom + "".join(lines)
 
 
 def module_verification_step(
