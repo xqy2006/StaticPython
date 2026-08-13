@@ -655,18 +655,19 @@ def build_smoke_cases(repo_root: Path, packs: list[MaterializedPack]) -> list[Sm
     return cases
 
 
-def _c_bytes_literal(value: str) -> str:
-    pieces: list[str] = []
-    for byte in value.encode("utf-8"):
-        if 32 <= byte <= 126 and byte not in {34, 92}:
-            pieces.append(chr(byte))
-        elif byte == 34:
-            pieces.append(r'\"')
-        elif byte == 92:
-            pieces.append(r"\\")
-        else:
-            pieces.append(f"\\{byte:03o}")
-    return '"' + "".join(pieces) + '"'
+def _c_bytes_initializer(value: str) -> str:
+    """Return a NUL-terminated byte-array initializer without C string literals.
+
+    MSVC rejects a single generated string literal once a behavior smoke grows
+    beyond its implementation limit (C2026).  Byte initializers preserve the
+    exact UTF-8 payload without imposing a per-literal ceiling.
+    """
+    payload = value.encode("utf-8") + b"\0"
+    rows = [
+        "    " + ", ".join(f"0x{byte:02x}" for byte in payload[offset : offset + 16]) + ","
+        for offset in range(0, len(payload), 16)
+    ]
+    return "{\n" + "\n".join(rows) + "\n}"
 
 
 def _namespace_install_code(namespaces: tuple[str, ...]) -> str:
@@ -697,8 +698,16 @@ def write_launcher(
     descriptor_symbols = [pack.metadata["descriptor_symbol"] for pack in packs]
     externs = [f"extern const StaticPythonPackV1 {symbol};" for symbol in descriptor_symbols]
     selected = ["    &StaticPython_BaseResourcePackV1,", *[f"    &{symbol}," for symbol in descriptor_symbols]]
-    smoke_literals = [f"    {_c_bytes_literal(case.code)}," for case in smoke_cases]
-    namespace_code = _c_bytes_literal(_namespace_install_code(namespaces))
+    smoke_arrays = [
+        "static const unsigned char verification_smoke_"
+        f"{index:04d}[] = {_c_bytes_initializer(case.code)};"
+        for index, case in enumerate(smoke_cases)
+    ]
+    smoke_pointers = [
+        f"    (const char *)verification_smoke_{index:04d},"
+        for index in range(len(smoke_cases))
+    ]
+    namespace_code = _c_bytes_initializer(_namespace_install_code(namespaces))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "/* Auto-generated test-only launcher. SPDX-License-Identifier: Apache-2.0 */\n"
@@ -713,10 +722,11 @@ def write_launcher(
         + "\n\nstatic const StaticPythonPackV1 *const verification_packs[] = {\n"
         + "\n".join(selected)
         + "\n};\n\n"
-        + "static const char *const verification_smokes[] = {\n"
-        + "\n".join(smoke_literals)
+        + "\n\n".join(smoke_arrays)
+        + "\n\nstatic const char *const verification_smokes[] = {\n"
+        + "\n".join(smoke_pointers)
         + "\n};\n\n"
-        + f"static const char verification_namespaces[] = {namespace_code};\n\n"
+        + f"static const unsigned char verification_namespaces[] = {namespace_code};\n\n"
         + "static int\nverification_run(int argc, wchar_t **argv)\n{\n"
         + "    if (argc != 2) { fwprintf(stderr, L\"expected one smoke-test index\\n\"); return 64; }\n"
         + "    errno = 0; wchar_t *end = NULL; long index = wcstol(argv[1], &end, 10);\n"
@@ -743,7 +753,7 @@ def write_launcher(
         + "    PyObject *installed = runtime != NULL ? PyObject_CallMethod(runtime, \"install\", NULL) : NULL;\n"
         + "    Py_XDECREF(installed); Py_XDECREF(runtime);\n"
         + "    if (PyErr_Occurred()) { PyErr_Print(); Py_FinalizeEx(); return 121; }\n"
-        + "    if (verification_namespaces[0] != '\\0' && PyRun_SimpleString(verification_namespaces) < 0) {\n"
+        + "    if (verification_namespaces[0] != 0 && PyRun_SimpleString((const char *)verification_namespaces) < 0) {\n"
         + "        PyErr_Print(); Py_FinalizeEx(); return 122;\n"
         + "    }\n"
         + "    int result = 0;\n"

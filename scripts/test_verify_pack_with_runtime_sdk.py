@@ -371,6 +371,31 @@ class VerifyPackWithRuntimeSDKTests(unittest.TestCase):
         for symbol in verifier.FORBIDDEN_ENTRY_SYMBOLS:
             self.assertNotIn(symbol, text)
 
+    def test_launcher_embeds_large_utf8_smoke_without_c_string_literals(self) -> None:
+        metadata = {
+            "name": "demo",
+            "descriptor_symbol": "StaticPython_Pack_demo",
+        }
+        pack = verifier.MaterializedPack(Path("demo.zip"), self.root, metadata)
+        code = ("value = 'static-python'\n" * 1200) + "assert value == '参数\\\\quoted'\n"
+        smoke = verifier.SmokeCase("demo", "large", "inline", code, 10)
+        launcher = verifier.write_launcher(self.root / "large-launcher.c", [pack], [smoke], ())
+        text = launcher.read_text(encoding="utf-8")
+
+        marker = "static const unsigned char verification_smoke_0000[] = {"
+        self.assertIn(marker, text)
+        self.assertIn("(const char *)verification_smoke_0000", text)
+        self.assertNotIn(code[:100], text)
+        initializer = text.split(marker, 1)[1].split("};", 1)[0]
+        encoded = bytes(
+            int(token.strip().rstrip(","), 16)
+            for line in initializer.splitlines()
+            for token in line.split(",")
+            if token.strip()
+        )
+        self.assertEqual(encoded, code.encode("utf-8") + b"\0")
+        self.assertLessEqual(max(map(len, initializer.splitlines())), 100)
+
     def test_system_library_suppressions_apply_to_runtime_and_pack_inputs(self) -> None:
         runtime = {"system_libraries": ["gdiplus.lib", "kernel32.lib"]}
         metadata = {

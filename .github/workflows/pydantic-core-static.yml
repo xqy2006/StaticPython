@@ -1,4 +1,4 @@
-name: Experimental Pydantic static packs
+name: Experimental Pydantic and FastAPI static packs
 
 on:
   push:
@@ -13,6 +13,8 @@ on:
       - "libs.py"
       - "scripts/test_pydantic_core_pack.py"
       - "scripts/test_pydantic_pack.py"
+      - "scripts/test_fastapi_pack.py"
+      - "scripts/fastapi_runtime.py"
       - "scripts/verify_pack_with_runtime_sdk.py"
   pull_request:
     paths:
@@ -25,6 +27,8 @@ on:
       - "libs.py"
       - "scripts/test_pydantic_core_pack.py"
       - "scripts/test_pydantic_pack.py"
+      - "scripts/test_fastapi_pack.py"
+      - "scripts/fastapi_runtime.py"
       - "scripts/verify_pack_with_runtime_sdk.py"
   workflow_dispatch:
 
@@ -724,5 +728,307 @@ jobs:
             dist/pydantic-2.13.4/verifiers/**/*.exe
             dist/pydantic-2.13.4/verifiers/**/*.map
             dist/pydantic-2.13.4/verifiers/**/*.pdb
+          if-no-files-found: warn
+          retention-days: 30
+
+  sdk-linked-fastapi:
+    needs: runtime-sdk
+    runs-on: windows-2022
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cpython_version: "3.11.15"
+            python_tag: cp311
+          - cpython_version: "3.12.13"
+            python_tag: cp312
+          - cpython_version: "3.13.15"
+            python_tag: cp313
+          - cpython_version: "3.14.7"
+            python_tag: cp314
+          - cpython_version: "3.15.0rc1"
+            python_tag: cp315
+    env:
+      VERIFY_CPYTHON_VERSION: ${{ matrix.cpython_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pack build dependencies and pinned Rust
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install packaging
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --target $env:RUST_TARGET
+          rustup run $env:RUST_TOOLCHAIN rustc -Vv
+          rustup run $env:RUST_TOOLCHAIN cargo -V
+
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Run FastAPI pack contract tests
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\test_fastapi_pack.py
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pydantic-core-runtime-sdk-${{ matrix.python_tag }}
+          path: dist/runtime
+
+      - name: Build dependency-complete FastAPI packs and run behavior smoke
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $runtimeSdk = @(Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE\dist\runtime" -Filter *.zip -File)
+          if ($runtimeSdk.Count -ne 1) {
+            throw "Expected exactly one runtime SDK archive, found $($runtimeSdk.Count)"
+          }
+          $packRoot = Join-Path $env:RUNNER_TEMP "fastapi-pack-0.141.1"
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\fastapi-0.141.1"
+          $packDist = Join-Path $resultRoot "packs"
+          New-Item -ItemType Directory -Force $packDist | Out-Null
+          python .\build.py `
+            --cpython-version $env:VERIFY_CPYTHON_VERSION `
+            --download-root $packRoot `
+            --config .\config.json `
+            --profile fastapi-experimental `
+            --pack-only `
+            --pack-runtime-sdk $runtimeSdk[0].FullName `
+            --build-workers $env:STATICPYTHON_BUILD_WORKERS `
+            --output-pack-dir $packDist
+          $sourceRoot = Join-Path $packRoot "cpython-$env:VERIFY_CPYTHON_VERSION"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" `
+            -Destination "$resultRoot\staticpython-pack-verify-report.json"
+          $verifierSource = Join-Path $sourceRoot "PCbuild\staticpython-pack-verify"
+          $verifierDestination = Join-Path $resultRoot "verifiers"
+          $closureSources = @(
+            Get-ChildItem -LiteralPath $verifierSource -Directory |
+              Where-Object { $_.Name -match '^closure-\d{4}$' } |
+              Sort-Object Name
+          )
+          if ($closureSources.Count -lt 2) {
+            throw "Expected dependency-closure verifier directories, found $($closureSources.Count)"
+          }
+          New-Item -ItemType Directory -Force $verifierDestination | Out-Null
+          foreach ($closureSource in $closureSources) {
+            $closureDestination = Join-Path $verifierDestination $closureSource.Name
+            New-Item -ItemType Directory -Force $closureDestination | Out-Null
+            foreach ($fileName in @(
+              'staticpython-pack-verify.exe',
+              'staticpython-pack-verify.map',
+              'staticpython-pack-verify.pdb'
+            )) {
+              Copy-Item `
+                -LiteralPath (Join-Path $closureSource.FullName $fileName) `
+                -Destination (Join-Path $closureDestination $fileName)
+            }
+          }
+
+      - name: Audit FastAPI pack contract
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\fastapi-0.141.1"
+          $packs = @(Get-ChildItem -LiteralPath "$resultRoot\packs" -Filter *.zip -File)
+          if ($packs.Count -ne 10) { throw "Expected ten dependency-complete FastAPI packs, found $($packs.Count)" }
+
+          $metadataByName = @{}
+          foreach ($pack in $packs) {
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($pack.FullName)
+            try {
+              $names = @($archive.Entries | ForEach-Object FullName)
+              $forbidden = @($names | Where-Object { [IO.Path]::GetExtension($_) -in @('.dll', '.pyd', '.exe') })
+              if ($forbidden.Count -gt 0) { throw "$($pack.Name) contains dynamic/executable files: $($forbidden -join ', ')" }
+              $entry = $archive.GetEntry("pack.json")
+              if (-not $entry) { throw "$($pack.Name) has no pack.json" }
+              $reader = [IO.StreamReader]::new($entry.Open())
+              try { $metadata = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+            } finally {
+              $archive.Dispose()
+            }
+            if ($metadataByName.ContainsKey($metadata.name)) { throw "Duplicate pack identity $($metadata.name)" }
+            if ($metadata.verification.status -ne 'passed') { throw "$($metadata.name) was not verified" }
+            if ($metadata.license.status -ne 'complete') { throw "$($metadata.name) has incomplete license evidence" }
+            $metadataByName[$metadata.name] = $metadata
+          }
+
+          $expected = [ordered]@{
+            annotated_doc = '0.0.5'
+            annotated_types = '0.8.0'
+            anyio = '4.14.2'
+            fastapi = '0.141.1'
+            idna = '3.18'
+            pydantic = '2.13.4'
+            pydantic_core = '2.46.4'
+            starlette = '1.6.0'
+            typing_extensions = '4.16.0'
+            typing_inspection = '0.4.3'
+          }
+          foreach ($name in $expected.Keys) {
+            if (-not $metadataByName.ContainsKey($name)) { throw "Missing dependency pack $name" }
+            if ($metadataByName[$name].version -ne $expected[$name]) {
+              throw "Unexpected $name version $($metadataByName[$name].version)"
+            }
+          }
+
+          $fastapi = $metadataByName['fastapi']
+          if ($fastapi.source_archive_sha256 -ne 'e8822fc40db1e1858054d7a949a888695bc9bdce70139178e33bd2871a453ca1') {
+            throw "FastAPI source archive hash is not the pinned sdist"
+          }
+          if ($fastapi.license.expression -ne 'MIT') { throw "FastAPI license expression is not MIT" }
+          $expectedDependencies = @('annotated_doc', 'pydantic', 'starlette', 'typing_extensions', 'typing_inspection')
+          if ((@($fastapi.dependencies) -join ',') -ne ($expectedDependencies -join ',')) {
+            throw "FastAPI dependency metadata does not match the locked core closure"
+          }
+
+          $report = Get-Content -LiteralPath "$resultRoot\staticpython-pack-verify-report.json" -Raw | ConvertFrom-Json
+          if ($report.status -ne 'passed' -or $report.pe_audit.status -ne 'passed') {
+            throw "SDK-linked FastAPI behavior or PE audit failed"
+          }
+          if ($report.verification_mode -ne 'dependency-closure-set') {
+            throw "FastAPI verification did not preserve isolated dependency closures"
+          }
+          $closures = @($report.closure_verifications)
+          $verifierDirectories = @(
+            Get-ChildItem -LiteralPath "$resultRoot\verifiers" -Directory |
+              Where-Object { $_.Name -match '^closure-\d{4}$' } |
+              Sort-Object Name
+          )
+          if ($closures.Count -lt 2 -or $verifierDirectories.Count -ne $closures.Count) {
+            throw "FastAPI closure evidence count does not match its aggregate report"
+          }
+          $exeHashes = @()
+          $mapHashes = @()
+          for ($index = 0; $index -lt $closures.Count; $index++) {
+            $closure = $closures[$index]
+            $expectedDirectoryName = 'closure-{0:D4}' -f ($index + 1)
+            $verifierDirectory = $verifierDirectories[$index]
+            if ($verifierDirectory.Name -ne $expectedDirectoryName) {
+              throw "Unexpected FastAPI verifier directory $($verifierDirectory.Name)"
+            }
+            $exePath = Join-Path $verifierDirectory.FullName 'staticpython-pack-verify.exe'
+            $mapPath = Join-Path $verifierDirectory.FullName 'staticpython-pack-verify.map'
+            $pdbPath = Join-Path $verifierDirectory.FullName 'staticpython-pack-verify.pdb'
+            foreach ($evidencePath in @($exePath, $mapPath, $pdbPath)) {
+              if (
+                -not (Test-Path -LiteralPath $evidencePath -PathType Leaf) -or
+                (Get-Item -LiteralPath $evidencePath).Length -le 0
+              ) {
+                throw "FastAPI verifier evidence is missing or empty: $evidencePath"
+              }
+            }
+            $exeSha256 = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($exeSha256 -ne $closure.executable_sha256) {
+              throw "FastAPI closure $expectedDirectoryName executable hash does not match its report"
+            }
+            $mapSha256 = (Get-FileHash -LiteralPath $mapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($mapSha256 -ne $closure.map_sha256) {
+              throw "FastAPI closure $expectedDirectoryName map hash does not match its report"
+            }
+            $dependencyOutput = (& dumpbin /NOLOGO /DEPENDENTS $exePath | Out-String)
+            if ($LASTEXITCODE -ne 0) {
+              throw "dumpbin could not re-audit FastAPI closure $expectedDirectoryName"
+            }
+            $observedDependencies = @(
+              $dependencyOutput -split "`r?`n" |
+                ForEach-Object { $_.Trim() } |
+                Where-Object { $_ -match '(?i)^[a-z0-9_.-]+\.dll$' } |
+                ForEach-Object { $_.ToUpperInvariant() } |
+                Sort-Object -Unique
+            )
+            $reportedDependencies = @(
+              $closure.pe_dependencies |
+                ForEach-Object { $_.ToUpperInvariant() } |
+                Sort-Object -Unique
+            )
+            if (
+              $observedDependencies.Count -eq 0 -or
+              @(Compare-Object $reportedDependencies $observedDependencies).Count -ne 0
+            ) {
+              throw "FastAPI closure $expectedDirectoryName PE imports do not match its report"
+            }
+            $exeHashes += $exeSha256
+            $mapHashes += $mapSha256
+          }
+          function Get-CombinedEvidenceHash([string[]] $hashes) {
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            try {
+              $bytes = [Text.Encoding]::ASCII.GetBytes(($hashes -join "`n"))
+              return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+            } finally {
+              $algorithm.Dispose()
+            }
+          }
+          $combinedExeSha256 = Get-CombinedEvidenceHash $exeHashes
+          if (
+            $combinedExeSha256 -ne $report.executable_sha256 -or
+            $combinedExeSha256 -ne $report.pe_audit.executable_sha256
+          ) {
+            throw "FastAPI aggregate executable hash does not match its closure evidence"
+          }
+          if ((Get-CombinedEvidenceHash $mapHashes) -ne $report.pe_audit.map_sha256) {
+            throw "FastAPI aggregate map hash does not match its closure evidence"
+          }
+          if (
+            @($report.pe_audit.forbidden_dependencies).Count -ne 0 -or
+            @($report.pe_audit.non_system_dependencies).Count -ne 0 -or
+            @($report.pe_audit.forbidden_entry_symbols).Count -ne 0 -or
+            @($report.pe_audit.main_object_records).Count -ne 0
+          ) {
+            throw "FastAPI verifier report contains forbidden PE evidence"
+          }
+          $releasedFiles = @(
+            foreach ($smoke in @($report.integration_smoke_tests)) {
+              if ($null -eq $smoke.PSObject.Properties['released_files']) {
+                throw "FastAPI verification smoke $($smoke.name) has no released_files evidence"
+              }
+              foreach ($path in @($smoke.released_files)) {
+                "$($smoke.integration):$($smoke.name):$path"
+              }
+            }
+          )
+          if ($releasedFiles.Count -ne 0) {
+            throw "FastAPI verification released runtime files: $($releasedFiles -join ', ')"
+          }
+          $fastapiSmokes = @($report.integration_smoke_tests | Where-Object {
+            $_.integration -eq 'fastapi' -and $_.status -eq 'passed'
+          })
+          if ($fastapiSmokes.Count -ne 1) { throw "FastAPI behavior smoke did not pass exactly once" }
+          @(
+            "## Experimental FastAPI static pack",
+            "",
+            "- CPython: ``$env:VERIFY_CPYTHON_VERSION``",
+            "- FastAPI: ``$($fastapi.version)``",
+            "- Starlette: ``$($metadataByName['starlette'].version)``",
+            "- Pydantic: ``$($metadataByName['pydantic'].version)``",
+            "- Runtime ABI: ``$($fastapi.runtime_abi)``",
+            "- Packs: $($expected.Keys -join ', ')",
+            "- PE dependencies: $(@($report.pe_audit.dependencies) -join ', ')"
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload FastAPI static evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastapi-static-0.141.1-${{ matrix.python_tag }}
+          path: |
+            dist/fastapi-0.141.1/packs/*.zip
+            dist/fastapi-0.141.1/staticpython-pack-verify-report.json
+            dist/fastapi-0.141.1/verifiers/**/*.exe
+            dist/fastapi-0.141.1/verifiers/**/*.map
+            dist/fastapi-0.141.1/verifiers/**/*.pdb
           if-no-files-found: warn
           retention-days: 30
