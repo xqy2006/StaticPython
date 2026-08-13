@@ -511,15 +511,30 @@ jobs:
           Copy-Item `
             -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" `
             -Destination "$resultRoot\staticpython-pack-verify-report.json"
-          Copy-Item `
-            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.exe" `
-            -Destination "$resultRoot\staticpython-pack-verify.exe"
-          Copy-Item `
-            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.map" `
-            -Destination "$resultRoot\staticpython-pack-verify.map"
-          Copy-Item `
-            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.pdb" `
-            -Destination "$resultRoot\staticpython-pack-verify.pdb"
+          $verifierSource = Join-Path $sourceRoot "PCbuild\staticpython-pack-verify"
+          $verifierDestination = Join-Path $resultRoot "verifiers"
+          $closureSources = @(
+            Get-ChildItem -LiteralPath $verifierSource -Directory |
+              Where-Object { $_.Name -match '^closure-\d{4}$' } |
+              Sort-Object Name
+          )
+          if ($closureSources.Count -lt 2) {
+            throw "Expected dependency-closure verifier directories, found $($closureSources.Count)"
+          }
+          New-Item -ItemType Directory -Force $verifierDestination | Out-Null
+          foreach ($closureSource in $closureSources) {
+            $closureDestination = Join-Path $verifierDestination $closureSource.Name
+            New-Item -ItemType Directory -Force $closureDestination | Out-Null
+            foreach ($fileName in @(
+              'staticpython-pack-verify.exe',
+              'staticpython-pack-verify.map',
+              'staticpython-pack-verify.pdb'
+            )) {
+              Copy-Item `
+                -LiteralPath (Join-Path $closureSource.FullName $fileName) `
+                -Destination (Join-Path $closureDestination $fileName)
+            }
+          }
 
       - name: Audit Pydantic pack contract
         shell: pwsh
@@ -578,27 +593,89 @@ jobs:
           if ($report.status -ne 'passed' -or $report.pe_audit.status -ne 'passed') {
             throw "SDK-linked Pydantic behavior or PE audit failed"
           }
-          $exePath = "$resultRoot\staticpython-pack-verify.exe"
-          $mapPath = "$resultRoot\staticpython-pack-verify.map"
-          $pdbPath = "$resultRoot\staticpython-pack-verify.pdb"
-          foreach ($evidencePath in @($exePath, $mapPath, $pdbPath)) {
+          if ($report.verification_mode -ne 'dependency-closure-set') {
+            throw "Pydantic verification did not preserve isolated dependency closures"
+          }
+          $closures = @($report.closure_verifications)
+          $verifierDirectories = @(
+            Get-ChildItem -LiteralPath "$resultRoot\verifiers" -Directory |
+              Where-Object { $_.Name -match '^closure-\d{4}$' } |
+              Sort-Object Name
+          )
+          if ($closures.Count -lt 2 -or $verifierDirectories.Count -ne $closures.Count) {
+            throw "Pydantic closure evidence count does not match its aggregate report"
+          }
+          $exeHashes = @()
+          $mapHashes = @()
+          for ($index = 0; $index -lt $closures.Count; $index++) {
+            $closure = $closures[$index]
+            $expectedDirectoryName = 'closure-{0:D4}' -f ($index + 1)
+            $verifierDirectory = $verifierDirectories[$index]
+            if ($verifierDirectory.Name -ne $expectedDirectoryName) {
+              throw "Unexpected Pydantic verifier directory $($verifierDirectory.Name)"
+            }
+            $exePath = Join-Path $verifierDirectory.FullName 'staticpython-pack-verify.exe'
+            $mapPath = Join-Path $verifierDirectory.FullName 'staticpython-pack-verify.map'
+            $pdbPath = Join-Path $verifierDirectory.FullName 'staticpython-pack-verify.pdb'
+            foreach ($evidencePath in @($exePath, $mapPath, $pdbPath)) {
+              if (
+                -not (Test-Path -LiteralPath $evidencePath -PathType Leaf) -or
+                (Get-Item -LiteralPath $evidencePath).Length -le 0
+              ) {
+                throw "Pydantic verifier evidence is missing or empty: $evidencePath"
+              }
+            }
+            $exeSha256 = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($exeSha256 -ne $closure.executable_sha256) {
+              throw "Pydantic closure $expectedDirectoryName executable hash does not match its report"
+            }
+            $mapSha256 = (Get-FileHash -LiteralPath $mapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($mapSha256 -ne $closure.map_sha256) {
+              throw "Pydantic closure $expectedDirectoryName map hash does not match its report"
+            }
+            $dependencyOutput = (& dumpbin /NOLOGO /DEPENDENTS $exePath | Out-String)
+            if ($LASTEXITCODE -ne 0) {
+              throw "dumpbin could not re-audit Pydantic closure $expectedDirectoryName"
+            }
+            $observedDependencies = @(
+              $dependencyOutput -split "`r?`n" |
+                ForEach-Object { $_.Trim() } |
+                Where-Object { $_ -match '(?i)^[a-z0-9_.-]+\.dll$' } |
+                ForEach-Object { $_.ToUpperInvariant() } |
+                Sort-Object -Unique
+            )
+            $reportedDependencies = @(
+              $closure.pe_dependencies |
+                ForEach-Object { $_.ToUpperInvariant() } |
+                Sort-Object -Unique
+            )
             if (
-              -not (Test-Path -LiteralPath $evidencePath -PathType Leaf) -or
-              (Get-Item -LiteralPath $evidencePath).Length -le 0
+              $observedDependencies.Count -eq 0 -or
+              @(Compare-Object $reportedDependencies $observedDependencies).Count -ne 0
             ) {
-              throw "Pydantic verifier evidence is missing or empty: $evidencePath"
+              throw "Pydantic closure $expectedDirectoryName PE imports do not match its report"
+            }
+            $exeHashes += $exeSha256
+            $mapHashes += $mapSha256
+          }
+          function Get-CombinedEvidenceHash([string[]] $hashes) {
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            try {
+              $bytes = [Text.Encoding]::ASCII.GetBytes(($hashes -join "`n"))
+              return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+            } finally {
+              $algorithm.Dispose()
             }
           }
-          $exeSha256 = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $combinedExeSha256 = Get-CombinedEvidenceHash $exeHashes
           if (
-            $exeSha256 -ne $report.executable_sha256 -or
-            $exeSha256 -ne $report.pe_audit.executable_sha256
+            $combinedExeSha256 -ne $report.executable_sha256 -or
+            $combinedExeSha256 -ne $report.pe_audit.executable_sha256
           ) {
-            throw "uploaded Pydantic verifier executable hash does not match its report"
+            throw "Pydantic aggregate executable hash does not match its closure evidence"
           }
-          $mapSha256 = (Get-FileHash -LiteralPath $mapPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($mapSha256 -ne $report.pe_audit.map_sha256) {
-            throw "uploaded Pydantic verifier map hash does not match its report"
+          if ((Get-CombinedEvidenceHash $mapHashes) -ne $report.pe_audit.map_sha256) {
+            throw "Pydantic aggregate map hash does not match its closure evidence"
           }
           if (
             @($report.pe_audit.forbidden_dependencies).Count -ne 0 -or
@@ -607,28 +684,6 @@ jobs:
             @($report.pe_audit.main_object_records).Count -ne 0
           ) {
             throw "Pydantic verifier report contains forbidden PE evidence"
-          }
-          $dependencyOutput = (& dumpbin /NOLOGO /DEPENDENTS $exePath | Out-String)
-          if ($LASTEXITCODE -ne 0) {
-            throw "dumpbin could not re-audit the uploaded Pydantic verifier executable"
-          }
-          $observedDependencies = @(
-            $dependencyOutput -split "`r?`n" |
-              ForEach-Object { $_.Trim() } |
-              Where-Object { $_ -match '(?i)^[a-z0-9_.-]+\.dll$' } |
-              ForEach-Object { $_.ToUpperInvariant() } |
-              Sort-Object -Unique
-          )
-          $reportedDependencies = @(
-            $report.pe_audit.dependencies |
-              ForEach-Object { $_.ToUpperInvariant() } |
-              Sort-Object -Unique
-          )
-          if (
-            $observedDependencies.Count -eq 0 -or
-            @(Compare-Object $reportedDependencies $observedDependencies).Count -ne 0
-          ) {
-            throw "uploaded Pydantic verifier PE imports do not match its report"
           }
           $releasedFiles = @(
             foreach ($smoke in @($report.integration_smoke_tests)) {
@@ -666,8 +721,8 @@ jobs:
           path: |
             dist/pydantic-2.13.4/packs/*.zip
             dist/pydantic-2.13.4/staticpython-pack-verify-report.json
-            dist/pydantic-2.13.4/staticpython-pack-verify.exe
-            dist/pydantic-2.13.4/staticpython-pack-verify.map
-            dist/pydantic-2.13.4/staticpython-pack-verify.pdb
+            dist/pydantic-2.13.4/verifiers/**/*.exe
+            dist/pydantic-2.13.4/verifiers/**/*.map
+            dist/pydantic-2.13.4/verifiers/**/*.pdb
           if-no-files-found: warn
           retention-days: 30
