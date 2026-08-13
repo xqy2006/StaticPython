@@ -185,7 +185,16 @@ class FastAPIPackTests(unittest.TestCase):
             REPO_ROOT / ".github" / "workflows" / "pydantic-core-static.yml"
         ).read_text(encoding="utf-8")
         job = workflow.split("  sdk-linked-fastapi:\n", 1)[1]
+        core_job = workflow.split("  sdk-linked-pydantic-core:\n", 1)[1].split(
+            "  sdk-linked-pydantic:\n", 1
+        )[0]
 
+        self.assertNotIn("Expected dependency-closure verifier directories", core_job)
+        self.assertIn(
+            '"$sourceRoot\\PCbuild\\staticpython-pack-verify\\staticpython-pack-verify.exe"',
+            core_job,
+        )
+        self.assertIn("Expected dependency-closure verifier directories", job)
         self.assertIn("$report.verification_mode -ne 'dependency-closure-set'", job)
         self.assertIn("$report.closure_verifications", job)
         self.assertIn("closure-{0:D4}", job)

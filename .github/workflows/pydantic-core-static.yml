@@ -250,30 +250,15 @@ jobs:
           Copy-Item `
             -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" `
             -Destination "$resultRoot\staticpython-pack-verify-report.json"
-          $verifierSource = Join-Path $sourceRoot "PCbuild\staticpython-pack-verify"
-          $verifierDestination = Join-Path $resultRoot "verifiers"
-          $closureSources = @(
-            Get-ChildItem -LiteralPath $verifierSource -Directory |
-              Where-Object { $_.Name -match '^closure-\d{4}$' } |
-              Sort-Object Name
-          )
-          if ($closureSources.Count -lt 2) {
-            throw "Expected dependency-closure verifier directories, found $($closureSources.Count)"
-          }
-          New-Item -ItemType Directory -Force $verifierDestination | Out-Null
-          foreach ($closureSource in $closureSources) {
-            $closureDestination = Join-Path $verifierDestination $closureSource.Name
-            New-Item -ItemType Directory -Force $closureDestination | Out-Null
-            foreach ($fileName in @(
-              'staticpython-pack-verify.exe',
-              'staticpython-pack-verify.map',
-              'staticpython-pack-verify.pdb'
-            )) {
-              Copy-Item `
-                -LiteralPath (Join-Path $closureSource.FullName $fileName) `
-                -Destination (Join-Path $closureDestination $fileName)
-            }
-          }
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.exe" `
+            -Destination "$resultRoot\staticpython-pack-verify.exe"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.map" `
+            -Destination "$resultRoot\staticpython-pack-verify.map"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.pdb" `
+            -Destination "$resultRoot\staticpython-pack-verify.pdb"
 
       - name: Audit pydantic-core pack contract
         shell: pwsh
@@ -826,15 +811,30 @@ jobs:
           Copy-Item `
             -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" `
             -Destination "$resultRoot\staticpython-pack-verify-report.json"
-          Copy-Item `
-            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.exe" `
-            -Destination "$resultRoot\staticpython-pack-verify.exe"
-          Copy-Item `
-            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.map" `
-            -Destination "$resultRoot\staticpython-pack-verify.map"
-          Copy-Item `
-            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.pdb" `
-            -Destination "$resultRoot\staticpython-pack-verify.pdb"
+          $verifierSource = Join-Path $sourceRoot "PCbuild\staticpython-pack-verify"
+          $verifierDestination = Join-Path $resultRoot "verifiers"
+          $closureSources = @(
+            Get-ChildItem -LiteralPath $verifierSource -Directory |
+              Where-Object { $_.Name -match '^closure-\d{4}$' } |
+              Sort-Object Name
+          )
+          if ($closureSources.Count -lt 2) {
+            throw "Expected dependency-closure verifier directories, found $($closureSources.Count)"
+          }
+          New-Item -ItemType Directory -Force $verifierDestination | Out-Null
+          foreach ($closureSource in $closureSources) {
+            $closureDestination = Join-Path $verifierDestination $closureSource.Name
+            New-Item -ItemType Directory -Force $closureDestination | Out-Null
+            foreach ($fileName in @(
+              'staticpython-pack-verify.exe',
+              'staticpython-pack-verify.map',
+              'staticpython-pack-verify.pdb'
+            )) {
+              Copy-Item `
+                -LiteralPath (Join-Path $closureSource.FullName $fileName) `
+                -Destination (Join-Path $closureDestination $fileName)
+            }
+          }
 
       - name: Audit FastAPI pack contract
         shell: pwsh
