@@ -99,6 +99,8 @@ class LibraryIntegration:
     project_name: str | None = None
     release_version: str | None = None
     minimum_release_version: str | None = None
+    source_archive_sha256: str | None = None
+    source_archive_sha256_by_version: dict[str, str] = field(default_factory=dict)
     dependencies: list[str] = field(default_factory=list)
     auto_resolve_dependencies: bool = False
     overlay_entries: list[str] = field(default_factory=list)
@@ -119,6 +121,7 @@ class LibraryIntegration:
     patch_rules: list[dict] = field(default_factory=list)
     source_resolver: str | None = None
     resource_rules: list[dict] = field(default_factory=list)
+    toolchain_metadata: dict[str, object] = field(default_factory=dict)
     license_expression: str | None = None
     license_files: list[str] = field(default_factory=list)
     license_sources: list[dict] = field(default_factory=list)
@@ -1616,6 +1619,33 @@ def _version_format_args(context: LibraryHookContext) -> dict[str, int | str]:
     }
 
 
+def _record_source_archive_sha256(
+    integration: LibraryIntegration,
+    resolved_version: str,
+    archive_path: Path,
+) -> str:
+    digest = hashlib.sha256()
+    with archive_path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    observed = digest.hexdigest()
+    expected = integration.source_archive_sha256_by_version.get(resolved_version)
+    if expected is not None:
+        normalized_expected = expected.casefold()
+        if re.fullmatch(r"[0-9a-f]{64}", normalized_expected) is None:
+            raise RuntimeError(
+                f"{integration.name} has an invalid source archive SHA-256 pin "
+                f"for {resolved_version}: {expected!r}"
+            )
+        if observed != normalized_expected:
+            raise RuntimeError(
+                f"{integration.name} source archive hash mismatch for {resolved_version}: "
+                f"expected {normalized_expected}, observed {observed}"
+            )
+    integration.source_archive_sha256 = observed
+    return observed
+
+
 def _build_pypi_source_hook(
     integration: LibraryIntegration,
     project_name: str,
@@ -1666,6 +1696,12 @@ def _build_pypi_source_hook(
                 )
             else:
                 context.log(f"reusing cached {project_name} {resolved_release_version} archive")
+
+            _record_source_archive_sha256(
+                integration,
+                resolved_release_version,
+                archive_path,
+            )
 
             try:
                 extracted_root = _extract_archive(archive_path, extract_root, context.log)
@@ -1744,6 +1780,8 @@ def _build_github_source_hook(
         used_source = download_first_available(context.log, urls, archive_path)
         context.log(f"using GitHub archive {repo}@{resolved_ref} from {used_source}")
 
+        _record_source_archive_sha256(integration, resolved_ref, archive_path)
+
         extracted_root = _extract_archive(archive_path, extract_root, context.log)
         context.log(f"using GitHub source from {extracted_root}")
         _materialize_source_mapping(
@@ -1764,6 +1802,7 @@ def pypi_library(
     project_name: str | None = None,
     release_version: str | None = None,
     minimum_release_version: str | None = None,
+    source_archive_sha256_by_version: dict[str, str] | None = None,
     dependencies: list[str] | None = None,
     auto_resolve_dependencies: bool = True,
     source_entries: list[str] | None = None,
@@ -1785,6 +1824,7 @@ def pypi_library(
     patch_rules: list[dict] | None = None,
     source_resolver: str | None = "pypi-sdist",
     resource_rules: list[dict] | None = None,
+    toolchain_metadata: dict[str, object] | None = None,
     license_expression: str | None = None,
     license_files: list[str] | None = None,
     license_sources: list[dict] | None = None,
@@ -1811,6 +1851,7 @@ def pypi_library(
         project_name=project_name or name,
         release_version=release_version,
         minimum_release_version=minimum_release_version,
+        source_archive_sha256_by_version=dict(source_archive_sha256_by_version or {}),
         dependencies=list(dependencies or []),
         auto_resolve_dependencies=auto_resolve_dependencies,
         overlay_entries=normalized_overlay_entries,
@@ -1840,6 +1881,7 @@ def pypi_library(
         patch_rules=list(patch_rules or []),
         source_resolver=source_resolver or "pypi-sdist",
         resource_rules=list(resource_rules or []),
+        toolchain_metadata=dict(toolchain_metadata or {}),
         license_expression=license_expression,
         license_files=list(license_files or []),
         license_sources=list(license_sources or []),
@@ -1865,6 +1907,7 @@ def github_library(
     ref_kind: str = "tags",
     archive_url_template: str | None = None,
     minimum_release_version: str | None = None,
+    source_archive_sha256_by_version: dict[str, str] | None = None,
     dependencies: list[str] | None = None,
     auto_resolve_dependencies: bool = False,
     source_entries: list[str] | None = None,
@@ -1886,6 +1929,7 @@ def github_library(
     patch_rules: list[dict] | None = None,
     source_resolver: str | None = "github-source",
     resource_rules: list[dict] | None = None,
+    toolchain_metadata: dict[str, object] | None = None,
     license_expression: str | None = None,
     license_files: list[str] | None = None,
     license_sources: list[dict] | None = None,
@@ -1912,6 +1956,7 @@ def github_library(
         project_name=repo,
         release_version=ref,
         minimum_release_version=minimum_release_version,
+        source_archive_sha256_by_version=dict(source_archive_sha256_by_version or {}),
         dependencies=list(dependencies or []),
         auto_resolve_dependencies=auto_resolve_dependencies,
         overlay_entries=normalized_overlay_entries,
@@ -1941,6 +1986,7 @@ def github_library(
         patch_rules=list(patch_rules or []),
         source_resolver=source_resolver or "github-source",
         resource_rules=list(resource_rules or []),
+        toolchain_metadata=dict(toolchain_metadata or {}),
         license_expression=license_expression,
         license_files=list(license_files or []),
         license_sources=list(license_sources or []),
@@ -1984,6 +2030,7 @@ def simple_library(
     project_name: str | None = None,
     release_version: str | None = None,
     minimum_release_version: str | None = None,
+    source_archive_sha256_by_version: dict[str, str] | None = None,
     dependencies: list[str] | None = None,
     auto_resolve_dependencies: bool | None = None,
     source_entries: list[str] | None = None,
@@ -1997,6 +2044,7 @@ def simple_library(
     patch_rules: list[dict] | None = None,
     source_resolver: str | None = None,
     resource_rules: list[dict] | None = None,
+    toolchain_metadata: dict[str, object] | None = None,
     license_expression: str | None = None,
     license_files: list[str] | None = None,
     license_sources: list[dict] | None = None,
@@ -2022,6 +2070,7 @@ def simple_library(
     common_kwargs = {
         "name": name,
         "minimum_release_version": minimum_release_version,
+        "source_archive_sha256_by_version": source_archive_sha256_by_version,
         "dependencies": dependencies,
         "source_entries": source_entries,
         "source_mapping": resolved_mapping,
@@ -2034,6 +2083,7 @@ def simple_library(
         "patch_rules": patch_rules,
         "source_resolver": source_resolver,
         "resource_rules": resource_rules,
+        "toolchain_metadata": toolchain_metadata,
         "license_expression": license_expression,
         "license_files": license_files,
         "license_sources": license_sources,

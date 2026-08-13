@@ -197,6 +197,7 @@ WINDOWS_SDK_LIBRARY_NAMES = {
     "imm32.lib",
     "msimg32.lib",
     "netapi32.lib",
+    "ntdll.lib",
     "oleacc.lib",
     "setupapi.lib",
     "windowscodecs.lib",
@@ -1754,6 +1755,48 @@ def _integration_license_files(source_root: Path, integration) -> tuple[list[Pat
     return unique, "complete" if complete else "missing"
 
 
+_PACK_TOOLCHAIN_BASE_KEYS = {
+    "platform_toolset",
+    "runtime_library",
+    "visual_studio_version",
+    "vscmd_version",
+    "vc_tools_version",
+    "windows_sdk_version",
+}
+
+
+def _pack_toolchain_metadata(integration) -> dict[str, object]:
+    """Validate pack-specific toolchain provenance before serializing it."""
+    raw = integration.toolchain_metadata
+    if not isinstance(raw, dict):
+        raise RuntimeError(f"{integration.name} toolchain metadata must be an object")
+    conflicting = sorted(_PACK_TOOLCHAIN_BASE_KEYS.intersection(raw), key=str.casefold)
+    if conflicting:
+        raise RuntimeError(
+            f"{integration.name} toolchain metadata cannot override base key(s): "
+            + ", ".join(conflicting)
+        )
+
+    def normalize(value: object, path: str) -> object:
+        if value is None or isinstance(value, (bool, int, str)):
+            return value
+        if isinstance(value, list):
+            return [normalize(item, f"{path}[]") for item in value]
+        if isinstance(value, dict):
+            normalized: dict[str, object] = {}
+            for key in sorted(value, key=lambda item: str(item).casefold()):
+                if not isinstance(key, str) or not key:
+                    raise RuntimeError(f"{integration.name} toolchain metadata key at {path} must be a non-empty string")
+                normalized[key] = normalize(value[key], f"{path}.{key}")
+            return normalized
+        raise RuntimeError(
+            f"{integration.name} toolchain metadata value at {path} has unsupported type "
+            f"{type(value).__name__}"
+        )
+
+    return normalize(raw, "toolchain")
+
+
 def _write_pack_descriptor_source(
     staging_root: Path,
     integration,
@@ -2042,6 +2085,7 @@ def export_library_pack(
             "project_name": integration.project_name,
             "source_provider": integration.source_provider,
             "source_resolver": integration.source_resolver,
+            "source_archive_sha256": integration.source_archive_sha256,
             "source_tree_sha256": source_tree_hash,
             "source_files": source_file_records,
             "staticpython_commit": git_commit_or_none(REPO_ROOT),
@@ -2078,6 +2122,7 @@ def export_library_pack(
                 "vscmd_version": os.environ.get("VSCMD_VER"),
                 "vc_tools_version": os.environ.get("VCToolsVersion"),
                 "windows_sdk_version": os.environ.get("WindowsSDKVersion"),
+                **_pack_toolchain_metadata(integration),
             },
             "license": {
                 "expression": integration.license_expression,

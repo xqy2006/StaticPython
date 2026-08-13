@@ -1,0 +1,430 @@
+name: Experimental pydantic-core static pack
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/pydantic-core-static.yml"
+      - "Lib/pydantic_core/**"
+      - "assets/overlay/Include/staticpython_pack.h"
+      - "assets/overlay/Python/staticpython_pack_runtime.c"
+      - "build.py"
+      - "config.json"
+      - "libs.py"
+      - "scripts/test_pydantic_core_pack.py"
+      - "scripts/verify_pack_with_runtime_sdk.py"
+  pull_request:
+    paths:
+      - ".github/workflows/pydantic-core-static.yml"
+      - "Lib/pydantic_core/**"
+      - "assets/overlay/Include/staticpython_pack.h"
+      - "assets/overlay/Python/staticpython_pack_runtime.c"
+      - "build.py"
+      - "config.json"
+      - "libs.py"
+      - "scripts/test_pydantic_core_pack.py"
+      - "scripts/verify_pack_with_runtime_sdk.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staticpython-pydantic-core-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  STATICPYTHON_BUILD_WORKERS: "2"
+  RUST_TOOLCHAIN: "1.88.0"
+  RUST_TARGET: "x86_64-pc-windows-msvc"
+
+jobs:
+  runtime-sdk:
+    runs-on: windows-2022
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cpython_version: "3.11.15"
+            python_tag: cp311
+          - cpython_version: "3.12.13"
+            python_tag: cp312
+          - cpython_version: "3.13.15"
+            python_tag: cp313
+          - cpython_version: "3.14.7"
+            python_tag: cp314
+          - cpython_version: "3.15.0rc1"
+            python_tag: cp315
+    env:
+      VERIFY_CPYTHON_VERSION: ${{ matrix.cpython_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime build dependencies
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install packaging
+          choco install strawberryperl -y --no-progress
+
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Run runtime SDK contract tests
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\test_runtime_sdk.py
+
+      - name: Build exact-commit audited runtime SDK
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP "pydantic-core-runtime-${{ matrix.python_tag }}"
+          $runtimeDist = Join-Path $env:GITHUB_WORKSPACE "dist\runtime"
+          New-Item -ItemType Directory -Force $runtimeDist | Out-Null
+          python .\build.py `
+            --cpython-version $env:VERIFY_CPYTHON_VERSION `
+            --download-root $runtimeRoot `
+            --profile runtime-sdk `
+            --build-workers $env:STATICPYTHON_BUILD_WORKERS `
+            --output-runtime-sdk-dir $runtimeDist
+
+      - name: Upload exact runtime SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pydantic-core-runtime-sdk-${{ matrix.python_tag }}
+          path: dist/runtime/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  sdk-linked-pydantic-core:
+    needs: runtime-sdk
+    runs-on: windows-2022
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cpython_version: "3.11.15"
+            python_tag: cp311
+            pydantic_core_version: "2.46.4"
+            profile: pydantic-core-experimental
+          - cpython_version: "3.11.15"
+            python_tag: cp311
+            pydantic_core_version: "2.47.0"
+            profile: pydantic-core-2-47-experimental
+          - cpython_version: "3.11.15"
+            python_tag: cp311
+            pydantic_core_version: "2.48.0"
+            profile: pydantic-core-latest-experimental
+          - cpython_version: "3.12.13"
+            python_tag: cp312
+            pydantic_core_version: "2.46.4"
+            profile: pydantic-core-experimental
+          - cpython_version: "3.12.13"
+            python_tag: cp312
+            pydantic_core_version: "2.47.0"
+            profile: pydantic-core-2-47-experimental
+          - cpython_version: "3.12.13"
+            python_tag: cp312
+            pydantic_core_version: "2.48.0"
+            profile: pydantic-core-latest-experimental
+          - cpython_version: "3.13.15"
+            python_tag: cp313
+            pydantic_core_version: "2.46.4"
+            profile: pydantic-core-experimental
+          - cpython_version: "3.13.15"
+            python_tag: cp313
+            pydantic_core_version: "2.47.0"
+            profile: pydantic-core-2-47-experimental
+          - cpython_version: "3.13.15"
+            python_tag: cp313
+            pydantic_core_version: "2.48.0"
+            profile: pydantic-core-latest-experimental
+          - cpython_version: "3.14.7"
+            python_tag: cp314
+            pydantic_core_version: "2.46.4"
+            profile: pydantic-core-experimental
+          - cpython_version: "3.14.7"
+            python_tag: cp314
+            pydantic_core_version: "2.47.0"
+            profile: pydantic-core-2-47-experimental
+          - cpython_version: "3.14.7"
+            python_tag: cp314
+            pydantic_core_version: "2.48.0"
+            profile: pydantic-core-latest-experimental
+          - cpython_version: "3.15.0rc1"
+            python_tag: cp315
+            pydantic_core_version: "2.46.4"
+            profile: pydantic-core-experimental
+          - cpython_version: "3.15.0rc1"
+            python_tag: cp315
+            pydantic_core_version: "2.47.0"
+            profile: pydantic-core-2-47-experimental
+          - cpython_version: "3.15.0rc1"
+            python_tag: cp315
+            pydantic_core_version: "2.48.0"
+            profile: pydantic-core-latest-experimental
+    env:
+      VERIFY_CPYTHON_VERSION: ${{ matrix.cpython_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pack build dependencies and pinned Rust
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install packaging
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --target $env:RUST_TARGET
+          rustup run $env:RUST_TOOLCHAIN rustc -Vv
+          rustup run $env:RUST_TOOLCHAIN cargo -V
+
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Run pydantic-core contract tests
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\test_pydantic_core_pack.py
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pydantic-core-runtime-sdk-${{ matrix.python_tag }}
+          path: dist/runtime
+
+      - name: Build static Rust pack, link audited SDK, and run behavior smoke
+        shell: pwsh
+        env:
+          PYDANTIC_CORE_VERSION: ${{ matrix.pydantic_core_version }}
+          PYDANTIC_CORE_PROFILE: ${{ matrix.profile }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $runtimeSdk = @(Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE\dist\runtime" -Filter *.zip -File)
+          if ($runtimeSdk.Count -ne 1) {
+            throw "Expected exactly one runtime SDK archive, found $($runtimeSdk.Count)"
+          }
+          $packRoot = Join-Path $env:RUNNER_TEMP "pydantic-core-pack-$env:PYDANTIC_CORE_VERSION"
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\pydantic-core-$env:PYDANTIC_CORE_VERSION"
+          $packDist = Join-Path $resultRoot "packs"
+          New-Item -ItemType Directory -Force $packDist | Out-Null
+          python .\build.py `
+            --cpython-version $env:VERIFY_CPYTHON_VERSION `
+            --download-root $packRoot `
+            --config .\config.json `
+            --profile $env:PYDANTIC_CORE_PROFILE `
+            --pack-only `
+            --pack-runtime-sdk $runtimeSdk[0].FullName `
+            --build-workers $env:STATICPYTHON_BUILD_WORKERS `
+            --output-pack-dir $packDist `
+            --output-pack-name pydantic_core
+          $sourceRoot = Join-Path $packRoot "cpython-$env:VERIFY_CPYTHON_VERSION"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify-report.json" `
+            -Destination "$resultRoot\staticpython-pack-verify-report.json"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.exe" `
+            -Destination "$resultRoot\staticpython-pack-verify.exe"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.map" `
+            -Destination "$resultRoot\staticpython-pack-verify.map"
+          Copy-Item `
+            -LiteralPath "$sourceRoot\PCbuild\staticpython-pack-verify\staticpython-pack-verify.pdb" `
+            -Destination "$resultRoot\staticpython-pack-verify.pdb"
+
+      - name: Audit pydantic-core pack contract
+        shell: pwsh
+        env:
+          PYDANTIC_CORE_VERSION: ${{ matrix.pydantic_core_version }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $resultRoot = Join-Path $env:GITHUB_WORKSPACE "dist\pydantic-core-$env:PYDANTIC_CORE_VERSION"
+          $packs = @(Get-ChildItem -LiteralPath "$resultRoot\packs" -Filter *.zip -File)
+          if ($packs.Count -ne 1) { throw "Expected one pydantic-core pack, found $($packs.Count)" }
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($packs[0].FullName)
+          try {
+            $names = @($archive.Entries | ForEach-Object FullName)
+            $forbidden = @($names | Where-Object { [IO.Path]::GetExtension($_) -in @('.dll', '.pyd', '.exe') })
+            if ($forbidden.Count -gt 0) { throw "Pack contains dynamic/executable files: $($forbidden -join ', ')" }
+            $entry = $archive.GetEntry("pack.json")
+            if (-not $entry) { throw "Pack has no pack.json" }
+            $reader = [IO.StreamReader]::new($entry.Open())
+            try { $metadata = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+            $rustLicenseEntry = $archive.GetEntry("licenses/rust-dependencies.json")
+            if (-not $rustLicenseEntry) { throw "Pack has no Rust dependency license manifest" }
+            $rustLicenseReader = [IO.StreamReader]::new($rustLicenseEntry.Open())
+            try {
+              $rustLicense = $rustLicenseReader.ReadToEnd() | ConvertFrom-Json
+            } finally {
+              $rustLicenseReader.Dispose()
+            }
+          } finally {
+            $archive.Dispose()
+          }
+          if ($metadata.name -ne 'pydantic_core' -or $metadata.version -ne $env:PYDANTIC_CORE_VERSION) {
+            throw "Unexpected pydantic-core pack identity"
+          }
+          if ($metadata.toolchain.rust.toolchain -ne $env:RUST_TOOLCHAIN) {
+            throw "Pack does not record the pinned Rust toolchain"
+          }
+          if (-not $metadata.toolchain.rust.crt_static -or -not $metadata.toolchain.rust.locked) {
+            throw "Pack does not attest a locked static CRT Rust build"
+          }
+          if ($metadata.toolchain.rust.target -ne $env:RUST_TARGET) {
+            throw "Pack has the wrong Rust target"
+          }
+          $expectedLicense = 'Apache-2.0 AND (Apache-2.0 WITH LLVM-exception) AND MIT AND Unicode-3.0 AND Unicode-DFS-2016 AND Zlib'
+          if ($metadata.license.status -ne 'complete' -or $metadata.license.expression -ne $expectedLicense) {
+            throw "Pack license metadata is incomplete"
+          }
+          if (@($metadata.license.files) -notcontains 'licenses/rust-dependencies.json') {
+            throw "Pack license metadata omits the Rust dependency manifest"
+          }
+          if (
+            $rustLicense.schema_version -ne 1 -or
+            $rustLicense.kind -ne 'staticpython-rust-license-manifest' -or
+            $rustLicense.license_expression -ne $expectedLicense -or
+            $rustLicense.root_package.name -ne 'pydantic-core' -or
+            $rustLicense.root_package.version -ne $env:PYDANTIC_CORE_VERSION
+          ) {
+            throw "Rust dependency license manifest has the wrong identity"
+          }
+          if (
+            $rustLicense.package_count -ne @($rustLicense.packages).Count -or
+            $rustLicense.package_count -ne $metadata.toolchain.rust.package_count -or
+            $rustLicense.cargo_lock_sha256 -ne $metadata.toolchain.rust.cargo_lock_sha256
+          ) {
+            throw "Rust dependency license manifest does not match toolchain provenance"
+          }
+          $incompleteRustLicenses = @(
+            $rustLicense.packages | Where-Object {
+              [string]::IsNullOrWhiteSpace($_.license_expression) -or
+              [string]::IsNullOrWhiteSpace($_.selected_license) -or
+              @($_.license_files).Count -eq 0 -or
+              ($_.source -and [string]::IsNullOrWhiteSpace($_.checksum))
+            }
+          )
+          if ($incompleteRustLicenses.Count -ne 0) {
+            throw "Rust dependency license manifest has incomplete package records"
+          }
+          if ($metadata.verification.status -ne 'passed') {
+            throw "Pack was promoted without passing verification"
+          }
+          if (@($metadata.libraries) -notcontains 'pydantic_core._pydantic_core.lib') {
+            throw "Pack is missing the Rust static library"
+          }
+          $report = Get-Content -LiteralPath "$resultRoot\staticpython-pack-verify-report.json" -Raw | ConvertFrom-Json
+          if ($report.status -ne 'passed' -or $report.pe_audit.status -ne 'passed') {
+            throw "SDK-linked behavior or PE audit failed"
+          }
+          $exePath = "$resultRoot\staticpython-pack-verify.exe"
+          $mapPath = "$resultRoot\staticpython-pack-verify.map"
+          $pdbPath = "$resultRoot\staticpython-pack-verify.pdb"
+          foreach ($evidencePath in @($exePath, $mapPath, $pdbPath)) {
+            if (
+              -not (Test-Path -LiteralPath $evidencePath -PathType Leaf) -or
+              (Get-Item -LiteralPath $evidencePath).Length -le 0
+            ) {
+              throw "pydantic-core verifier evidence is missing or empty: $evidencePath"
+            }
+          }
+          $exeSha256 = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if (
+            $exeSha256 -ne $report.executable_sha256 -or
+            $exeSha256 -ne $report.pe_audit.executable_sha256
+          ) {
+            throw "uploaded pydantic-core verifier executable hash does not match its report"
+          }
+          $mapSha256 = (Get-FileHash -LiteralPath $mapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($mapSha256 -ne $report.pe_audit.map_sha256) {
+            throw "uploaded pydantic-core verifier map hash does not match its report"
+          }
+          if (
+            @($report.pe_audit.forbidden_dependencies).Count -ne 0 -or
+            @($report.pe_audit.non_system_dependencies).Count -ne 0 -or
+            @($report.pe_audit.forbidden_entry_symbols).Count -ne 0 -or
+            @($report.pe_audit.main_object_records).Count -ne 0
+          ) {
+            throw "pydantic-core verifier report contains forbidden PE evidence"
+          }
+          $dependencyOutput = (& dumpbin /NOLOGO /DEPENDENTS $exePath | Out-String)
+          if ($LASTEXITCODE -ne 0) {
+            throw "dumpbin could not re-audit the uploaded pydantic-core verifier executable"
+          }
+          $observedDependencies = @(
+            $dependencyOutput -split "`r?`n" |
+              ForEach-Object { $_.Trim() } |
+              Where-Object { $_ -match '(?i)^[a-z0-9_.-]+\.dll$' } |
+              ForEach-Object { $_.ToUpperInvariant() } |
+              Sort-Object -Unique
+          )
+          $reportedDependencies = @(
+            $report.pe_audit.dependencies |
+              ForEach-Object { $_.ToUpperInvariant() } |
+              Sort-Object -Unique
+          )
+          if (
+            $observedDependencies.Count -eq 0 -or
+            @(Compare-Object $reportedDependencies $observedDependencies).Count -ne 0
+          ) {
+            throw "uploaded pydantic-core verifier PE imports do not match its report"
+          }
+          $releasedFiles = @(
+            foreach ($smoke in @($report.integration_smoke_tests)) {
+              if ($null -eq $smoke.PSObject.Properties['released_files']) {
+                throw "pydantic-core verification smoke $($smoke.name) has no released_files evidence"
+              }
+              foreach ($path in @($smoke.released_files)) {
+                "$($smoke.integration):$($smoke.name):$path"
+              }
+            }
+          )
+          if ($releasedFiles.Count -ne 0) {
+            throw "pydantic-core verification released runtime files: $($releasedFiles -join ', ')"
+          }
+          @(
+            "## Experimental pydantic-core static pack",
+            "",
+            "- CPython: ``$env:VERIFY_CPYTHON_VERSION``",
+            "- pydantic-core: ``$($metadata.version)``",
+            "- Rust: ``$($metadata.toolchain.rust.rustc_version)``",
+            "- Runtime ABI: ``$($metadata.runtime_abi)``",
+            "- PE dependencies: $(@($report.pe_audit.dependencies) -join ', ')"
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload pydantic-core static evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pydantic-core-static-${{ matrix.pydantic_core_version }}-${{ matrix.python_tag }}
+          path: |
+            dist/pydantic-core-${{ matrix.pydantic_core_version }}/packs/*.zip
+            dist/pydantic-core-${{ matrix.pydantic_core_version }}/staticpython-pack-verify-report.json
+            dist/pydantic-core-${{ matrix.pydantic_core_version }}/staticpython-pack-verify.exe
+            dist/pydantic-core-${{ matrix.pydantic_core_version }}/staticpython-pack-verify.map
+            dist/pydantic-core-${{ matrix.pydantic_core_version }}/staticpython-pack-verify.pdb
+          if-no-files-found: warn
+          retention-days: 30

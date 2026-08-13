@@ -1423,6 +1423,7 @@ struct _inittab _PyImport_Inittab[] = {
             source_resolver="pypi-sdist",
             project_name="demo-project",
             release_version="1.2.3",
+            source_archive_sha256="a" * 64,
             python_packages=["demo"],
             top_level_import_names=["demo"],
             materialized_paths=["Lib/demo"],
@@ -1433,6 +1434,13 @@ struct _inittab _PyImport_Inittab[] = {
             ],
             license_expression="MIT",
             license_files=["Lib/demo/LICENSE.txt"],
+            toolchain_metadata={
+                "rust": {
+                    "cargo_version": "cargo 1.88.0",
+                    "crt_static": True,
+                    "target": "x86_64-pc-windows-msvc",
+                }
+            },
         )
         native_output = self.root / "PCbuild" / "amd64"
         native_output.mkdir(parents=True)
@@ -1494,6 +1502,15 @@ struct _inittab _PyImport_Inittab[] = {
             self.assertNotIn("other", metadata["frozen_modules"])
             self.assertIn("Lib/demo/data.json", [item["path"] for item in metadata["resources"]])
             self.assertEqual(metadata["license"]["status"], "complete")
+            self.assertEqual(metadata["source_archive_sha256"], "a" * 64)
+            self.assertEqual(
+                metadata["toolchain"]["rust"],
+                {
+                    "cargo_version": "cargo 1.88.0",
+                    "crt_static": True,
+                    "target": "x86_64-pc-windows-msvc",
+                },
+            )
             self.assertEqual(metadata["verification"]["status"], "passed")
             self.assertEqual(metadata["suppressed_system_libraries"], ["gdiplus.lib"])
             self.assertEqual(
@@ -1864,6 +1881,37 @@ struct _inittab _PyImport_Inittab[] = {
                 [{"logical_name": "owned.lib"}],
             )
 
+
+    def test_library_pack_rejects_toolchain_base_key_override(self) -> None:
+        integration = libs.LibraryIntegration(
+            name="demo",
+            toolchain_metadata={"runtime_library": "MultiThreadedDLL"},
+        )
+        with self.assertRaisesRegex(RuntimeError, "cannot override base key"):
+            build._pack_toolchain_metadata(integration)
+
+    def test_source_archive_sha256_pin_rejects_drift(self) -> None:
+        archive = self.root / "demo-1.2.3.tar.gz"
+        archive.write_bytes(b"locked source archive")
+        observed = hashlib.sha256(archive.read_bytes()).hexdigest()
+        integration = libs.LibraryIntegration(
+            name="demo",
+            source_archive_sha256_by_version={"1.2.3": observed},
+        )
+        with mock.patch.object(
+            Path,
+            "read_bytes",
+            side_effect=AssertionError("source archives must be hashed as a stream"),
+        ):
+            self.assertEqual(
+                libs._record_source_archive_sha256(integration, "1.2.3", archive),
+                observed,
+            )
+        self.assertEqual(integration.source_archive_sha256, observed)
+
+        integration.source_archive_sha256_by_version["1.2.3"] = "0" * 64
+        with self.assertRaisesRegex(RuntimeError, "source archive hash mismatch"):
+            libs._record_source_archive_sha256(integration, "1.2.3", archive)
 
     def test_prepare_hooks_finalize_custom_pypi_license_metadata(self) -> None:
         source_root = self.root / "source"

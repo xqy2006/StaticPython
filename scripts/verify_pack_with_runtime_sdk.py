@@ -78,6 +78,7 @@ WINDOWS_LINK_LIBRARY_NAMES = {
     "legacy_stdio_definitions.lib",
     "msimg32.lib",
     "netapi32.lib",
+    "ntdll.lib",
     "odbccp32.lib",
     "odbc32.lib",
     "ole32.lib",
