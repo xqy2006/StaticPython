@@ -421,6 +421,19 @@ def ensure_package_markers(text: str, package_name: str) -> str:
         "except Exception:\n"
         "    __path__ = []\n"
         "if not __path__:\n"
+        "    _staticpython_file = globals().get('__file__')\n"
+        "    if _staticpython_file:\n"
+        "        import os as _staticpython_os\n"
+        "        __path__ = [_staticpython_os.path.dirname(_staticpython_file)]\n"
+        "    else:\n"
+        "        __path__ = [__name__]"
+    )
+    unsafe_file_path_block = (
+        "try:\n"
+        "    __path__ = list(getattr(__spec__, 'submodule_search_locations', ()) or ())\n"
+        "except Exception:\n"
+        "    __path__ = []\n"
+        "if not __path__:\n"
         "    import os as _staticpython_os\n"
         "    __path__ = [_staticpython_os.path.dirname(__file__)]"
     )
@@ -431,19 +444,21 @@ def ensure_package_markers(text: str, package_name: str) -> str:
 
     bom = "\ufeff" if text.startswith("\ufeff") else ""
     text = text.lstrip("\ufeff")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    formatted_path_block = path_block.replace("\n", newline)
+    formatted_unsafe_block = unsafe_file_path_block.replace("\n", newline)
+    if package_line in text and formatted_unsafe_block in text:
+        return bom + text.replace(formatted_unsafe_block, formatted_path_block, 1)
     if package_line in text and legacy_path_line in text:
-        return bom + text.replace(legacy_path_line, path_block, 1)
+        return bom + text.replace(legacy_path_line, formatted_path_block, 1)
     if package_line in text:
-        newline = "\r\n" if "\r\n" in text else "\n"
-        formatted_path_block = path_block.replace("\n", newline)
         return bom + text.replace(
             package_line,
             f"{package_line}{newline}{newline}{formatted_path_block}",
             1,
         )
 
-    newline = "\r\n" if "\r\n" in text else "\n"
-    header = f"{package_line}{newline}{newline}{path_block.replace(chr(10), newline)}{newline}{newline}"
+    header = f"{package_line}{newline}{newline}{formatted_path_block}{newline}{newline}"
     lines = text.splitlines(keepends=True)
     insert_at = _package_marker_insert_index(text)
     if insert_at > 0 and not lines[insert_at - 1].endswith(("\n", "\r")):

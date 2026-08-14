@@ -4,6 +4,7 @@ import ast
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -64,7 +65,8 @@ class EnsurePackageMarkersTests(unittest.TestCase):
         transformed = ensure_package_markers(source, "example")
 
         self.assertTrue(transformed.startswith("\ufeff"))
-        self.assertNotIn("__path__ = [__name__]", transformed)
+        self.assertNotIn("\n__path__ = [__name__]\n", transformed)
+        self.assertIn("globals().get('__file__')", transformed)
         self.assertEqual(ensure_package_markers(transformed, "example"), transformed)
 
     def test_preserves_bom_when_adding_missing_path_marker(self) -> None:
@@ -73,8 +75,58 @@ class EnsurePackageMarkersTests(unittest.TestCase):
         transformed = ensure_package_markers(source, "example")
 
         self.assertTrue(transformed.startswith("\ufeff"))
-        self.assertIn("__path__ = [_staticpython_os.path.dirname(__file__)]", transformed)
+        self.assertIn(
+            "__path__ = [_staticpython_os.path.dirname(_staticpython_file)]",
+            transformed,
+        )
         self.assertEqual(ensure_package_markers(transformed, "example"), transformed)
+
+    def test_frozen_package_without_file_uses_module_name_path(self) -> None:
+        transformed = ensure_package_markers("VALUE = 1\n", "encodings")
+        namespace = {
+            "__name__": "encodings",
+            "__spec__": SimpleNamespace(submodule_search_locations=[]),
+        }
+
+        exec(compile(transformed, "<frozen encodings>", "exec"), namespace)
+
+        self.assertEqual(namespace["__path__"], ["encodings"])
+
+    def test_package_with_virtual_file_uses_virtual_directory(self) -> None:
+        transformed = ensure_package_markers("VALUE = 1\n", "wx")
+        namespace = {
+            "__file__": "staticpython-resource:///Lib/wx/__init__.py",
+            "__name__": "wx",
+            "__spec__": SimpleNamespace(submodule_search_locations=[]),
+        }
+
+        exec(compile(transformed, "<frozen wx>", "exec"), namespace)
+
+        self.assertEqual(namespace["__path__"], ["staticpython-resource:///Lib/wx"])
+
+    def test_upgrades_unsafe_file_fallback(self) -> None:
+        source = (
+            "__package__ = 'encodings'\n\n"
+            "try:\n"
+            "    __path__ = list(getattr(__spec__, 'submodule_search_locations', ()) or ())\n"
+            "except Exception:\n"
+            "    __path__ = []\n"
+            "if not __path__:\n"
+            "    import os as _staticpython_os\n"
+            "    __path__ = [_staticpython_os.path.dirname(__file__)]\n\n"
+            "VALUE = 1\n"
+        )
+
+        transformed = ensure_package_markers(source, "encodings")
+        namespace = {
+            "__name__": "encodings",
+            "__spec__": SimpleNamespace(submodule_search_locations=[]),
+        }
+        exec(compile(transformed, "<frozen encodings>", "exec"), namespace)
+
+        self.assertNotIn("dirname(__file__)", transformed)
+        self.assertEqual(namespace["__path__"], ["encodings"])
+        self.assertEqual(ensure_package_markers(transformed, "encodings"), transformed)
 
 
 if __name__ == "__main__":
