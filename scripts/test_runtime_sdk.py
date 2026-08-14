@@ -1236,6 +1236,54 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertNotIn("docs", names)
         self.assertNotIn("botocore.tests", names)
 
+    def test_freezer_package_header_works_without_file(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_freeze_modules_header_without_file_test",
+            REPO_ROOT / "assets" / "overlay" / "Tools" / "build" / "freeze_modules.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        transformed, changed = module._inject_package_header(
+            b"VALUE = 1\n",
+            "encodings",
+        )
+        namespace = {
+            "__name__": "encodings",
+            "__spec__": SimpleNamespace(submodule_search_locations=[]),
+        }
+
+        exec(compile(transformed, "<frozen encodings>", "exec"), namespace)
+
+        self.assertTrue(changed)
+        self.assertNotIn(b"dirname(__file__)", transformed)
+        self.assertEqual(namespace["__path__"], ["encodings"])
+        self.assertEqual(
+            module._inject_package_header(transformed, "encodings"),
+            (transformed, False),
+        )
+
+    def test_freezer_package_header_preserves_virtual_file_directory(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_freeze_modules_virtual_file_test",
+            REPO_ROOT / "assets" / "overlay" / "Tools" / "build" / "freeze_modules.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        transformed, _changed = module._inject_package_header(b"VALUE = 1\n", "wx")
+        namespace = {
+            "__file__": "staticpython-resource:///Lib/wx/__init__.py",
+            "__name__": "wx",
+            "__spec__": SimpleNamespace(submodule_search_locations=[]),
+        }
+
+        exec(compile(transformed, "<frozen wx>", "exec"), namespace)
+
+        self.assertEqual(namespace["__path__"], ["staticpython-resource:///Lib/wx"])
+
     def test_wxpython_pack_declares_gdiplus_provider_and_behavior_smokes(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "staticpython_wxpython_pack_test",
