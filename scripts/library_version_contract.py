@@ -109,6 +109,7 @@ def pypi_library_contract(
                 applicable,
                 project_requires_python=None,
                 target_version=target_version,
+                source_resolver=integration.source_resolver or "pypi-sdist",
             )
             verified_sources = [
                 file_info
@@ -145,6 +146,7 @@ def pypi_library_contract(
     return {
         "project_name": integration.project_name or integration.name,
         "source_provider": integration.source_provider,
+        "source_resolver": integration.source_resolver or integration.source_provider,
         "minimum_release_version": integration.minimum_release_version,
         "versions": version_records,
     }

@@ -9,6 +9,7 @@ import importlib.util
 import math
 import os
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -1470,6 +1471,95 @@ struct _inittab _PyImport_Inittab[] = {
             target_version=libs.Version("3.13"),
         )
         self.assertEqual([item["packagetype"] for item in compatible], ["sdist", "bdist_wheel"])
+        wheel_first = libs._compatible_pypi_files(
+            files,
+            project_requires_python=None,
+            target_version=libs.Version("3.13"),
+            source_resolver="pypi-universal-wheel",
+        )
+        self.assertEqual(
+            [item["packagetype"] for item in wheel_first],
+            ["bdist_wheel", "sdist"],
+        )
+        with self.assertRaisesRegex(RuntimeError, "unsupported PyPI source resolver"):
+            libs._compatible_pypi_files(
+                files,
+                project_requires_python=None,
+                target_version=libs.Version("3.13"),
+                source_resolver="native-wheel",
+            )
+
+    def test_universal_wheel_lock_requires_immutable_sdist_license_source(self) -> None:
+        integration = libs.LibraryIntegration(
+            name="demo",
+            source_provider="pypi",
+            project_name="demo",
+            release_version="1.0",
+            source_resolver="pypi-universal-wheel",
+            dependency_resolution={
+                "solver": libs.HISTORICAL_DEPENDENCY_SOLVER,
+                "source": {
+                    "filename": "demo-1.0-py3-none-any.whl",
+                    "url": "https://files.example/demo-1.0-py3-none-any.whl",
+                    "sha256": "a" * 64,
+                    "size": 100,
+                    "packagetype": "bdist_wheel",
+                    "requires_python": ">=3.11",
+                },
+                "license_source": {
+                    "filename": "demo-1.0.tar.gz",
+                    "url": "https://files.example/demo-1.0.tar.gz",
+                    "sha256": "b" * 64,
+                    "size": 200,
+                    "packagetype": "sdist",
+                    "requires_python": ">=3.11",
+                },
+            },
+        )
+        lock = libs.dependency_resolution_lock(
+            [integration],
+            target_version=libs.Version("3.13.14"),
+            solver=libs.HISTORICAL_DEPENDENCY_SOLVER,
+            roots=["demo"],
+        )
+        self.assertEqual(
+            lock["integrations"][0]["source_resolver"],
+            "pypi-universal-wheel",
+        )
+        self.assertEqual(
+            lock["integrations"][0]["license_source"]["sha256"],
+            "b" * 64,
+        )
+        records = libs._locked_dependency_records(
+            lock,
+            target_version=libs.Version("3.13.14"),
+            solver=libs.HISTORICAL_DEPENDENCY_SOLVER,
+            selected_names=["demo"],
+        )
+        self.assertEqual(records["demo"]["license_source"]["packagetype"], "sdist")
+
+        tampered = json.loads(json.dumps(lock))
+        tampered["integrations"][0].pop("license_source")
+        unsigned = {
+            key: value
+            for key, value in tampered.items()
+            if key != "solver_fingerprint"
+        }
+        tampered["solver_fingerprint"] = hashlib.sha256(
+            json.dumps(
+                unsigned,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        with self.assertRaisesRegex(RuntimeError, "no sdist license source"):
+            libs._locked_dependency_records(
+                tampered,
+                target_version=libs.Version("3.13.14"),
+                solver=libs.HISTORICAL_DEPENDENCY_SOLVER,
+                selected_names=["demo"],
+            )
 
     def test_requires_python_accepts_target_cpython_release_candidate(self) -> None:
         self.assertTrue(
@@ -3469,9 +3559,15 @@ struct _inittab _PyImport_Inittab[] = {
             [
                 name
                 for name in historical
-                if name in {"entrypoints", "ipython_genutils", "jupyterlab_launcher"}
+                if name
+                in {
+                    "entrypoints",
+                    "ipython_genutils",
+                    "jupyterlab_launcher",
+                    "nbclassic",
+                }
             ],
-            ["entrypoints", "ipython_genutils", "jupyterlab_launcher"],
+            ["entrypoints", "ipython_genutils", "jupyterlab_launcher", "nbclassic"],
         )
         self.assertEqual(
             catalog["entrypoints"]["source_mapping"],
@@ -3493,6 +3589,32 @@ struct _inittab _PyImport_Inittab[] = {
             catalog["jupyterlab_launcher"]["source_ignore_patterns"],
             ["tests"],
         )
+        nbclassic_spec = importlib.util.spec_from_file_location(
+            "staticpython_nbclassic_dependency_test",
+            REPO_ROOT / "Lib" / "nbclassic" / "setup.py",
+        )
+        assert nbclassic_spec is not None and nbclassic_spec.loader is not None
+        nbclassic_module = importlib.util.module_from_spec(nbclassic_spec)
+        nbclassic_spec.loader.exec_module(nbclassic_module)
+        nbclassic = nbclassic_module.LIBRARY_INTEGRATION
+        self.assertEqual(nbclassic.release_version, "1.3.3")
+        self.assertEqual(nbclassic.source_resolver, "pypi-universal-wheel")
+        self.assertIn("Lib/nbclassic", nbclassic.materialized_paths)
+        self.assertEqual(nbclassic.source_ignore_patterns, ["tests"])
+        self.assertEqual(
+            nbclassic.resource_rules,
+            [
+                {"action": "include", "path": "Lib/nbclassic/i18n"},
+                {
+                    "action": "include",
+                    "path": "etc/jupyter/jupyter_server_config.d/nbclassic.json",
+                },
+            ],
+        )
+        jupyter_server_setup = (REPO_ROOT / "Lib" / "jupyter_server" / "setup.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('root_text.endswith("/nbclassic/static")', jupyter_server_setup)
         self.assertEqual(catalog["soupsieve"]["dependencies"], ["bs4"])
         self.assertEqual(catalog["webruntime"]["dependencies"], ["dialite"])
         self.assertEqual(catalog["bleach"]["release_version"], "6.4.0")
@@ -3517,6 +3639,122 @@ struct _inittab _PyImport_Inittab[] = {
             dash_module.LIBRARY_INTEGRATION.dependency_constraints,
             {"janus": ">=1.0.0"},
         )
+
+    def test_nbclassic_embeds_ui_resources_without_thousands_of_pack_sources(self) -> None:
+        setup_spec = importlib.util.spec_from_file_location(
+            "staticpython_nbclassic_resource_test",
+            REPO_ROOT / "Lib" / "nbclassic" / "setup.py",
+        )
+        assert setup_spec is not None and setup_spec.loader is not None
+        setup_module = importlib.util.module_from_spec(setup_spec)
+        setup_spec.loader.exec_module(setup_module)
+
+        package_root = self.root / "Lib" / "nbclassic"
+        (package_root / "static" / "base" / "js").mkdir(parents=True)
+        (package_root / "static" / "base" / "js" / "page.js").write_bytes(
+            b"console.log('nbclassic');\n"
+        )
+        (package_root / "static" / "favicon.ico").write_bytes(b"icon")
+        (package_root / "templates").mkdir()
+        (package_root / "templates" / "tree.html").write_text(
+            "<!doctype html><title>Classic</title>\n",
+            encoding="utf-8",
+        )
+        (package_root / "i18n").mkdir()
+        (package_root / "i18n" / "nbjs.json").write_text(
+            '{"domain": "nbclassic"}\n',
+            encoding="utf-8",
+        )
+        context = SimpleNamespace(source_root=self.root, log=lambda _message: None)
+        setup_module.embed_nbclassic_resources(context)
+
+        generated_path = package_root / "_staticpython_resources.py"
+        generated_spec = importlib.util.spec_from_file_location(
+            "staticpython_generated_nbclassic_resources",
+            generated_path,
+        )
+        assert generated_spec is not None and generated_spec.loader is not None
+        generated = importlib.util.module_from_spec(generated_spec)
+        generated_spec.loader.exec_module(generated)
+        self.assertIn("tree.html", generated.TEMPLATES)
+        self.assertEqual(generated.resource_bytes("static/favicon.ico"), b"icon")
+        self.assertEqual(
+            generated.resource_bytes("static/base/js/page.js"),
+            b"console.log('nbclassic');\n",
+        )
+
+        resource_files = build.collect_runtime_resource_files(
+            self.root,
+            [setup_module.LIBRARY_INTEGRATION],
+        )
+        self.assertIn("Lib/nbclassic/i18n/nbjs.json", resource_files)
+        self.assertIn(
+            "etc/jupyter/jupyter_server_config.d/nbclassic.json",
+            resource_files,
+        )
+        self.assertNotIn("Lib/nbclassic/static/favicon.ico", resource_files)
+        self.assertNotIn("Lib/nbclassic/templates/tree.html", resource_files)
+
+    def test_nbclassic_wheel_keeps_locked_sdist_vendor_notices(self) -> None:
+        setup_spec = importlib.util.spec_from_file_location(
+            "staticpython_nbclassic_license_test",
+            REPO_ROOT / "Lib" / "nbclassic" / "setup.py",
+        )
+        assert setup_spec is not None and setup_spec.loader is not None
+        setup_module = importlib.util.module_from_spec(setup_spec)
+        setup_spec.loader.exec_module(setup_module)
+        integration = setup_module.LIBRARY_INTEGRATION
+
+        target_root = self.root / "licenses" / "nbclassic"
+        target_root.mkdir(parents=True)
+        (target_root / "LICENSE").write_bytes(b"wheel license\n")
+        integration.license_files = ["licenses/nbclassic/LICENSE"]
+        archive_path = (
+            self.root
+            / "downloads"
+            / "pypi"
+            / "nbclassic"
+            / "1.3.3"
+            / "nbclassic-1.3.3.tar.gz"
+        )
+        archive_path.parent.mkdir(parents=True)
+        with tarfile.open(archive_path, "w:gz") as archive:
+            members = {
+                "nbclassic-1.3.3/LICENSE": b"sdist license\n",
+                **{
+                    f"nbclassic-1.3.3/nbclassic/static/components/component-{index}/LICENSE-{index}":
+                    f"component {index}\n".encode()
+                    for index in range(10)
+                },
+                "nbclassic-1.3.3/node_modules/ignored/LICENSE": b"ignored\n",
+            }
+            for name, data in members.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+        archive_sha256 = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+        integration.dependency_resolution = {
+            "source": {"packagetype": "bdist_wheel"},
+            "license_source": {
+                "filename": archive_path.name,
+                "url": "https://files.example/nbclassic-1.3.3.tar.gz",
+                "sha256": archive_sha256,
+                "packagetype": "sdist",
+            },
+        }
+        context = SimpleNamespace(
+            source_root=self.root,
+            download_cache_root=self.root / "downloads",
+            log=lambda _message: None,
+        )
+        setup_module.materialize_nbclassic_vendor_licenses(context)
+        first_paths = list(integration.license_files)
+        self.assertEqual(len(first_paths), 11)
+        self.assertTrue(all((self.root / path).is_file() for path in first_paths))
+        self.assertFalse(any("ignored" in path for path in first_paths))
+
+        setup_module.materialize_nbclassic_vendor_licenses(context)
+        self.assertEqual(integration.license_files, first_paths)
 
     def test_aws_sdk_catalog_declares_resource_behavior_smokes(self) -> None:
         config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))

@@ -783,13 +783,26 @@ def _wheel_filename_rank(filename: str, target_version: Version) -> tuple[int, i
     return (best_kind, best_interpreter, best_abi, best_platform, filename.lower())
 
 
-def _pypi_file_sort_key(file_info: dict, target_version: Version) -> tuple:
+PYPI_SOURCE_RESOLVERS = frozenset({"pypi-sdist", "pypi-universal-wheel"})
+
+
+def _pypi_file_sort_key(
+    file_info: dict,
+    target_version: Version,
+    *,
+    source_resolver: str = "pypi-sdist",
+) -> tuple:
+    if source_resolver not in PYPI_SOURCE_RESOLVERS:
+        raise RuntimeError(f"unsupported PyPI source resolver: {source_resolver!r}")
     filename = str(file_info.get("filename") or "")
     packagetype = file_info.get("packagetype")
+    sdist_rank, wheel_rank = (
+        (1, 0) if source_resolver == "pypi-universal-wheel" else (0, 1)
+    )
     if packagetype == "sdist":
-        return (0, *_sdist_filename_rank(filename))
+        return (sdist_rank, *_sdist_filename_rank(filename))
     if packagetype == "bdist_wheel":
-        return (1, *_wheel_filename_rank(filename, target_version))
+        return (wheel_rank, *_wheel_filename_rank(filename, target_version))
     return (2, filename.lower())
 
 
@@ -807,6 +820,7 @@ def _compatible_pypi_files(
     *,
     project_requires_python: str | None,
     target_version: Version,
+    source_resolver: str = "pypi-sdist",
 ) -> list[dict]:
     compatible: list[dict] = []
     for file_info in files:
@@ -830,13 +844,22 @@ def _compatible_pypi_files(
     # Native wheels are never valid static-build inputs.  A native-only
     # release must provide an explicit, verifiable upstream source mapping.
     compatible = [*source_distributions, *pure_universal_wheels]
-    return sorted(compatible, key=lambda file_info: _pypi_file_sort_key(file_info, target_version))
+    return sorted(
+        compatible,
+        key=lambda file_info: _pypi_file_sort_key(
+            file_info,
+            target_version,
+            source_resolver=source_resolver,
+        ),
+    )
 
 
 def _iter_pypi_distribution_candidates(
     project_name: str,
     target_version: Version,
     release_version: str | None = None,
+    *,
+    source_resolver: str = "pypi-sdist",
 ) -> list[tuple[str, dict]]:
     # Persist the full release catalog as well as per-version metadata. History
     # batches resolve more than one root version in the same job, so repeatedly
@@ -857,12 +880,34 @@ def _iter_pypi_distribution_candidates(
             # current release and must never be inherited by older artifacts.
             project_requires_python=None,
             target_version=target_version,
+            source_resolver=source_resolver,
         )
         for file_info in compatible:
             candidates.append((raw_version, file_info))
         if release_version and compatible:
             break
     return candidates
+
+
+def _iter_pypi_candidates_for_integration(
+    integration: LibraryIntegration,
+    target_version: Version,
+    release_version: str | None = None,
+) -> list[tuple[str, dict]]:
+    project_name = integration.project_name or integration.name
+    source_resolver = integration.source_resolver or "pypi-sdist"
+    if source_resolver == "pypi-sdist":
+        return _iter_pypi_distribution_candidates(
+            project_name,
+            target_version,
+            release_version,
+        )
+    return _iter_pypi_distribution_candidates(
+        project_name,
+        target_version,
+        release_version,
+        source_resolver=source_resolver,
+    )
 
 
 def _select_pypi_file(
@@ -934,6 +979,8 @@ def _find_cached_pypi_archives(
     normalized_project_name: str,
     release_version: str,
     target_version: Version,
+    *,
+    source_resolver: str = "pypi-sdist",
 ) -> list[Path]:
     release_root = download_cache_root / "pypi" / normalized_project_name / release_version
     if not release_root.exists():
@@ -955,6 +1002,7 @@ def _find_cached_pypi_archives(
                 "packagetype": "bdist_wheel" if path.name.lower().endswith(".whl") else "sdist",
             },
             target_version,
+            source_resolver=source_resolver,
         ),
     )
 
@@ -964,6 +1012,8 @@ def _candidate_pypi_archives(
     project_name: str,
     target_version: Version,
     release_version: str | None,
+    *,
+    source_resolver: str = "pypi-sdist",
 ) -> list[tuple[str, Path, str | None, bool]]:
     normalized = _normalized_project_name(project_name)
     if release_version is not None:
@@ -972,15 +1022,24 @@ def _candidate_pypi_archives(
             normalized,
             release_version,
             target_version,
+            source_resolver=source_resolver,
         )
         if cached_archive_paths:
             return [(release_version, path, None, True) for path in cached_archive_paths]
 
-    discovered_candidates = _iter_pypi_distribution_candidates(
-        project_name,
-        target_version,
-        release_version,
-    )
+    if source_resolver == "pypi-sdist":
+        discovered_candidates = _iter_pypi_distribution_candidates(
+            project_name,
+            target_version,
+            release_version,
+        )
+    else:
+        discovered_candidates = _iter_pypi_distribution_candidates(
+            project_name,
+            target_version,
+            release_version,
+            source_resolver=source_resolver,
+        )
     if release_version is None and discovered_candidates:
         newest_version = discovered_candidates[0][0]
         discovered_candidates = [
@@ -1803,12 +1862,22 @@ def _build_pypi_source_hook(
                 (release_version, archive_path, url, archive_path.exists())
             ]
         else:
-            candidate_archives = _candidate_pypi_archives(
-                context.download_cache_root,
-                project_name,
-                target_version,
-                release_version,
-            )
+            source_resolver = integration.source_resolver or "pypi-sdist"
+            if source_resolver == "pypi-sdist":
+                candidate_archives = _candidate_pypi_archives(
+                    context.download_cache_root,
+                    project_name,
+                    target_version,
+                    release_version,
+                )
+            else:
+                candidate_archives = _candidate_pypi_archives(
+                    context.download_cache_root,
+                    project_name,
+                    target_version,
+                    release_version,
+                    source_resolver=source_resolver,
+                )
 
         if not candidate_archives:
             raise RuntimeError(
@@ -1982,6 +2051,11 @@ def pypi_library(
     post_patch_hooks: list[Hook] | None = None,
     pre_build_hooks: list[Hook] | None = None,
 ) -> LibraryIntegration:
+    resolved_source_resolver = source_resolver or "pypi-sdist"
+    if resolved_source_resolver not in PYPI_SOURCE_RESOLVERS:
+        raise RuntimeError(
+            f"unsupported PyPI source resolver: {resolved_source_resolver!r}"
+        )
     resolved_mapping = dict(source_mapping or {})
     if source_entries:
         for entry in source_entries:
@@ -2025,7 +2099,7 @@ def pypi_library(
         dependency_constraints=dict(dependency_constraints or {}),
         conflicts=list(conflicts or []),
         patch_rules=list(patch_rules or []),
-        source_resolver=source_resolver or "pypi-sdist",
+        source_resolver=resolved_source_resolver,
         resource_rules=list(resource_rules or []),
         toolchain_metadata=dict(toolchain_metadata or {}),
         license_expression=license_expression,
@@ -2565,8 +2639,8 @@ def _pypi_archive_dependency_requirements(
     """Recover dependencies omitted from legacy PyPI JSON using locked source metadata."""
 
     project_name = integration.project_name or integration.name
-    candidates = _iter_pypi_distribution_candidates(
-        project_name,
+    candidates = _iter_pypi_candidates_for_integration(
+        integration,
         target_version,
         release_version,
     )
@@ -2782,8 +2856,11 @@ def _select_compatible_pypi_release_version(
     target_version: Version,
     constraint: SpecifierSet,
 ) -> str:
-    project_name = integration.project_name or integration.name
-    for raw_version, _file_info in _iter_pypi_distribution_candidates(project_name, target_version, None):
+    for raw_version, _file_info in _iter_pypi_candidates_for_integration(
+        integration,
+        target_version,
+        None,
+    ):
         try:
             candidate = Version(raw_version)
         except InvalidVersion:
@@ -2874,6 +2951,30 @@ def _pypi_candidate_source_record(file_info: dict) -> dict[str, object]:
     }
 
 
+def _pypi_sdist_license_source_record(
+    integration: LibraryIntegration,
+    target_version: Version,
+    release_version: str,
+) -> dict[str, object]:
+    project_name = integration.project_name or integration.name
+    for candidate_version, file_info in _iter_pypi_distribution_candidates(
+        project_name,
+        target_version,
+        release_version,
+        source_resolver="pypi-sdist",
+    ):
+        if (
+            candidate_version == release_version
+            and file_info.get("packagetype") == "sdist"
+            and file_info.get("url")
+        ):
+            return _pypi_candidate_source_record(file_info)
+    raise RuntimeError(
+        f"pure-wheel source for {integration.name} {release_version} has no "
+        "immutable sdist license companion"
+    )
+
+
 def _locked_dependency_records(
     lock: dict | None,
     *,
@@ -2960,6 +3061,32 @@ def _locked_dependency_records(
                 raise RuntimeError(
                     f"historical dependency lock has an invalid PyPI source for {name} {version}"
                 )
+            source_resolver = record.get("source_resolver")
+            license_source = record.get("license_source")
+            if source_resolver == "pypi-universal-wheel":
+                if source.get("packagetype") == "bdist_wheel":
+                    if not isinstance(license_source, dict):
+                        raise RuntimeError(
+                            f"historical dependency lock has no sdist license source "
+                            f"for pure-wheel input {name} {version}"
+                        )
+                    license_filename = license_source.get("filename")
+                    license_url = license_source.get("url")
+                    license_sha256 = license_source.get("sha256")
+                    if (
+                        not isinstance(license_filename, str)
+                        or not license_filename
+                        or Path(license_filename).name != license_filename
+                        or not isinstance(license_url, str)
+                        or not license_url
+                        or not isinstance(license_sha256, str)
+                        or re.fullmatch(r"[0-9a-f]{64}", license_sha256) is None
+                        or license_source.get("packagetype") != "sdist"
+                    ):
+                        raise RuntimeError(
+                            f"historical dependency lock has an invalid sdist license "
+                            f"source for {name} {version}"
+                        )
         records[key] = record
     return records
 
@@ -2969,10 +3096,9 @@ def _historical_pypi_candidates(
     target_version: Version,
     preferred_version: str | None,
 ) -> list[tuple[str, dict]]:
-    project_name = integration.project_name or integration.name
     by_version: dict[str, dict] = {}
-    for raw_version, file_info in _iter_pypi_distribution_candidates(
-        project_name,
+    for raw_version, file_info in _iter_pypi_candidates_for_integration(
+        integration,
         target_version,
         None,
     ):
@@ -3300,6 +3426,7 @@ def _resolve_selected_integrations_historically(
         ]
         integration.dependency_constraints = constraints_by_owner.get(name, {})
         source: dict[str, object] | None = None
+        license_source: dict[str, object] | None = None
         if integration.source_provider == "pypi":
             raw_version = integration.release_version
             assert raw_version is not None
@@ -3311,13 +3438,24 @@ def _resolve_selected_integrations_historically(
                         f"{locked_record.get('version')}, resolved {raw_version}"
                     )
                 source = dict(locked_record["source"])
+                locked_resolver = locked_record.get("source_resolver")
+                if (
+                    locked_resolver is not None
+                    and locked_resolver != integration.source_resolver
+                ):
+                    raise RuntimeError(
+                        f"historical dependency lock source resolver changed for "
+                        f"{integration.name}: {locked_resolver!r} != "
+                        f"{integration.source_resolver!r}"
+                    )
+                if locked_record.get("license_source") is not None:
+                    license_source = dict(locked_record["license_source"])
             else:
                 candidates = candidate_cache.get(name)
                 if candidates is None:
-                    project_name = integration.project_name or integration.name
                     candidates = []
-                    for candidate_version, file_info in _iter_pypi_distribution_candidates(
-                        project_name,
+                    for candidate_version, file_info in _iter_pypi_candidates_for_integration(
+                        integration,
                         target_version,
                         raw_version,
                     ):
@@ -3335,6 +3473,15 @@ def _resolve_selected_integrations_historically(
                         "has no immutable source artifact"
                     )
                 source = _pypi_candidate_source_record(matching[0])
+                if (
+                    integration.source_resolver == "pypi-universal-wheel"
+                    and source.get("packagetype") == "bdist_wheel"
+                ):
+                    license_source = _pypi_sdist_license_source_record(
+                        integration,
+                        target_version,
+                        raw_version,
+                    )
             assert source is not None
             expected_sha = integration.source_archive_sha256_by_version.get(raw_version)
             if expected_sha and source["sha256"] != expected_sha.casefold():
@@ -3349,6 +3496,8 @@ def _resolve_selected_integrations_historically(
             "explicitly_pinned": name in explicit_pins,
             "source": source,
         }
+        if license_source is not None:
+            integration.dependency_resolution["license_source"] = license_source
 
     for name in sorted(reachable, key=catalog_order.__getitem__):
         integration = by_name[name]
@@ -3390,17 +3539,20 @@ def dependency_resolution_lock(
             raise RuntimeError(
                 f"integration {integration.name!r} has no {solver!r} resolution evidence"
             )
-        records.append(
-            {
-                "name": integration.name,
-                "project_name": integration.project_name,
-                "source_provider": integration.source_provider,
-                "version": integration.release_version,
-                "dependencies": integration.dependencies,
-                "dependency_constraints": integration.dependency_constraints,
-                "source": resolution.get("source"),
-            }
-        )
+        record = {
+            "name": integration.name,
+            "project_name": integration.project_name,
+            "source_provider": integration.source_provider,
+            "version": integration.release_version,
+            "dependencies": integration.dependencies,
+            "dependency_constraints": integration.dependency_constraints,
+            "source": resolution.get("source"),
+        }
+        if integration.source_resolver == "pypi-universal-wheel":
+            record["source_resolver"] = integration.source_resolver
+        if resolution.get("license_source") is not None:
+            record["license_source"] = resolution["license_source"]
+        records.append(record)
     major = target_version.release[0]
     minor = target_version.release[1]
     toolchain = {
