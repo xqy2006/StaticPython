@@ -40,6 +40,11 @@ def integration_build_kinds(config: dict) -> dict[str, str]:
     selected = profile.get("third_party_libraries")
     if not isinstance(selected, list):
         raise RuntimeError("full profile third_party_libraries must be a list")
+    historical = profile.get("historical_library_contract_libraries", [])
+    if not isinstance(historical, list):
+        raise RuntimeError(
+            "full profile historical_library_contract_libraries must be a list"
+        )
     catalog = build.profile_library_catalog(config, profile, "third_party_library_catalog")
     integrations = libs.load_integration_definitions(
         build.LIB_PATCH_ROOT,
@@ -47,7 +52,7 @@ def integration_build_kinds(config: dict) -> dict[str, str]:
     )
     by_name = {integration.name.casefold(): integration for integration in integrations}
     kinds: dict[str, str] = {}
-    for name in selected:
+    for name in [*selected, *historical]:
         integration = by_name.get(str(name).casefold())
         if integration is None:
             raise RuntimeError(f"full-profile integration is missing: {name}")
