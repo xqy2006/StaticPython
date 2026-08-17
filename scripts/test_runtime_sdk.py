@@ -432,6 +432,28 @@ class RuntimeSDKTests(unittest.TestCase):
             history_shard,
         )
 
+        history_weekly = (
+            REPO_ROOT / ".github" / "workflows" / "library-history-weekly.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "artifact_suffix: ${{ steps.plan.outputs.artifact_suffix }}",
+            history_weekly,
+        )
+        self.assertIn(
+            '"artifact_suffix=$artifactSuffix" >> $env:GITHUB_OUTPUT',
+            history_weekly,
+        )
+        self.assertIn(
+            "artifact_suffix: ${{ needs.plan.outputs.artifact_suffix }}",
+            history_weekly,
+        )
+        self.assertNotIn(
+            "artifact_suffix: a${{ github.run_attempt }}",
+            history_weekly,
+        )
+        self.assertGreaterEqual(history_weekly.count("overwrite: true"), 2)
+        self.assertGreaterEqual(history_shard.count("overwrite: true"), 2)
+
     def test_verifier_applies_profile_version_overrides(self) -> None:
         profile = {
             "core_libraries": ["core-demo"],

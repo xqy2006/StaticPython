@@ -178,6 +178,7 @@ jobs:
             ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/combination-evidence.v1.json
           if-no-files-found: warn
           retention-days: 90
+          overwrite: true
 
   finalize-shard:
     needs: [plan-shard, build-batches]
@@ -239,6 +240,7 @@ jobs:
           path: .tmp/shard-evidence/library-history-shard-evidence.v1.json
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
       - name: Enforce shard evidence gate
         if: always()
