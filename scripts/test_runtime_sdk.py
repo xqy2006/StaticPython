@@ -3809,24 +3809,26 @@ struct _inittab _PyImport_Inittab[] = {
         target_root.mkdir(parents=True)
         (target_root / "LICENSE").write_bytes(b"wheel license\n")
         integration.license_files = ["licenses/nbclassic/LICENSE"]
+        integration.release_version = "0.5.6"
         archive_path = (
             self.root
             / "downloads"
             / "pypi"
             / "nbclassic"
-            / "1.3.3"
-            / "nbclassic-1.3.3.tar.gz"
+            / "0.5.6"
+            / "nbclassic-0.5.6.tar.gz"
         )
         archive_path.parent.mkdir(parents=True)
         with tarfile.open(archive_path, "w:gz") as archive:
             members = {
-                "nbclassic-1.3.3/LICENSE": b"sdist license\n",
-                **{
-                    f"nbclassic-1.3.3/nbclassic/static/components/component-{index}/LICENSE-{index}":
-                    f"component {index}\n".encode()
-                    for index in range(10)
-                },
-                "nbclassic-1.3.3/node_modules/ignored/LICENSE": b"ignored\n",
+                "nbclassic-0.5.6/LICENSE": b"sdist license\n",
+                "nbclassic-0.5.6/nbclassic/static/components/marked/LICENSE.md":
+                    b"marked license\n",
+                "nbclassic-0.5.6/nbclassic/static/components/marked/docs/AUTHORS.md":
+                    b"marked authors\n",
+                "nbclassic-0.5.6/nbclassic/static/components/text-encoding/LICENSE.md":
+                    b"text encoding license\n",
+                "nbclassic-0.5.6/node_modules/ignored/LICENSE": b"ignored\n",
             }
             for name, data in members.items():
                 member = tarfile.TarInfo(name)
@@ -3837,7 +3839,7 @@ struct _inittab _PyImport_Inittab[] = {
             "source": {"packagetype": "bdist_wheel"},
             "license_source": {
                 "filename": archive_path.name,
-                "url": "https://files.example/nbclassic-1.3.3.tar.gz",
+                "url": "https://files.example/nbclassic-0.5.6.tar.gz",
                 "sha256": archive_sha256,
                 "packagetype": "sdist",
             },
@@ -3849,12 +3851,68 @@ struct _inittab _PyImport_Inittab[] = {
         )
         setup_module.materialize_nbclassic_vendor_licenses(context)
         first_paths = list(integration.license_files)
-        self.assertEqual(len(first_paths), 11)
+        self.assertEqual(len(first_paths), 4)
         self.assertTrue(all((self.root / path).is_file() for path in first_paths))
         self.assertFalse(any("ignored" in path for path in first_paths))
 
         setup_module.materialize_nbclassic_vendor_licenses(context)
         self.assertEqual(integration.license_files, first_paths)
+
+    def test_nbclassic_wheel_rejects_incomplete_sdist_license_companion(self) -> None:
+        setup_spec = importlib.util.spec_from_file_location(
+            "staticpython_nbclassic_incomplete_license_test",
+            REPO_ROOT / "Lib" / "nbclassic" / "setup.py",
+        )
+        assert setup_spec is not None and setup_spec.loader is not None
+        setup_module = importlib.util.module_from_spec(setup_spec)
+        setup_spec.loader.exec_module(setup_module)
+        integration = setup_module.LIBRARY_INTEGRATION
+        integration.release_version = "0.5.6"
+        archive_path = (
+            self.root
+            / "downloads"
+            / "pypi"
+            / "nbclassic"
+            / "0.5.6"
+            / "nbclassic-0.5.6.tar.gz"
+        )
+        archive_path.parent.mkdir(parents=True)
+        context = SimpleNamespace(
+            source_root=self.root,
+            download_cache_root=self.root / "downloads",
+            log=lambda _message: None,
+        )
+        cases = {
+            "missing-root": (
+                {
+                    "nbclassic-0.5.6/nbclassic/static/components/marked/LICENSE.md":
+                        b"marked license\n",
+                },
+                "root license",
+            ),
+            "missing-vendored": (
+                {"nbclassic-0.5.6/LICENSE": b"sdist license\n"},
+                "vendored static notices",
+            ),
+        }
+        for label, (members, expected_error) in cases.items():
+            with self.subTest(label=label):
+                with tarfile.open(archive_path, "w:gz") as archive:
+                    for name, data in members.items():
+                        member = tarfile.TarInfo(name)
+                        member.size = len(data)
+                        archive.addfile(member, io.BytesIO(data))
+                integration.dependency_resolution = {
+                    "source": {"packagetype": "bdist_wheel"},
+                    "license_source": {
+                        "filename": archive_path.name,
+                        "url": "https://files.example/nbclassic-0.5.6.tar.gz",
+                        "sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+                        "packagetype": "sdist",
+                    },
+                }
+                with self.assertRaisesRegex(RuntimeError, expected_error):
+                    setup_module.materialize_nbclassic_vendor_licenses(context)
 
     def test_aws_sdk_catalog_declares_resource_behavior_smokes(self) -> None:
         config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))

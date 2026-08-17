@@ -64,9 +64,11 @@ def materialize_nbclassic_vendor_licenses(context) -> None:
 
     license_prefixes = ("license", "copying", "notice", "copyright", "authors")
     records: dict[tuple[str, str], tuple[str, bytes]] = {}
+    root_license_records: set[tuple[str, str]] = set()
+    vendored_license_records: set[tuple[str, str]] = set()
     with tarfile.open(archive_path, "r:*") as archive:
         for member in archive:
-            if not member.isfile() or member.size > 2 * 1024 * 1024:
+            if not member.isfile():
                 continue
             normalized = PurePosixPath(member.name.replace("\\", "/"))
             if normalized.is_absolute() or ".." in normalized.parts:
@@ -79,16 +81,31 @@ def materialize_nbclassic_vendor_licenses(context) -> None:
             is_vendored_license = "nbclassic" in parts and "static" in parts
             if not is_root_license and not is_vendored_license:
                 continue
+            if member.size <= 0 or member.size > 2 * 1024 * 1024:
+                raise RuntimeError(
+                    "nbclassic license companion contains an invalid license file size"
+                )
             stream = archive.extractfile(member)
             if stream is None:
-                continue
+                raise RuntimeError("nbclassic license companion license file is unreadable")
             data = stream.read()
+            if not data.strip():
+                raise RuntimeError("nbclassic license companion contains an empty license file")
             digest = hashlib.sha256(data).hexdigest()
-            records.setdefault((basename.casefold(), digest), (basename, data))
+            record_key = (basename.casefold(), digest)
+            records.setdefault(record_key, (basename, data))
+            if is_root_license:
+                root_license_records.add(record_key)
+            if is_vendored_license:
+                vendored_license_records.add(record_key)
 
-    if len(records) < 10:
+    if not root_license_records:
         raise RuntimeError(
-            "nbclassic sdist license companion did not contain the expected vendored notices"
+            "nbclassic sdist license companion did not contain a root license"
+        )
+    if not vendored_license_records:
+        raise RuntimeError(
+            "nbclassic sdist license companion did not contain vendored static notices"
         )
     target_root = context.source_root / "licenses" / "nbclassic"
     if target_root.exists():
