@@ -66,6 +66,7 @@ def materialize_nbclassic_vendor_licenses(context) -> None:
     records: dict[tuple[str, str], tuple[str, bytes]] = {}
     root_license_records: set[tuple[str, str]] = set()
     vendored_license_records: set[tuple[str, str]] = set()
+    has_vendored_static_payload = False
     with tarfile.open(archive_path, "r:*") as archive:
         for member in archive:
             if not member.isfile():
@@ -73,12 +74,15 @@ def materialize_nbclassic_vendor_licenses(context) -> None:
             normalized = PurePosixPath(member.name.replace("\\", "/"))
             if normalized.is_absolute() or ".." in normalized.parts:
                 raise RuntimeError("nbclassic license companion contains an unsafe path")
+            parts = tuple(part.casefold() for part in normalized.parts)
+            is_vendored_static_path = "nbclassic" in parts and "static" in parts
+            if is_vendored_static_path:
+                has_vendored_static_payload = True
             basename = normalized.name
             if not basename.casefold().startswith(license_prefixes):
                 continue
-            parts = tuple(part.casefold() for part in normalized.parts)
             is_root_license = len(parts) == 2
-            is_vendored_license = "nbclassic" in parts and "static" in parts
+            is_vendored_license = is_vendored_static_path
             if not is_root_license and not is_vendored_license:
                 continue
             if member.size <= 0 or member.size > 2 * 1024 * 1024:
@@ -103,7 +107,7 @@ def materialize_nbclassic_vendor_licenses(context) -> None:
         raise RuntimeError(
             "nbclassic sdist license companion did not contain a root license"
         )
-    if not vendored_license_records:
+    if has_vendored_static_payload and not vendored_license_records:
         raise RuntimeError(
             "nbclassic sdist license companion did not contain vendored static notices"
         )

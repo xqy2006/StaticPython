@@ -3858,7 +3858,7 @@ struct _inittab _PyImport_Inittab[] = {
         setup_module.materialize_nbclassic_vendor_licenses(context)
         self.assertEqual(integration.license_files, first_paths)
 
-    def test_nbclassic_wheel_rejects_incomplete_sdist_license_companion(self) -> None:
+    def test_nbclassic_wheel_validates_sdist_license_scope(self) -> None:
         setup_spec = importlib.util.spec_from_file_location(
             "staticpython_nbclassic_incomplete_license_test",
             REPO_ROOT / "Lib" / "nbclassic" / "setup.py",
@@ -3883,6 +3883,13 @@ struct _inittab _PyImport_Inittab[] = {
             log=lambda _message: None,
         )
         cases = {
+            "root-only-without-static-payload": (
+                {
+                    "nbclassic-0.5.6/LICENSE": b"sdist license\n",
+                    "nbclassic-0.5.6/nbclassic/__init__.py": b"\n",
+                },
+                None,
+            ),
             "missing-root": (
                 {
                     "nbclassic-0.5.6/nbclassic/static/components/marked/LICENSE.md":
@@ -3891,7 +3898,10 @@ struct _inittab _PyImport_Inittab[] = {
                 "root license",
             ),
             "missing-vendored": (
-                {"nbclassic-0.5.6/LICENSE": b"sdist license\n"},
+                {
+                    "nbclassic-0.5.6/LICENSE": b"sdist license\n",
+                    "nbclassic-0.5.6/nbclassic/static/index.js": b"static payload\n",
+                },
                 "vendored static notices",
             ),
         }
@@ -3911,8 +3921,12 @@ struct _inittab _PyImport_Inittab[] = {
                         "packagetype": "sdist",
                     },
                 }
-                with self.assertRaisesRegex(RuntimeError, expected_error):
+                if expected_error is None:
                     setup_module.materialize_nbclassic_vendor_licenses(context)
+                    self.assertEqual(len(integration.license_files), 1)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, expected_error):
+                        setup_module.materialize_nbclassic_vendor_licenses(context)
 
     def test_aws_sdk_catalog_declares_resource_behavior_smokes(self) -> None:
         config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
