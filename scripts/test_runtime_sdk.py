@@ -3114,6 +3114,31 @@ struct _inittab _PyImport_Inittab[] = {
             [("notebook", ">=4.2"), ("entrypoints", "==0.4")],
         )
 
+    def test_historical_dependency_metadata_ignores_vendored_pkg_info(self) -> None:
+        archive = self.root / "legacy_root-1.0.zip"
+        with ZipFile(archive, "w") as bundle:
+            bundle.writestr(
+                "legacy_root-1.0/PKG-INFO",
+                "Metadata-Version: 1.2\nName: legacy-root\nVersion: 1.0\n",
+            )
+            bundle.writestr(
+                "legacy_root-1.0/legacy_root.egg-info/requires.txt",
+                "real-dependency>=1\n",
+            )
+            bundle.writestr(
+                "legacy_root-1.0/vendor/vendor.egg-info/PKG-INFO",
+                "Metadata-Version: 2.1\nName: vendor\nVersion: 2.0\n"
+                "Requires-Dist: wrong-dependency>=9\n",
+            )
+
+        requirements = libs._requirements_from_distribution_archive(
+            archive,
+            "legacy-root",
+            libs.Version("3.11.16"),
+        )
+
+        self.assertEqual(requirements, ["real-dependency>=1"])
+
     def test_historical_dependency_metadata_rejects_archive_hash_drift(self) -> None:
         archive = (
             self.root

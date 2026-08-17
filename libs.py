@@ -2607,18 +2607,29 @@ def _requirements_from_distribution_archive(
     records = _archive_requirement_metadata(archive_path)
     normalized_project = _normalized_project_name(project_name)
 
-    def rank(record: tuple[str, str]) -> tuple[int, int, str]:
+    def owner_matches(record: tuple[str, str]) -> bool:
         path = PurePosixPath(record[0])
         parent = path.parent.name.casefold()
         owner = parent.removesuffix(".egg-info").removesuffix(".dist-info")
         normalized_owner = _normalized_project_name(owner)
-        owner_matches = (
+        return (
             normalized_owner == normalized_project
             or normalized_owner.startswith(normalized_project + "-")
         )
-        return (0 if owner_matches else 1, len(path.parts), path.as_posix().casefold())
 
-    ordered = sorted(records, key=rank)
+    # Some legacy sdists vendor complete Python distributions, including their
+    # PKG-INFO.  Once metadata belonging to the requested project is present,
+    # never fall through to an unrelated vendored project's Requires-Dist.
+    # The root project may legitimately keep its dependencies only in
+    # requires.txt even when its PKG-INFO is also present.
+    owned_records = [record for record in records if owner_matches(record)]
+    ordered = sorted(
+        owned_records or records,
+        key=lambda record: (
+            len(PurePosixPath(record[0]).parts),
+            PurePosixPath(record[0]).as_posix().casefold(),
+        ),
+    )
     for name, text in ordered:
         if not name.casefold().endswith((".dist-info/metadata", "/pkg-info")):
             continue
