@@ -4,9 +4,16 @@ import argparse
 import copy
 import json
 from pathlib import Path
+import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+import build
+import libs
+from packaging.version import Version
 
 
 def build_contract_config(
@@ -49,8 +56,11 @@ def build_contract_config(
     if not isinstance(overrides, dict):
         raise RuntimeError("full.third_party_library_version_overrides must be an object")
     profile["third_party_library_version_overrides"] = {
-        **overrides,
         canonical_name: release_version,
+    }
+    profile["third_party_dependency_resolution"] = {
+        "mode": libs.HISTORICAL_DEPENDENCY_SOLVER,
+        "root": canonical_name,
     }
     # Disable only the monolithic full-profile script. Per-integration import,
     # resource and behavior smokes still run through verify.py.
@@ -61,6 +71,53 @@ def build_contract_config(
     return result, canonical_name
 
 
+def resolve_contract_dependency_lock(
+    config: dict,
+    target_python_version: str,
+    *,
+    profile_name: str = "library-contract",
+) -> dict:
+    profiles = config.get("profiles")
+    if not isinstance(profiles, dict) or not isinstance(profiles.get(profile_name), dict):
+        raise RuntimeError(f"config must define the {profile_name!r} profile")
+    profile = profiles[profile_name]
+    resolution = profile.get("third_party_dependency_resolution")
+    if not isinstance(resolution, dict):
+        raise RuntimeError("historical contract profile has no dependency resolution settings")
+    mode = resolution.get("mode")
+    if mode != libs.HISTORICAL_DEPENDENCY_SOLVER:
+        raise RuntimeError(f"unsupported historical dependency solver: {mode!r}")
+    selected = profile.get("third_party_libraries")
+    if not isinstance(selected, list) or len(selected) != 1:
+        raise RuntimeError("historical contract profile must select exactly one root library")
+    target_version = Version(target_python_version)
+    catalog = build.profile_library_catalog(
+        config,
+        profile,
+        "third_party_library_catalog",
+    )
+    integrations = libs.load_integrations(
+        build.LIB_PATCH_ROOT,
+        selected,
+        target_version=target_version,
+        version_overrides=profile.get("third_party_library_version_overrides"),
+        library_catalog=catalog,
+        dependency_resolution_mode=mode,
+    )
+    lock = libs.dependency_resolution_lock(
+        integrations,
+        target_version=target_version,
+        solver=mode,
+        roots=selected,
+    )
+    profile["third_party_library_version_overrides"] = {
+        record["name"]: record["version"]
+        for record in lock["integrations"]
+    }
+    resolution["lock"] = lock
+    return lock
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate a minimal profile for one historical library version contract."
@@ -69,6 +126,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--library", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--profile-name", default="library-contract")
+    parser.add_argument("--target-python-version", required=True)
     parser.add_argument("--output-config", type=Path, required=True)
     return parser.parse_args()
 
@@ -80,6 +138,11 @@ def main() -> int:
         base_config,
         args.library,
         args.version,
+        profile_name=args.profile_name,
+    )
+    lock = resolve_contract_dependency_lock(
+        payload,
+        args.target_python_version,
         profile_name=args.profile_name,
     )
     args.output_config.parent.mkdir(parents=True, exist_ok=True)
@@ -95,6 +158,9 @@ def main() -> int:
                 "version": args.version,
                 "profile": args.profile_name,
                 "output": str(args.output_config),
+                "dependency_solver_fingerprint": (
+                    lock.get("solver_fingerprint") if isinstance(lock, dict) else None
+                ),
             },
             sort_keys=True,
         )

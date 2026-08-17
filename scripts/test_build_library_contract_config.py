@@ -4,6 +4,8 @@ import importlib.util
 import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +25,14 @@ class BuildLibraryContractConfigTests(unittest.TestCase):
         profile = result["profiles"]["library-contract"]
         self.assertEqual(canonical_name, "OpenGL")
         self.assertEqual(profile["third_party_libraries"], ["OpenGL"])
-        self.assertEqual(profile["third_party_library_version_overrides"]["OpenGL"], "3.1.9")
+        self.assertEqual(profile["third_party_library_version_overrides"], {"OpenGL": "3.1.9"})
+        self.assertEqual(
+            profile["third_party_dependency_resolution"],
+            {
+                "mode": builder.libs.HISTORICAL_DEPENDENCY_SOLVER,
+                "root": "OpenGL",
+            },
+        )
         self.assertEqual(profile["verification"], {"enabled": False})
         self.assertNotIn("library-contract", base["profiles"])
 
@@ -40,6 +49,39 @@ class BuildLibraryContractConfigTests(unittest.TestCase):
         self.assertEqual(
             result["profiles"]["library-contract"]["third_party_libraries"],
             ["attr"],
+        )
+
+    def test_exact_dependency_lock_replaces_profile_overrides(self) -> None:
+        base = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+        result, _canonical_name = builder.build_contract_config(base, "jupyterlab", "0.31.0")
+        integrations = [SimpleNamespace(name="notebook"), SimpleNamespace(name="jupyterlab")]
+        lock = {
+            "schema_version": 1,
+            "kind": "staticpython-history-dependency-lock",
+            "solver": builder.libs.HISTORICAL_DEPENDENCY_SOLVER,
+            "target_python_version": "3.11.15",
+            "integrations": [
+                {"name": "jupyterlab", "version": "0.31.0"},
+                {"name": "notebook", "version": "5.7.16"},
+            ],
+            "solver_fingerprint": "a" * 64,
+        }
+        with (
+            mock.patch.object(builder.libs, "load_integrations", return_value=integrations) as load,
+            mock.patch.object(builder.libs, "dependency_resolution_lock", return_value=lock),
+        ):
+            observed = builder.resolve_contract_dependency_lock(result, "3.11.15")
+
+        self.assertEqual(observed, lock)
+        profile = result["profiles"]["library-contract"]
+        self.assertEqual(
+            profile["third_party_library_version_overrides"],
+            {"jupyterlab": "0.31.0", "notebook": "5.7.16"},
+        )
+        self.assertEqual(profile["third_party_dependency_resolution"]["lock"], lock)
+        self.assertEqual(
+            load.call_args.kwargs["dependency_resolution_mode"],
+            builder.libs.HISTORICAL_DEPENDENCY_SOLVER,
         )
 
 

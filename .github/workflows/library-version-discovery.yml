@@ -458,6 +458,7 @@ jobs:
               python .\scripts\build_library_contract_config.py `
                 --library $candidate.library `
                 --version $candidate.version `
+                --target-python-version $candidate.python_version `
                 --output-config (Join-Path $resultRoot "config.json")
               python .\scripts\library_contract_build.py stage `
                 --download-root $env:CONTRACT_SOURCE_CACHE `

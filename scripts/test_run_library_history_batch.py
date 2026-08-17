@@ -121,6 +121,54 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        dependency_lock = {
+            "schema_version": 1,
+            "kind": "staticpython-history-dependency-lock",
+            "solver": "staticpython-history-backtracking-v1",
+            "roots": [record["library"]],
+            "target_python_version": record["python_version"],
+            "runtime_abi": "staticpython-pack-v1-cp"
+            + "".join(record["python_version"].split(".")[:2]),
+            "toolchain": {
+                "platform": "windows-x64",
+                "platform_toolset": "v143",
+                "runtime_library": "MultiThreaded",
+            },
+            "integrations": [
+                {
+                    "name": record["library"],
+                    "version": record["version"],
+                    "source_provider": "pypi",
+                    "dependencies": [],
+                    "dependency_constraints": {},
+                    "source": {
+                        "filename": "demo.tar.gz",
+                        "url": "https://files.example/demo.tar.gz",
+                        "sha256": record["source_sha256"],
+                    },
+                }
+            ],
+        }
+        dependency_lock["toolchain_fingerprint"] = history_evidence.canonical_sha256(
+            dependency_lock["toolchain"]
+        )
+        dependency_lock["solver_fingerprint"] = history_evidence.canonical_sha256(
+            dependency_lock
+        )
+        dependency_lock_path = combination_root / "dependency-lock.v1.json"
+        dependency_lock_path.write_text(json.dumps(dependency_lock), encoding="utf-8")
+        profile_metadata_path = combination_root / "staticpython-profile.json"
+        profile_metadata_path.write_text(
+            json.dumps(
+                {
+                    "third_party_library_versions": {
+                        record["library"]: {"release_version": record["version"]}
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        dependency_lock_sha256 = history_evidence.file_sha256(dependency_lock_path)
         combination = {
             "schema_version": 1,
             "kind": history_evidence.COMBINATION_EVIDENCE_KIND,
@@ -129,7 +177,13 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
             "python_version": record["python_version"],
             "source_sha256": record["source_sha256"],
             "runtime_sdk_sha256": context["runtime_sdk_sha256"],
+            "runtime_abi": dependency_lock["runtime_abi"],
             "pack_sha256": "a" * 64,
+            "dependency_lock_sha256": dependency_lock_sha256,
+            "dependency_solver_fingerprint": dependency_lock["solver_fingerprint"],
+            "dependency_toolchain_fingerprint": dependency_lock[
+                "toolchain_fingerprint"
+            ],
             "status": "passed",
         }
         combination["evidence_sha256"] = history_evidence.canonical_sha256(
@@ -145,13 +199,27 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
                 "source_sha256": record["source_sha256"],
                 "pack_sha256": "a" * 64,
                 "runtime_sdk_sha256": context["runtime_sdk_sha256"],
+                "runtime_abi": dependency_lock["runtime_abi"],
                 "verifier_report_sha256": history_evidence.file_sha256(
                     verifier_path
                 ),
                 "combination_evidence_sha256": combination["evidence_sha256"],
+                "dependency_lock_sha256": dependency_lock_sha256,
+                "dependency_solver_fingerprint": dependency_lock[
+                    "solver_fingerprint"
+                ],
+                "dependency_toolchain_fingerprint": dependency_lock[
+                    "toolchain_fingerprint"
+                ],
                 "status": "passed",
             },
-            [verifier_path, pack_metadata_path, combination_path],
+            [
+                verifier_path,
+                pack_metadata_path,
+                dependency_lock_path,
+                profile_metadata_path,
+                combination_path,
+            ],
         )
 
     def test_runner_records_every_passed_combination_and_hashed_files(self) -> None:
@@ -167,7 +235,7 @@ class RunLibraryHistoryBatchTests(unittest.TestCase):
         )
         self.assertEqual(evidence["status"], "passed")
         self.assertEqual(len(evidence["results"]), 2)
-        self.assertEqual(len(evidence["files"]), 6)
+        self.assertEqual(len(evidence["files"]), 10)
         history_evidence.validate_batch_evidence(
             evidence,
             self.result_root,

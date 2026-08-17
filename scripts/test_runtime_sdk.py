@@ -7,6 +7,7 @@ import hashlib
 import io
 import importlib.util
 import math
+import os
 import sys
 import tempfile
 import unittest
@@ -1457,9 +1458,70 @@ struct _inittab _PyImport_Inittab[] = {
         )
         self.assertEqual([item["packagetype"] for item in compatible], ["sdist", "bdist_wheel"])
 
+    def test_requires_python_accepts_target_cpython_release_candidate(self) -> None:
+        self.assertTrue(
+            libs._supports_target_python(">=3.9", libs.Version("3.15.0rc1"))
+        )
+        self.assertFalse(
+            libs._supports_target_python(">=3.16", libs.Version("3.15.0rc1"))
+        )
+
     def test_automatic_version_scan_excludes_prerelease_and_dev(self) -> None:
         releases = {"2.0rc1": [], "2.0.dev1": [], "1.9": [], "1.8": []}
         self.assertEqual(libs._sorted_release_versions(releases), ["1.9", "1.8"])
+
+    def test_pypi_release_catalog_is_cached_within_history_batch(self) -> None:
+        payload = {
+            "info": {"requires_python": ">=3.11"},
+            "releases": {
+                "1.0": [
+                    {
+                        "filename": "demo-1.0.tar.gz",
+                        "url": "https://files.example/demo-1.0.tar.gz",
+                        "packagetype": "sdist",
+                        "requires_python": ">=3.11",
+                        "yanked": False,
+                    }
+                ]
+            },
+        }
+        with (
+            mock.patch.object(libs, "DOWNLOAD_CACHE_ROOT", self.root / "downloads"),
+            mock.patch.object(libs, "_http_get_json", return_value=payload) as fetch,
+        ):
+            first = libs._iter_pypi_distribution_candidates(
+                "demo", libs.Version("3.13.14")
+            )
+            second = libs._iter_pypi_distribution_candidates(
+                "demo", libs.Version("3.13.14")
+            )
+        self.assertEqual(first, second)
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_historical_candidate_does_not_inherit_latest_requires_python(self) -> None:
+        payload = {
+            "info": {"requires_python": ">=3.16"},
+            "releases": {
+                "1.0": [
+                    {
+                        "filename": "demo-1.0.tar.gz",
+                        "url": "https://files.example/demo-1.0.tar.gz",
+                        "packagetype": "sdist",
+                        "requires_python": None,
+                        "yanked": False,
+                    }
+                ]
+            },
+        }
+        with mock.patch.object(
+            libs,
+            "_load_pypi_release_payload",
+            return_value=payload,
+        ):
+            candidates = libs._iter_pypi_distribution_candidates(
+                "demo", libs.Version("3.11.16")
+            )
+        self.assertEqual([version for version, _file in candidates], ["1.0"])
 
     def test_patch_rules_are_strict_and_idempotent(self) -> None:
         target = self.root / "Lib" / "demo.py"
@@ -2838,6 +2900,401 @@ struct _inittab _PyImport_Inittab[] = {
             )
         self.assertEqual([integration.name for integration in selected], ["dependency", "root"])
         self.assertEqual(dependency.release_version, "1.5")
+
+    def test_historical_dependency_resolution_backtracks_transitive_versions(self) -> None:
+        root = libs.LibraryIntegration(
+            name="root",
+            source_provider="pypi",
+            project_name="root",
+            release_version="1.0",
+            auto_resolve_dependencies=True,
+        )
+        dependency = libs.LibraryIntegration(
+            name="dependency",
+            source_provider="pypi",
+            project_name="dependency",
+            release_version="2.0",
+            auto_resolve_dependencies=True,
+        )
+
+        def file_info(project: str, version: str) -> dict:
+            return {
+                "filename": f"{project}-{version}.tar.gz",
+                "url": f"https://files.example/{project}-{version}.tar.gz",
+                "size": 123,
+                "packagetype": "sdist",
+                "requires_python": ">=3.11",
+                "digests": {"sha256": ("a" if project == "root" else "b") * 64},
+            }
+
+        def candidates(project: str, _target: libs.Version, release_version: str | None = None):
+            versions = {"root": ["1.0"], "dependency": ["2.0", "1.0"]}[project]
+            if release_version is not None:
+                versions = [version for version in versions if version == release_version]
+            return [(version, file_info(project, version)) for version in versions]
+
+        def metadata(project: str, version: str | None):
+            requirements = {
+                ("root", "1.0"): ["dependency>=1"],
+                ("dependency", "2.0"): ["root>=2"],
+                ("dependency", "1.0"): ["root<2"],
+            }[(project, version)]
+            return {"info": {"requires_dist": requirements}}
+
+        with (
+            mock.patch.object(libs, "_iter_pypi_distribution_candidates", side_effect=candidates),
+            mock.patch.object(libs, "_load_pypi_release_payload", side_effect=metadata),
+        ):
+            selected = libs._resolve_selected_integrations(
+                [root, dependency],
+                ["root"],
+                target_version=libs.Version("3.11.15"),
+                dependency_resolution_mode=libs.HISTORICAL_DEPENDENCY_SOLVER,
+                pinned_version_names={"root"},
+            )
+            lock = libs.dependency_resolution_lock(
+                selected,
+                target_version=libs.Version("3.11.15"),
+                solver=libs.HISTORICAL_DEPENDENCY_SOLVER,
+                roots=["root"],
+            )
+
+        self.assertEqual(dependency.release_version, "1.0")
+        self.assertEqual(root.dependencies, ["dependency"])
+        self.assertEqual(dependency.dependencies, ["root"])
+        self.assertEqual(
+            {record["name"]: record["version"] for record in lock["integrations"]},
+            {"dependency": "1.0", "root": "1.0"},
+        )
+        self.assertRegex(lock["solver_fingerprint"], r"^[0-9a-f]{64}$")
+
+    def test_historical_dependency_resolution_keeps_explicit_transitive_pin(self) -> None:
+        root = libs.LibraryIntegration(
+            name="root",
+            release_version="1.0",
+            dependencies=["dependency"],
+            dependency_constraints={"dependency": "<2"},
+        )
+        dependency = libs.LibraryIntegration(
+            name="dependency",
+            source_provider="pypi",
+            release_version="2.0",
+        )
+        with self.assertRaisesRegex(RuntimeError, "historical dependency resolution failed"):
+            libs._resolve_selected_integrations(
+                [root, dependency],
+                ["root"],
+                target_version=libs.Version("3.13.14"),
+                dependency_resolution_mode=libs.HISTORICAL_DEPENDENCY_SOLVER,
+                pinned_version_names={"root", "dependency"},
+            )
+
+    def test_historical_dependency_resolution_accepts_non_pep440_source_ref(self) -> None:
+        root = libs.LibraryIntegration(
+            name="root",
+            source_provider="github",
+            release_version="main",
+        )
+        selected = libs._resolve_selected_integrations(
+            [root],
+            ["root"],
+            target_version=libs.Version("3.13.14"),
+            dependency_resolution_mode=libs.HISTORICAL_DEPENDENCY_SOLVER,
+            pinned_version_names={"root"},
+        )
+        self.assertEqual(selected, [root])
+
+    def test_historical_dependency_resolution_backjumps_over_unrelated_choices(self) -> None:
+        root = libs.LibraryIntegration(
+            name="root",
+            source_provider="pypi",
+            release_version="1.0",
+            dependencies=["unrelated", "problem"],
+            auto_resolve_dependencies=False,
+        )
+        unrelated = libs.LibraryIntegration(
+            name="unrelated",
+            source_provider="pypi",
+            release_version="2.0",
+            auto_resolve_dependencies=True,
+        )
+        problem = libs.LibraryIntegration(
+            name="problem",
+            source_provider="pypi",
+            release_version="2.0",
+            auto_resolve_dependencies=True,
+        )
+
+        def info(project: str, version: str) -> dict:
+            return {
+                "filename": f"{project}-{version}.tar.gz",
+                "url": f"https://files.example/{project}-{version}.tar.gz",
+                "packagetype": "sdist",
+                "digests": {"sha256": "c" * 64},
+            }
+
+        def candidates(project: str, _target: libs.Version, release_version: str | None = None):
+            versions = ["1.0"] if project == "root" else ["2.0", "1.0"]
+            if project == "problem":
+                versions = ["2.0"]
+            if release_version is not None:
+                versions = [version for version in versions if version == release_version]
+            return [(version, info(project, version)) for version in versions]
+
+        metadata_calls: list[tuple[str, str | None]] = []
+
+        def metadata(project: str, version: str | None):
+            metadata_calls.append((project, version))
+            requirements = ["root>=2"] if project == "problem" else []
+            return {"info": {"requires_dist": requirements}}
+
+        with (
+            mock.patch.object(libs, "_iter_pypi_distribution_candidates", side_effect=candidates),
+            mock.patch.object(libs, "_load_pypi_release_payload", side_effect=metadata),
+            self.assertRaisesRegex(RuntimeError, "historical dependency resolution failed"),
+        ):
+            libs._resolve_selected_integrations(
+                [root, unrelated, problem],
+                ["root"],
+                target_version=libs.Version("3.11.15"),
+                dependency_resolution_mode=libs.HISTORICAL_DEPENDENCY_SOLVER,
+                pinned_version_names={"root"},
+            )
+
+        self.assertIn(("unrelated", "2.0"), metadata_calls)
+        self.assertNotIn(("unrelated", "1.0"), metadata_calls)
+
+    def test_historical_dependency_resolution_tracks_unconstrained_dependency_owner(self) -> None:
+        root = libs.LibraryIntegration(
+            name="root",
+            release_version="1.0",
+            dependencies=["chooser"],
+        )
+        chooser = libs.LibraryIntegration(
+            name="chooser",
+            source_provider="pypi",
+            release_version="2.0",
+            auto_resolve_dependencies=True,
+        )
+        missing = libs.LibraryIntegration(
+            name="missing",
+            source_provider="pypi",
+            auto_resolve_dependencies=True,
+        )
+
+        def source(version: str) -> dict:
+            return {
+                "filename": f"chooser-{version}.tar.gz",
+                "url": f"https://files.example/chooser-{version}.tar.gz",
+                "packagetype": "sdist",
+                "digests": {"sha256": "f" * 64},
+            }
+
+        def candidates(project: str, _target: libs.Version, release_version: str | None = None):
+            if project == "missing":
+                return []
+            versions = ["2.0", "1.0"]
+            if release_version is not None:
+                versions = [version for version in versions if version == release_version]
+            return [(version, source(version)) for version in versions]
+
+        def metadata(project: str, version: str | None):
+            requirements = ["missing"] if project == "chooser" and version == "2.0" else []
+            return {"info": {"requires_dist": requirements}}
+
+        with (
+            mock.patch.object(libs, "_iter_pypi_distribution_candidates", side_effect=candidates),
+            mock.patch.object(libs, "_load_pypi_release_payload", side_effect=metadata),
+        ):
+            selected = libs._resolve_selected_integrations(
+                [root, chooser, missing],
+                ["root"],
+                target_version=libs.Version("3.13.14"),
+                dependency_resolution_mode=libs.HISTORICAL_DEPENDENCY_SOLVER,
+                pinned_version_names={"root"},
+            )
+
+        self.assertEqual(chooser.release_version, "1.0")
+        self.assertEqual([integration.name for integration in selected], ["chooser", "root"])
+
+    def test_historical_dependency_resolution_backjumps_to_owner_after_child_exhaustion(self) -> None:
+        root = libs.LibraryIntegration(name="root", release_version="1.0", dependencies=["parent"])
+        parent = libs.LibraryIntegration(
+            name="parent",
+            source_provider="pypi",
+            release_version="2.0",
+            auto_resolve_dependencies=True,
+        )
+        child = libs.LibraryIntegration(
+            name="child",
+            source_provider="pypi",
+            release_version="1.0",
+            auto_resolve_dependencies=True,
+        )
+        missing = libs.LibraryIntegration(name="missing", source_provider="pypi")
+
+        def source(project: str, version: str) -> dict:
+            return {
+                "filename": f"{project}-{version}.tar.gz",
+                "url": f"https://files.example/{project}-{version}.tar.gz",
+                "packagetype": "sdist",
+                "digests": {"sha256": "1" * 64},
+            }
+
+        def candidates(project: str, _target: libs.Version, release_version: str | None = None):
+            versions = {
+                "parent": ["2.0", "1.0"],
+                "child": ["1.0"],
+                "missing": [],
+            }[project]
+            if release_version is not None:
+                versions = [version for version in versions if version == release_version]
+            return [(version, source(project, version)) for version in versions]
+
+        def metadata(project: str, version: str | None):
+            requirements = []
+            if project == "parent" and version == "2.0":
+                requirements = ["child"]
+            elif project == "child":
+                requirements = ["missing"]
+            return {"info": {"requires_dist": requirements}}
+
+        with (
+            mock.patch.object(libs, "_iter_pypi_distribution_candidates", side_effect=candidates),
+            mock.patch.object(libs, "_load_pypi_release_payload", side_effect=metadata),
+        ):
+            selected = libs._resolve_selected_integrations(
+                [root, parent, child, missing],
+                ["root"],
+                target_version=libs.Version("3.13.14"),
+                dependency_resolution_mode=libs.HISTORICAL_DEPENDENCY_SOLVER,
+                pinned_version_names={"root"},
+            )
+
+        self.assertEqual(parent.release_version, "1.0")
+        self.assertEqual([integration.name for integration in selected], ["parent", "root"])
+
+    def test_historical_dependency_lock_replay_uses_locked_sources(self) -> None:
+        def integration_pair() -> list[libs.LibraryIntegration]:
+            return [
+                libs.LibraryIntegration(
+                    name="root",
+                    source_provider="pypi",
+                    release_version="1.0",
+                    dependencies=["dependency"],
+                    dependency_constraints={"dependency": "==1.5"},
+                    auto_resolve_dependencies=True,
+                ),
+                libs.LibraryIntegration(
+                    name="dependency",
+                    source_provider="pypi",
+                    release_version="1.5",
+                    auto_resolve_dependencies=True,
+                ),
+            ]
+
+        records = []
+        for name, version, digest in (
+            ("dependency", "1.5", "d" * 64),
+            ("root", "1.0", "e" * 64),
+        ):
+            records.append(
+                {
+                    "name": name,
+                    "project_name": None,
+                    "source_provider": "pypi",
+                    "version": version,
+                    "dependencies": [] if name == "dependency" else ["dependency"],
+                    "dependency_constraints": {} if name == "dependency" else {"dependency": "==1.5"},
+                    "source": {
+                        "filename": f"{name}-{version}.tar.gz",
+                        "url": f"https://files.example/{name}-{version}.tar.gz",
+                        "sha256": digest,
+                        "size": 10,
+                        "packagetype": "sdist",
+                        "requires_python": None,
+                    },
+                }
+            )
+        toolchain = {
+            "platform": "windows-x64",
+            "platform_toolset": "v143",
+            "runtime_library": "MultiThreaded",
+            "visual_studio_version": os.environ.get("VisualStudioVersion"),
+            "vscmd_version": os.environ.get("VSCMD_VER"),
+            "vc_tools_version": os.environ.get("VCToolsVersion"),
+            "windows_sdk_version": os.environ.get("WindowsSDKVersion"),
+        }
+        unsigned_lock = {
+            "schema_version": 1,
+            "kind": "staticpython-history-dependency-lock",
+            "solver": libs.HISTORICAL_DEPENDENCY_SOLVER,
+            "roots": ["root"],
+            "target_python_version": "3.13.14",
+            "runtime_abi": "staticpython-pack-v1-cp313",
+            "toolchain": toolchain,
+            "toolchain_fingerprint": hashlib.sha256(
+                json.dumps(
+                    toolchain,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            "integrations": records,
+        }
+        lock = {
+            **unsigned_lock,
+            "solver_fingerprint": hashlib.sha256(
+                json.dumps(
+                    unsigned_lock,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+
+        with (
+            mock.patch.object(
+                libs,
+                "_iter_pypi_distribution_candidates",
+                side_effect=AssertionError("locked replay must not query PyPI project releases"),
+            ),
+            mock.patch.object(
+                libs,
+                "_load_pypi_release_payload",
+                side_effect=AssertionError("locked replay must not query PyPI release metadata"),
+            ),
+        ):
+            selected = libs._resolve_selected_integrations(
+                integration_pair(),
+                ["root"],
+                target_version=libs.Version("3.13.14"),
+                dependency_resolution_mode=libs.HISTORICAL_DEPENDENCY_SOLVER,
+                pinned_version_names={"root", "dependency"},
+                dependency_resolution_lock_payload=lock,
+            )
+        self.assertEqual(
+            libs.dependency_resolution_lock(
+                selected,
+                target_version=libs.Version("3.13.14"),
+                solver=libs.HISTORICAL_DEPENDENCY_SOLVER,
+                roots=["root"],
+            ),
+            lock,
+        )
+        tampered = json.loads(json.dumps(lock))
+        tampered["integrations"][0]["source"]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(RuntimeError, "solver fingerprint mismatch"):
+            libs._resolve_selected_integrations(
+                integration_pair(),
+                ["root"],
+                target_version=libs.Version("3.13.14"),
+                dependency_resolution_mode=libs.HISTORICAL_DEPENDENCY_SOLVER,
+                pinned_version_names={"root", "dependency"},
+                dependency_resolution_lock_payload=tampered,
+            )
 
     def test_dependency_cycles_are_kept_as_stable_components(self) -> None:
         first = libs.LibraryIntegration(name="first", dependencies=["second"])

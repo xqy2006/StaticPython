@@ -25,3 +25,17 @@ For build-profile checks without compiling:
 python .\build.py --source-archive-path D:\cpython-3.13.zip --profile stdlib --skip-get-externals --skip-build
 python .\build.py --source-archive-path D:\cpython-3.13.zip --profile full --skip-get-externals --skip-build
 ```
+
+## Historical dependency locks
+
+Historical package validation must generate a target-specific dependency lock before building:
+
+```powershell
+python .\scripts\build_library_contract_config.py `
+  --library jupyterlab `
+  --version 0.31.0 `
+  --target-python-version 3.11.16 `
+  --output-config .\dist\jupyterlab-0.31.0-cp311.json
+```
+
+The historical solver treats the requested root version as immutable, prefers current integration versions for transitive packages, and backtracks only when their metadata conflicts. The generated config pins the complete closure and records source URLs and SHA-256 values, the target runtime ABI, and the active MSVC/Windows SDK fingerprint. Never hand-edit this lock or copy it between target Python/toolchain combinations.

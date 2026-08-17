@@ -166,8 +166,10 @@ jobs:
           path: |
             ${{ env.HISTORY_RESULT_ROOT }}/library-history-batch-evidence.v1.json
             ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/config.json
+            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/dependency-lock.v1.json
             ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/pack-metadata.json
             ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/staticpython-pack-verify-report.json
+            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/staticpython-profile.json
             ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/combination-evidence.v1.json
           if-no-files-found: warn
           retention-days: 90
