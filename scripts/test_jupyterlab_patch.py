@@ -34,6 +34,24 @@ def labapp_source(*, call_not_implemented: bool) -> str:
 
 
 class JupyterLabPatchTests(unittest.TestCase):
+    def test_early_sdist_license_fallbacks_are_immutable(self) -> None:
+        integration = jupyterlab.LIBRARY_INTEGRATION
+
+        self.assertEqual(integration.license_expression, "BSD-3-Clause")
+        self.assertEqual(
+            [record["filename"] for record in integration.license_sources],
+            ["LICENSE-2015.txt", "LICENSE-2015-2016.txt"],
+        )
+        self.assertEqual(
+            [record["sha256"] for record in integration.license_sources],
+            [
+                "e73aa83e9684316187c171eeefbb03ae52a5d6c5469a5c3c222c8487a3a43df4",
+                "eb713dd6d648da8f74b389761faa8c310f186f365d3055ec2c788f1800bcd94f",
+            ],
+        )
+        for record in integration.license_sources:
+            self.assertRegex(record["url"], r"/[0-9a-f]{40}/LICENSE$")
+
     def test_extension_manager_fallback_supports_old_and_new_raise_forms(self) -> None:
         for call_not_implemented in (True, False):
             with self.subTest(call_not_implemented=call_not_implemented):

@@ -411,5 +411,27 @@ LIBRARY_INTEGRATION = pypi_library(
         "Lib/jupyterlab/_staticpython_resources.py",
     ],
     python_packages=["jupyterlab"],
+    license_expression="BSD-3-Clause",
+    # The earliest PyPI sdists omit the repository LICENSE file.  Preserve the
+    # two upstream notices used by those releases from immutable Git commits;
+    # source distributions that include their own license remain preferred.
+    license_sources=[
+        {
+            "filename": "LICENSE-2015.txt",
+            "url": (
+                "https://raw.githubusercontent.com/jupyterlab/jupyterlab/"
+                "ef40f33f074ce921cc1405b4658f62f8876802b0/LICENSE"
+            ),
+            "sha256": "e73aa83e9684316187c171eeefbb03ae52a5d6c5469a5c3c222c8487a3a43df4",
+        },
+        {
+            "filename": "LICENSE-2015-2016.txt",
+            "url": (
+                "https://raw.githubusercontent.com/jupyterlab/jupyterlab/"
+                "5e4e335b87307012491adee2c150aaeebceba85c/LICENSE"
+            ),
+            "sha256": "eb713dd6d648da8f74b389761faa8c310f186f365d3055ec2c788f1800bcd94f",
+        },
+    ],
     post_patch_hooks=[patch_jupyterlab_for_frozen_runtime],
 )
