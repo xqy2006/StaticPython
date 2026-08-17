@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import ast
 from dataclasses import dataclass, field
+from email.parser import Parser
 import fnmatch
 import hashlib
 import http.client
@@ -36,7 +37,7 @@ def _ensure_repo_packaging_on_path() -> None:
 
 _ensure_repo_packaging_on_path()
 
-from packaging.markers import default_environment
+from packaging.markers import InvalidMarker, Marker, default_environment
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
@@ -2404,6 +2405,187 @@ def _pypi_dependency_requirements(
     )
 
 
+_PYPI_ARCHIVE_REQUIREMENTS_CACHE: dict[
+    tuple[str, str, str, str],
+    tuple[str, ...],
+] = {}
+
+
+def _legacy_requires_txt_requirements(
+    text: str,
+    target_version: Version,
+) -> list[str]:
+    """Return base requirements from legacy setuptools requires.txt metadata."""
+
+    environment = _marker_environment(target_version)
+    include_section = True
+    requirements: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            extra, separator, marker_text = section.partition(":")
+            if extra.strip():
+                include_section = False
+                continue
+            if not separator or not marker_text.strip():
+                include_section = True
+                continue
+            try:
+                include_section = Marker(marker_text.strip()).evaluate(environment)
+            except InvalidMarker as exc:
+                raise RuntimeError(
+                    f"invalid marker in legacy requires.txt section {line!r}"
+                ) from exc
+            continue
+        if include_section:
+            requirements.append(line)
+    return list(dict.fromkeys(requirements))
+
+
+def _archive_requirement_metadata(
+    archive_path: Path,
+) -> list[tuple[str, str]]:
+    """Read only bounded dependency metadata members from an immutable archive."""
+
+    maximum_size = 2 * 1024 * 1024
+
+    def wanted(name: str) -> bool:
+        normalized = name.replace("\\", "/").casefold()
+        return normalized.endswith(
+            (".dist-info/metadata", ".egg-info/requires.txt", "/pkg-info")
+        )
+
+    records: list[tuple[str, str]] = []
+    if archive_path.name.casefold().endswith((".zip", ".whl")):
+        with ZipFile(archive_path) as archive:
+            for member in archive.infolist():
+                if member.is_dir() or not wanted(member.filename):
+                    continue
+                if member.file_size > maximum_size:
+                    raise RuntimeError(
+                        f"dependency metadata member is too large: {member.filename!r}"
+                    )
+                records.append(
+                    (
+                        member.filename.replace("\\", "/"),
+                        archive.read(member).decode("utf-8", "replace"),
+                    )
+                )
+    else:
+        with tarfile.open(archive_path, "r:*") as archive:
+            for member in archive.getmembers():
+                if not member.isfile() or not wanted(member.name):
+                    continue
+                if member.size > maximum_size:
+                    raise RuntimeError(
+                        f"dependency metadata member is too large: {member.name!r}"
+                    )
+                stream = archive.extractfile(member)
+                if stream is None:
+                    continue
+                records.append(
+                    (
+                        member.name.replace("\\", "/"),
+                        stream.read().decode("utf-8", "replace"),
+                    )
+                )
+    return records
+
+
+def _requirements_from_distribution_archive(
+    archive_path: Path,
+    project_name: str,
+    target_version: Version,
+) -> list[str]:
+    records = _archive_requirement_metadata(archive_path)
+    normalized_project = _normalized_project_name(project_name)
+
+    def rank(record: tuple[str, str]) -> tuple[int, int, str]:
+        path = PurePosixPath(record[0])
+        parent = path.parent.name.casefold()
+        owner = parent.removesuffix(".egg-info").removesuffix(".dist-info")
+        normalized_owner = _normalized_project_name(owner)
+        owner_matches = (
+            normalized_owner == normalized_project
+            or normalized_owner.startswith(normalized_project + "-")
+        )
+        return (0 if owner_matches else 1, len(path.parts), path.as_posix().casefold())
+
+    ordered = sorted(records, key=rank)
+    for name, text in ordered:
+        if not name.casefold().endswith((".dist-info/metadata", "/pkg-info")):
+            continue
+        requirements = Parser().parsestr(text).get_all("Requires-Dist", [])
+        if requirements:
+            return list(dict.fromkeys(value.strip() for value in requirements if value.strip()))
+    for name, text in ordered:
+        if name.casefold().endswith(".egg-info/requires.txt"):
+            return _legacy_requires_txt_requirements(text, target_version)
+    return []
+
+
+def _pypi_archive_dependency_requirements(
+    integration: LibraryIntegration,
+    target_version: Version,
+    release_version: str,
+) -> list[str]:
+    """Recover dependencies omitted from legacy PyPI JSON using locked source metadata."""
+
+    project_name = integration.project_name or integration.name
+    candidates = _iter_pypi_distribution_candidates(
+        project_name,
+        target_version,
+        release_version,
+    )
+    matching = [
+        file_info
+        for candidate_version, file_info in candidates
+        if candidate_version == release_version and file_info.get("url")
+    ]
+    if not matching:
+        return []
+    source = _pypi_candidate_source_record(matching[0])
+    cache_key = (
+        _normalized_project_name(project_name),
+        release_version,
+        str(target_version),
+        str(source["sha256"]),
+    )
+    cached = _PYPI_ARCHIVE_REQUIREMENTS_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
+
+    archive_path = (
+        DOWNLOAD_CACHE_ROOT
+        / "pypi"
+        / _normalized_project_name(project_name)
+        / release_version
+        / str(source["filename"])
+    )
+    if not archive_path.exists():
+        _download_file(str(source["url"]), archive_path)
+    digest = hashlib.sha256()
+    with archive_path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    observed_sha256 = digest.hexdigest()
+    if observed_sha256 != source["sha256"]:
+        raise RuntimeError(
+            f"PyPI dependency metadata source hash mismatch for {project_name} "
+            f"{release_version}: expected {source['sha256']}, observed {observed_sha256}"
+        )
+    requirements = _requirements_from_distribution_archive(
+        archive_path,
+        project_name,
+        target_version,
+    )
+    _PYPI_ARCHIVE_REQUIREMENTS_CACHE[cache_key] = tuple(requirements)
+    return requirements
+
+
 def _pypi_dependency_requirements_for_release(
     integration: LibraryIntegration,
     target_version: Version,
@@ -2414,9 +2596,21 @@ def _pypi_dependency_requirements_for_release(
     project_name = integration.project_name or integration.name
     payload = _load_pypi_release_payload(project_name, release_version)
     info = payload.get("info", {})
-    raw_requirements = info.get("requires_dist") or []
-    if not raw_requirements:
-        return []
+    raw_requirements = info.get("requires_dist")
+    # PyPI uses null when legacy distributions never published dependency
+    # metadata. An explicit empty array is authoritative and must not trigger
+    # an archive download (or reinterpret a package that genuinely has no
+    # dependencies).
+    if raw_requirements is None:
+        raw_requirements = _pypi_archive_dependency_requirements(
+            integration,
+            target_version,
+            release_version,
+        )
+    if not isinstance(raw_requirements, list):
+        raise RuntimeError(
+            f"invalid Requires-Dist metadata for {project_name} {release_version}"
+        )
 
     environment = _marker_environment(target_version)
     resolved: list[tuple[str, str]] = []

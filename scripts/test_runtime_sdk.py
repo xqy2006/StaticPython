@@ -2914,6 +2914,122 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertEqual([integration.name for integration in selected], ["dependency", "root"])
         self.assertEqual(dependency.release_version, "1.5")
 
+    def test_historical_dependencies_fall_back_to_locked_legacy_requires_txt(self) -> None:
+        archive = (
+            self.root
+            / "downloads"
+            / "pypi"
+            / "legacy-root"
+            / "1.0"
+            / "legacy_root-1.0.zip"
+        )
+        archive.parent.mkdir(parents=True)
+        with ZipFile(archive, "w") as bundle:
+            bundle.writestr(
+                "legacy_root-1.0/legacy_root.egg-info/requires.txt",
+                "\n".join(
+                    [
+                        "notebook>=4.2",
+                        "[:python_version < '3.12']",
+                        "entrypoints==0.4",
+                        "[test]",
+                        "pytest",
+                        "[:python_version >= '3.12']",
+                        "new-only",
+                    ]
+                ),
+            )
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        file_info = {
+            "filename": archive.name,
+            "url": "https://files.example/legacy_root-1.0.zip",
+            "size": archive.stat().st_size,
+            "packagetype": "sdist",
+            "requires_python": None,
+            "digests": {"sha256": digest},
+        }
+        integration = libs.LibraryIntegration(
+            name="legacy_root",
+            source_provider="pypi",
+            project_name="legacy-root",
+            release_version="1.0",
+            auto_resolve_dependencies=True,
+        )
+        libs._PYPI_ARCHIVE_REQUIREMENTS_CACHE.clear()
+        with (
+            mock.patch.object(libs, "DOWNLOAD_CACHE_ROOT", self.root / "downloads"),
+            mock.patch.object(
+                libs,
+                "_load_pypi_release_payload",
+                return_value={"info": {"requires_dist": None}},
+            ),
+            mock.patch.object(
+                libs,
+                "_iter_pypi_distribution_candidates",
+                return_value=[("1.0", file_info)],
+            ),
+        ):
+            requirements = libs._pypi_dependency_requirements_for_release(
+                integration,
+                libs.Version("3.11.16"),
+                "1.0",
+            )
+        self.assertEqual(
+            requirements,
+            [("notebook", ">=4.2"), ("entrypoints", "==0.4")],
+        )
+
+    def test_historical_dependency_metadata_rejects_archive_hash_drift(self) -> None:
+        archive = (
+            self.root
+            / "downloads"
+            / "pypi"
+            / "drifted"
+            / "1.0"
+            / "drifted-1.0.zip"
+        )
+        archive.parent.mkdir(parents=True)
+        with ZipFile(archive, "w") as bundle:
+            bundle.writestr(
+                "drifted-1.0/drifted.egg-info/requires.txt",
+                "dependency>=1\n",
+            )
+        file_info = {
+            "filename": archive.name,
+            "url": "https://files.example/drifted-1.0.zip",
+            "size": archive.stat().st_size,
+            "packagetype": "sdist",
+            "requires_python": None,
+            "digests": {"sha256": "0" * 64},
+        }
+        integration = libs.LibraryIntegration(
+            name="drifted",
+            source_provider="pypi",
+            project_name="drifted",
+            release_version="1.0",
+            auto_resolve_dependencies=True,
+        )
+        libs._PYPI_ARCHIVE_REQUIREMENTS_CACHE.clear()
+        with (
+            mock.patch.object(libs, "DOWNLOAD_CACHE_ROOT", self.root / "downloads"),
+            mock.patch.object(
+                libs,
+                "_load_pypi_release_payload",
+                return_value={"info": {"requires_dist": None}},
+            ),
+            mock.patch.object(
+                libs,
+                "_iter_pypi_distribution_candidates",
+                return_value=[("1.0", file_info)],
+            ),
+            self.assertRaisesRegex(RuntimeError, "source hash mismatch"),
+        ):
+            libs._pypi_dependency_requirements_for_release(
+                integration,
+                libs.Version("3.11.16"),
+                "1.0",
+            )
+
     def test_historical_dependency_resolution_backtracks_transitive_versions(self) -> None:
         root = libs.LibraryIntegration(
             name="root",
@@ -3323,6 +3439,29 @@ struct _inittab _PyImport_Inittab[] = {
             item["name"]: item
             for item in config["third_party_library_catalog"]["libraries"]
         }
+        historical = config["profiles"]["full"][
+            "historical_library_contract_libraries"
+        ]
+        self.assertEqual(
+            [
+                name
+                for name in historical
+                if name in {"entrypoints", "ipython_genutils", "jupyterlab_launcher"}
+            ],
+            ["entrypoints", "ipython_genutils", "jupyterlab_launcher"],
+        )
+        self.assertEqual(
+            catalog["entrypoints"]["source_mapping"],
+            {"entrypoints.py": "Lib/entrypoints.py"},
+        )
+        self.assertEqual(
+            catalog["ipython_genutils"]["project_name"],
+            "ipython-genutils",
+        )
+        self.assertEqual(
+            catalog["jupyterlab_launcher"]["project_name"],
+            "jupyterlab-launcher",
+        )
         self.assertEqual(catalog["soupsieve"]["dependencies"], ["bs4"])
         self.assertEqual(catalog["webruntime"]["dependencies"], ["dialite"])
         self.assertEqual(catalog["bleach"]["release_version"], "6.4.0")
