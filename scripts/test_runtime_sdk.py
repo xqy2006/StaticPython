@@ -3158,6 +3158,40 @@ struct _inittab _PyImport_Inittab[] = {
                 libs.Version("3.11.16"),
             )
 
+    def test_historical_dependency_metadata_rejects_numeric_same_prefix_owner(self) -> None:
+        archive = self.root / "legacy_root-1.0.zip"
+        with ZipFile(archive, "w") as bundle:
+            bundle.writestr(
+                "legacy_root-1.0/vendor/legacy_root-2-addon.egg-info/requires.txt",
+                "wrong-dependency>=9\n",
+            )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "no dependency metadata owned by 'legacy-root'",
+        ):
+            libs._requirements_from_distribution_archive(
+                archive,
+                "legacy-root",
+                libs.Version("3.11.16"),
+            )
+
+    def test_historical_dependency_metadata_accepts_versioned_egg_info_owner(self) -> None:
+        archive = self.root / "legacy_root-1.0.zip"
+        with ZipFile(archive, "w") as bundle:
+            bundle.writestr(
+                "legacy_root-1.0/legacy_root-1.0.egg-info/requires.txt",
+                "real-dependency>=1\n",
+            )
+
+        requirements = libs._requirements_from_distribution_archive(
+            archive,
+            "legacy-root",
+            libs.Version("3.11.16"),
+        )
+
+        self.assertEqual(requirements, ["real-dependency>=1"])
+
     def test_historical_dependency_metadata_rejects_archive_hash_drift(self) -> None:
         archive = (
             self.root

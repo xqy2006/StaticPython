@@ -2607,6 +2607,26 @@ def _requirements_from_distribution_archive(
     records = _archive_requirement_metadata(archive_path)
     normalized_project = _normalized_project_name(project_name)
 
+    def legacy_owner_matches(owner: str) -> bool:
+        """Match ``name[-version].egg-info`` without accepting name prefixes."""
+
+        if _normalized_project_name(owner) == normalized_project:
+            return True
+        project_parts = normalized_project.split("-")
+        project_pattern = r"[-_.]+".join(re.escape(part) for part in project_parts)
+        match = re.fullmatch(
+            rf"{project_pattern}[-_.]+(?P<version>.+)",
+            owner,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            return False
+        try:
+            Version(match.group("version"))
+        except InvalidVersion:
+            return False
+        return True
+
     def owner_matches(record: tuple[str, str]) -> bool:
         path = PurePosixPath(record[0])
         if path.name.casefold() in {"metadata", "pkg-info"}:
@@ -2615,16 +2635,7 @@ def _requirements_from_distribution_archive(
                 return _normalized_project_name(declared_name) == normalized_project
         parent = path.parent.name.casefold()
         owner = parent.removesuffix(".egg-info").removesuffix(".dist-info")
-        normalized_owner = _normalized_project_name(owner)
-        version_prefix = normalized_project + "-"
-        version_suffix = (
-            normalized_owner[len(version_prefix) :]
-            if normalized_owner.startswith(version_prefix)
-            else ""
-        )
-        return normalized_owner == normalized_project or (
-            bool(version_suffix) and version_suffix[0].isdigit()
-        )
+        return legacy_owner_matches(owner)
 
     # Some legacy sdists vendor complete Python distributions, including their
     # PKG-INFO.  Once metadata belonging to the requested project is present,
