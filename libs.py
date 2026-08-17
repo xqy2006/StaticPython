@@ -1516,25 +1516,45 @@ def _materialize_distribution_licenses(
     _materialize_license_candidates(
         context,
         integration,
-        _distribution_license_candidates(extracted_root),
+        _distribution_license_candidates(
+            extracted_root,
+            ignore_patterns=integration.source_ignore_patterns,
+        ),
     )
 
 
-def _distribution_license_candidates(root: Path, *, maximum_depth: int = 3) -> list[Path]:
+def _distribution_license_candidates(
+    root: Path,
+    *,
+    maximum_depth: int = 3,
+    ignore_patterns: list[str] | None = None,
+) -> list[Path]:
     prefixes = ("license", "copying", "notice", "copyright", "authors")
     candidates: list[Path] = []
     if not root.is_dir():
         return candidates
-    for path in root.rglob("*"):
-        if not path.is_file() or not path.name.casefold().startswith(prefixes):
-            continue
-        try:
-            relative = path.relative_to(root)
-        except ValueError:
-            continue
-        if len(relative.parts) > maximum_depth or path.stat().st_size > 2 * 1024 * 1024:
-            continue
-        candidates.append(path)
+    ignored = list(ignore_patterns or [])
+    scan_root = Path(_long_path(root))
+
+    def walk(directory: Path, directory_depth: int) -> None:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    if any(fnmatch.fnmatch(entry.name, pattern) for pattern in ignored):
+                        continue
+                    if directory_depth + 1 < maximum_depth:
+                        walk(Path(entry.path), directory_depth + 1)
+                    continue
+                if (
+                    not entry.is_file(follow_symlinks=False)
+                    or not entry.name.casefold().startswith(prefixes)
+                    or directory_depth + 1 > maximum_depth
+                    or entry.stat(follow_symlinks=False).st_size > 2 * 1024 * 1024
+                ):
+                    continue
+                candidates.append(Path(entry.path))
+
+    walk(scan_root, 0)
     return candidates
 
 
@@ -1676,7 +1696,13 @@ def _finalize_integration_license_metadata(
         for relative in integration.materialized_paths:
             path = context.source_root / relative
             root = path if path.is_dir() else path.parent
-            candidates.extend(_distribution_license_candidates(root, maximum_depth=4))
+            candidates.extend(
+                _distribution_license_candidates(
+                    root,
+                    maximum_depth=4,
+                    ignore_patterns=integration.source_ignore_patterns,
+                )
+            )
 
         if integration.source_provider == "pypi" and integration.release_version:
             project_name = integration.project_name or integration.name
@@ -1690,7 +1716,11 @@ def _finalize_integration_license_metadata(
             # version-scoped cache root is stable across all of them and keeps the
             # scan bounded to the exact distribution selected for this pack.
             candidates.extend(
-                _distribution_license_candidates(cached_distribution_root, maximum_depth=6)
+                _distribution_license_candidates(
+                    cached_distribution_root,
+                    maximum_depth=6,
+                    ignore_patterns=integration.source_ignore_patterns,
+                )
             )
 
         _materialize_license_candidates(context, integration, candidates)

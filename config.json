@@ -542,6 +542,9 @@
         "overlay_entries": [
           "Lib/ipython_genutils"
         ],
+        "source_ignore_patterns": [
+          "tests"
+        ],
         "source_provider": "pypi"
       },
       {
@@ -818,6 +821,9 @@
         "project_name": "jupyterlab-launcher",
         "overlay_entries": [
           "Lib/jupyterlab_launcher"
+        ],
+        "source_ignore_patterns": [
+          "tests"
         ],
         "source_provider": "pypi"
       },

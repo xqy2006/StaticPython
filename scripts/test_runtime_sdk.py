@@ -2480,6 +2480,29 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertEqual(summary["integrations"][0]["status"], "passed")
         self.assertEqual(len(summary["integrations"][0]["files"][0]["sha256"]), 64)
 
+    def test_distribution_license_scan_prunes_ignored_deep_test_trees(self) -> None:
+        distribution = self.root / "distribution"
+        distribution.mkdir()
+        license_path = distribution / "LICENSE"
+        license_path.write_text("runtime license\n", encoding="utf-8")
+        deep = distribution / "package" / "tests"
+        for index in range(12):
+            deep /= f"nested-{index:02d}-with-a-deliberately-long-component"
+        os.makedirs(libs._long_path(deep), exist_ok=True)
+        ignored_license = deep / "LICENSE-vendored"
+        with open(libs._long_path(ignored_license), "wb") as stream:
+            stream.write(b"test-only license\n")
+
+        try:
+            candidates = libs._distribution_license_candidates(
+                distribution,
+                maximum_depth=4,
+                ignore_patterns=["tests"],
+            )
+            self.assertEqual([path.name for path in candidates], ["LICENSE"])
+        finally:
+            libs._remove_tree(distribution / "package" / "tests")
+
     def test_license_collision_names_are_independent_of_source_paths(self) -> None:
         def materialize(label: str, first_payload: bytes, second_payload: bytes) -> dict[str, bytes]:
             upstream = self.root / f"upstream-{label}"
@@ -3459,8 +3482,16 @@ struct _inittab _PyImport_Inittab[] = {
             "ipython-genutils",
         )
         self.assertEqual(
+            catalog["ipython_genutils"]["source_ignore_patterns"],
+            ["tests"],
+        )
+        self.assertEqual(
             catalog["jupyterlab_launcher"]["project_name"],
             "jupyterlab-launcher",
+        )
+        self.assertEqual(
+            catalog["jupyterlab_launcher"]["source_ignore_patterns"],
+            ["tests"],
         )
         self.assertEqual(catalog["soupsieve"]["dependencies"], ["bs4"])
         self.assertEqual(catalog["webruntime"]["dependencies"], ["dialite"])
