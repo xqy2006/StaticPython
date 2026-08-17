@@ -3126,8 +3126,8 @@ struct _inittab _PyImport_Inittab[] = {
                 "real-dependency>=1\n",
             )
             bundle.writestr(
-                "legacy_root-1.0/vendor/vendor.egg-info/PKG-INFO",
-                "Metadata-Version: 2.1\nName: vendor\nVersion: 2.0\n"
+                "legacy_root-1.0/vendor/legacy_root_addon.egg-info/PKG-INFO",
+                "Metadata-Version: 2.1\nName: legacy-root-addon\nVersion: 2.0\n"
                 "Requires-Dist: wrong-dependency>=9\n",
             )
 
