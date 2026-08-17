@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -72,6 +73,14 @@ def contract() -> dict:
 
 
 class PrepareLibraryHistoryBatchesTests(unittest.TestCase):
+    def test_historical_only_integrations_have_build_kinds(self) -> None:
+        config = json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))
+
+        kinds = history.integration_build_kinds(config)
+
+        self.assertEqual(kinds["attr"], "pure-python")
+        self.assertEqual(kinds["cattr"], "pure-python")
+
     def test_batches_cover_every_candidate_exactly_once(self) -> None:
         result = history.prepare_history_batches(
             contract(),

@@ -36,6 +36,49 @@ def _supports_server_config(package_root) -> bool:
     return (package_root / "serverextension.py").exists()
 
 
+def _patch_labapp_extension_manager_fallback(text: str) -> str:
+    if not text or "entry_point is None" not in text or "manager_factory = entry_point.load()" not in text:
+        if "Extension Manager" in text and "manager_factory" in text:
+            raise RuntimeError("jupyterlab.labapp extension manager fallback anchor not found")
+        return text
+
+    prefix = (
+        "            if entry_point is None:\n"
+        '                self.log.error(f"Extension Manager: No manager defined for provider \'{provider}\'.")\n'
+    )
+    suffix = (
+        "            else:\n"
+        '                self.log.info(f"Extension Manager is \'{provider}\'.")\n'
+        "            manager_factory = entry_point.load()\n"
+    )
+    old_variants = (
+        prefix + "                raise NotImplementedError()\n" + suffix,
+        prefix + "                raise NotImplementedError\n" + suffix,
+    )
+    matches = [candidate for candidate in old_variants if candidate in text]
+    if len(matches) != 1:
+        raise RuntimeError("jupyterlab.labapp extension manager fallback anchor not found")
+
+    new = (
+        "            if entry_point is None:\n"
+        '                self.log.warning(\n'
+        '                    f"Extension Manager provider \'{provider}\' is unavailable in this environment; "\n'
+        '                    "falling back to read-only manager."\n'
+        "                )\n"
+        '                provider = "readonly"\n'
+        "                manager_factory = ReadOnlyExtensionManager\n"
+        "            else:\n"
+        '                self.log.info(f"Extension Manager is \'{provider}\'.")\n'
+        "                manager_factory = entry_point.load()\n"
+    )
+    return replace_text_once(
+        text,
+        matches[0],
+        new,
+        label="jupyterlab.labapp extension manager fallback",
+    )
+
+
 def patch_jupyterlab_for_frozen_runtime(context) -> None:
     package_root = source_path(context, "Lib/jupyterlab")
     legacy_static_root = package_root / "build"
@@ -317,33 +360,6 @@ class _StaticPythonEntryPoint:
             )
         return text
 
-    def patch_labapp(text: str) -> str:
-        if not text or "entry_point is None" not in text or "manager_factory = entry_point.load()" not in text:
-            if "Extension Manager" in text and "manager_factory" in text:
-                raise RuntimeError("jupyterlab.labapp extension manager fallback anchor not found")
-            return text
-        old = (
-            "            if entry_point is None:\n"
-            '                self.log.error(f"Extension Manager: No manager defined for provider \'{provider}\'.")\n'
-            "                raise NotImplementedError()\n"
-            "            else:\n"
-            '                self.log.info(f"Extension Manager is \'{provider}\'.")\n'
-            "            manager_factory = entry_point.load()\n"
-        )
-        new = (
-            "            if entry_point is None:\n"
-            '                self.log.warning(\n'
-            '                    f"Extension Manager provider \'{provider}\' is unavailable in this environment; "\n'
-            '                    "falling back to read-only manager."\n'
-            "                )\n"
-            '                provider = "readonly"\n'
-            "                manager_factory = ReadOnlyExtensionManager\n"
-            "            else:\n"
-            '                self.log.info(f"Extension Manager is \'{provider}\'.")\n'
-            "                manager_factory = entry_point.load()\n"
-        )
-        return replace_text_once(text, old, new, label="jupyterlab.labapp extension manager fallback")
-
     transform_first_existing_source_text(
         context,
         [
@@ -360,7 +376,12 @@ class _StaticPythonEntryPoint:
         patch_extensions_init,
         allow_missing=True,
     )
-    transform_source_text(context, "Lib/jupyterlab/labapp.py", patch_labapp, allow_missing=True)
+    transform_source_text(
+        context,
+        "Lib/jupyterlab/labapp.py",
+        _patch_labapp_extension_manager_fallback,
+        allow_missing=True,
+    )
 
 
 LIBRARY_INTEGRATION = pypi_library(
