@@ -2632,8 +2632,12 @@ def _requirements_from_distribution_archive(
     # The root project may legitimately keep its dependencies only in
     # requires.txt even when its PKG-INFO is also present.
     owned_records = [record for record in records if owner_matches(record)]
+    if not owned_records:
+        raise RuntimeError(
+            f"distribution archive contains no dependency metadata owned by {project_name!r}"
+        )
     ordered = sorted(
-        owned_records or records,
+        owned_records,
         key=lambda record: (
             len(PurePosixPath(record[0]).parts),
             PurePosixPath(record[0]).as_posix().casefold(),

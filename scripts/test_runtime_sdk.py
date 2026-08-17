@@ -3139,6 +3139,25 @@ struct _inittab _PyImport_Inittab[] = {
 
         self.assertEqual(requirements, ["real-dependency>=1"])
 
+    def test_historical_dependency_metadata_rejects_vendored_only_pkg_info(self) -> None:
+        archive = self.root / "legacy_root-1.0.zip"
+        with ZipFile(archive, "w") as bundle:
+            bundle.writestr(
+                "legacy_root-1.0/vendor/other.egg-info/PKG-INFO",
+                "Metadata-Version: 2.1\nName: other\nVersion: 9.0\n"
+                "Requires-Dist: wrong-dependency>=9\n",
+            )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "no dependency metadata owned by 'legacy-root'",
+        ):
+            libs._requirements_from_distribution_archive(
+                archive,
+                "legacy-root",
+                libs.Version("3.11.16"),
+            )
+
     def test_historical_dependency_metadata_rejects_archive_hash_drift(self) -> None:
         archive = (
             self.root
