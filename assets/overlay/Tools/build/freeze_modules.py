@@ -456,8 +456,12 @@ def _inject_package_header(content, fullname):
         b"except Exception:" + newline,
         b"    __path__ = []" + newline,
         b"if not __path__:" + newline,
-        b"    import os as _staticpython_os" + newline,
-        b"    __path__ = [_staticpython_os.path.dirname(__file__)]" + newline,
+        b"    _staticpython_file = globals().get('__file__')" + newline,
+        b"    if _staticpython_file:" + newline,
+        b"        import os as _staticpython_os" + newline,
+        b"        __path__ = [_staticpython_os.path.dirname(_staticpython_file)]" + newline,
+        b"    else:" + newline,
+        b"        __path__ = [__name__]" + newline,
     ]
     return bom + b''.join(lines), True
 
