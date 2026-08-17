@@ -418,6 +418,19 @@ class RuntimeSDKTests(unittest.TestCase):
         self.assertIn("python .\\pack_evidence.py --report $reportPath", daily)
         self.assertIn("staticpython-pack-verify-report.json", daily)
 
+        history_shard = (
+            REPO_ROOT / ".github" / "workflows" / "library-history-shard.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '$batchKey = "${{ matrix.batch_sha256 }}".Substring(0, 12)',
+            history_shard,
+        )
+        self.assertIn('$buildRoot = Join-Path $env:RUNNER_TEMP "h-$batchKey"', history_shard)
+        self.assertNotIn(
+            '"library-history-build-${{ matrix.batch_id }}"',
+            history_shard,
+        )
+
     def test_verifier_applies_profile_version_overrides(self) -> None:
         profile = {
             "core_libraries": ["core-demo"],

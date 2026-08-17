@@ -138,7 +138,12 @@ jobs:
           if ($runtimeSdk.Count -ne 1) {
             throw "Expected exactly one runtime SDK ZIP, found $($runtimeSdk.Count)"
           }
-          $buildRoot = Join-Path $env:RUNNER_TEMP "library-history-build-${{ matrix.batch_id }}"
+          # Native dependency trees such as pyzmq -> libsodium are deep enough
+          # to exceed MAX_PATH when the descriptive batch ID is repeated below
+          # RUNNER_TEMP.  The immutable batch digest keeps this workspace unique
+          # while leaving descriptive IDs intact in evidence and artifact names.
+          $batchKey = "${{ matrix.batch_sha256 }}".Substring(0, 12)
+          $buildRoot = Join-Path $env:RUNNER_TEMP "h-$batchKey"
           $sourceCache = Join-Path $env:GITHUB_WORKSPACE "downloads"
           python .\scripts\run_library_history_batch.py `
             --contract .tmp\history-plan\library-version-contract.json `
