@@ -1538,12 +1538,19 @@ struct _inittab _PyImport_Inittab[] = {
                 },
             },
         )
-        lock = libs.dependency_resolution_lock(
-            [integration],
-            target_version=libs.Version("3.13.14"),
-            solver=libs.HISTORICAL_DEPENDENCY_SOLVER,
-            roots=["demo"],
-        )
+        with mock.patch.object(
+            libs,
+            "_load_pypi_release_payload",
+            return_value={"info": {"license_expression": "MIT"}},
+        ) as metadata:
+            lock = libs.dependency_resolution_lock(
+                [integration],
+                target_version=libs.Version("3.13.14"),
+                solver=libs.HISTORICAL_DEPENDENCY_SOLVER,
+                roots=["demo"],
+            )
+        metadata.assert_called_once_with("demo", "1.0")
+        self.assertEqual(lock["integrations"][0]["license_expression"], "MIT")
         self.assertEqual(
             lock["integrations"][0]["source_resolver"],
             "pypi-universal-wheel",
@@ -1560,24 +1567,37 @@ struct _inittab _PyImport_Inittab[] = {
         )
         self.assertEqual(records["demo"]["license_source"]["packagetype"], "sdist")
 
+        def refingerprint(payload: dict) -> dict:
+            unsigned = {
+                key: value
+                for key, value in payload.items()
+                if key != "solver_fingerprint"
+            }
+            payload["solver_fingerprint"] = hashlib.sha256(
+                json.dumps(
+                    unsigned,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            return payload
+
+        missing_expression = json.loads(json.dumps(lock))
+        missing_expression["integrations"][0].pop("license_expression")
+        with self.assertRaisesRegex(RuntimeError, "no license expression"):
+            libs._locked_dependency_records(
+                refingerprint(missing_expression),
+                target_version=libs.Version("3.13.14"),
+                solver=libs.HISTORICAL_DEPENDENCY_SOLVER,
+                selected_names=["demo"],
+            )
+
         tampered = json.loads(json.dumps(lock))
         tampered["integrations"][0].pop("license_source")
-        unsigned = {
-            key: value
-            for key, value in tampered.items()
-            if key != "solver_fingerprint"
-        }
-        tampered["solver_fingerprint"] = hashlib.sha256(
-            json.dumps(
-                unsigned,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
         with self.assertRaisesRegex(RuntimeError, "no sdist license source"):
             libs._locked_dependency_records(
-                tampered,
+                refingerprint(tampered),
                 target_version=libs.Version("3.13.14"),
                 solver=libs.HISTORICAL_DEPENDENCY_SOLVER,
                 selected_names=["demo"],
@@ -3281,7 +3301,12 @@ struct _inittab _PyImport_Inittab[] = {
                 ("dependency", "2.0"): ["root>=2"],
                 ("dependency", "1.0"): ["root<2"],
             }[(project, version)]
-            return {"info": {"requires_dist": requirements}}
+            return {
+                "info": {
+                    "requires_dist": requirements,
+                    "license_expression": "MIT",
+                }
+            }
 
         with (
             mock.patch.object(libs, "_iter_pypi_distribution_candidates", side_effect=candidates),
@@ -3307,6 +3332,10 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertEqual(
             {record["name"]: record["version"] for record in lock["integrations"]},
             {"dependency": "1.0", "root": "1.0"},
+        )
+        self.assertEqual(
+            {record["license_expression"] for record in lock["integrations"]},
+            {"MIT"},
         )
         self.assertRegex(lock["solver_fingerprint"], r"^[0-9a-f]{64}$")
 
@@ -3546,6 +3575,7 @@ struct _inittab _PyImport_Inittab[] = {
                     "project_name": None,
                     "source_provider": "pypi",
                     "version": version,
+                    "license_expression": "MIT",
                     "dependencies": [] if name == "dependency" else ["dependency"],
                     "dependency_constraints": {} if name == "dependency" else {"dependency": "==1.5"},
                     "source": {
@@ -3617,13 +3647,18 @@ struct _inittab _PyImport_Inittab[] = {
                 pinned_version_names={"root", "dependency"},
                 dependency_resolution_lock_payload=lock,
             )
-        self.assertEqual(
-            libs.dependency_resolution_lock(
+            replayed_lock = libs.dependency_resolution_lock(
                 selected,
                 target_version=libs.Version("3.13.14"),
                 solver=libs.HISTORICAL_DEPENDENCY_SOLVER,
                 roots=["root"],
-            ),
+            )
+        self.assertEqual(
+            {integration.license_expression for integration in selected},
+            {"MIT"},
+        )
+        self.assertEqual(
+            replayed_lock,
             lock,
         )
         tampered = json.loads(json.dumps(lock))

@@ -588,6 +588,27 @@ def validate_batch_evidence(
                 raise RuntimeError(
                     f"historical dependency lock toolchain fingerprint mismatch: {relative}"
                 )
+            integrations = lock.get("integrations")
+            if not isinstance(integrations, list) or not integrations:
+                raise RuntimeError(
+                    f"historical dependency lock has no integrations: {relative}"
+                )
+            for integration in integrations:
+                if not isinstance(integration, dict):
+                    raise RuntimeError(
+                        f"historical dependency lock integration is invalid: {relative}"
+                    )
+                if integration.get("source_provider") != "pypi":
+                    continue
+                license_expression = integration.get("license_expression")
+                if (
+                    not isinstance(license_expression, str)
+                    or not license_expression.strip()
+                ):
+                    raise RuntimeError(
+                        "historical dependency lock has no immutable license "
+                        f"expression: {relative}"
+                    )
             dependency_locks[sha256] = lock
         elif Path(relative).name == "staticpython-profile.json":
             profile = load_object(path, "historical resolved profile")

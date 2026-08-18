@@ -3077,6 +3077,11 @@ def _locked_dependency_records(
             raise RuntimeError(f"historical dependency lock repeats integration {name!r}")
         source = record.get("source")
         if record.get("source_provider") == "pypi":
+            license_expression = record.get("license_expression")
+            if not isinstance(license_expression, str) or not license_expression.strip():
+                raise RuntimeError(
+                    f"historical dependency lock has no license expression for {name} {version}"
+                )
             if not isinstance(source, dict):
                 raise RuntimeError(
                     f"historical dependency lock has no PyPI source for {name} {version}"
@@ -3483,6 +3488,17 @@ def _resolve_selected_integrations_historically(
                         f"{integration.name}: {locked_resolver!r} != "
                         f"{integration.source_resolver!r}"
                     )
+                locked_license_expression = locked_record.get("license_expression")
+                if (
+                    integration.license_expression is not None
+                    and integration.license_expression != locked_license_expression
+                ):
+                    raise RuntimeError(
+                        f"historical dependency lock license expression changed for "
+                        f"{integration.name}: {locked_license_expression!r} != "
+                        f"{integration.license_expression!r}"
+                    )
+                integration.license_expression = locked_license_expression
                 if locked_record.get("license_source") is not None:
                     license_source = dict(locked_record["license_source"])
             else:
@@ -3547,6 +3563,34 @@ def _resolve_selected_integrations_historically(
     return _order_integrations_by_dependency(selected_names, by_name, dependency_graph)
 
 
+def _resolve_dependency_lock_license_expression(
+    integration: LibraryIntegration,
+) -> str | None:
+    expression = integration.license_expression
+    if expression is not None:
+        if not isinstance(expression, str) or not expression.strip():
+            raise RuntimeError(
+                f"integration {integration.name!r} has an invalid license expression"
+            )
+        return expression
+    if integration.source_provider != "pypi":
+        return None
+    if integration.release_version is None:
+        raise RuntimeError(
+            f"cannot lock the license for versionless integration {integration.name!r}"
+        )
+    project_name = integration.project_name or integration.name
+    payload = _load_pypi_release_payload(project_name, integration.release_version)
+    expression = _infer_license_expression(payload.get("info", {}))
+    if expression is None:
+        raise RuntimeError(
+            f"could not resolve an immutable license expression for "
+            f"{integration.name} {integration.release_version}"
+        )
+    integration.license_expression = expression
+    return expression
+
+
 def dependency_resolution_lock(
     integrations: list[LibraryIntegration],
     *,
@@ -3579,6 +3623,9 @@ def dependency_resolution_lock(
             "project_name": integration.project_name,
             "source_provider": integration.source_provider,
             "version": integration.release_version,
+            "license_expression": _resolve_dependency_lock_license_expression(
+                integration
+            ),
             "dependencies": integration.dependencies,
             "dependency_constraints": integration.dependency_constraints,
             "source": resolution.get("source"),

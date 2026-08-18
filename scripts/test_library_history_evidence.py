@@ -160,6 +160,7 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
                             "name": record["library"],
                             "version": record["version"],
                             "source_provider": "pypi",
+                            "license_expression": "MIT",
                             "dependencies": [],
                             "dependency_constraints": {},
                             "source": {
