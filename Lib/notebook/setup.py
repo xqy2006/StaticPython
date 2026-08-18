@@ -44,7 +44,12 @@ def patch_legacy_distutils_version(context) -> None:
             next_name="_check_pid_win32",
         )
 
-    transform_source_text(context, "Lib/notebook/utils.py", patch_utils)
+    transform_source_text(
+        context,
+        "Lib/notebook/utils.py",
+        patch_utils,
+        allow_missing=True,
+    )
 
 
 def _collect_schema_map(schema_root: Path) -> dict[str, dict]:

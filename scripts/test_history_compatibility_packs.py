@@ -91,6 +91,12 @@ class HistoryCompatibilityPackTests(unittest.TestCase):
             self.notebook.patch_legacy_distutils_version,
         )
 
+    def test_notebook_7_without_legacy_utils_is_an_explicit_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.notebook.patch_legacy_distutils_version(hook_context(root))
+            self.assertFalse((root / "Lib" / "notebook" / "utils.py").exists())
+
     def test_jsonschema_specification_resources_are_embedded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
