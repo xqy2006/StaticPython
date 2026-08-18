@@ -49,6 +49,8 @@ jobs:
         run: python .\scripts\test_publish_release_assets.py
       - name: nest_asyncio strict patch tests
         run: python .\scripts\test_nest_asyncio_patch.py
+      - name: Historical dependency compatibility pack tests
+        run: python .\scripts\test_history_compatibility_packs.py
 
   resolve-cpython-matrix:
     runs-on: windows-2022

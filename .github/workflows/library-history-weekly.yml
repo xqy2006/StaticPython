@@ -74,6 +74,7 @@ jobs:
           python .\scripts\test_build_library_contract_config.py
           python .\scripts\test_library_contract_build.py
           python .\scripts\test_verify_pack_with_runtime_sdk.py
+          python .\scripts\test_history_compatibility_packs.py
 
       - name: Download previous last-known-good version contract
         shell: pwsh

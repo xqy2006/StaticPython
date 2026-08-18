@@ -110,6 +110,17 @@ jobs:
           python -m pip install packaging
           choco install strawberryperl -y --no-progress
 
+      - name: Install pinned Rust toolchain for historical PyO3 dependencies
+        shell: pwsh
+        env:
+          RUST_TOOLCHAIN: "1.88.0"
+          RUST_TARGET: "x86_64-pc-windows-msvc"
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --target $env:RUST_TARGET
+          rustup run $env:RUST_TOOLCHAIN rustc -Vv
+          rustup run $env:RUST_TOOLCHAIN cargo -V
+
       - uses: microsoft/setup-msbuild@v2
         with:
           msbuild-architecture: x64
