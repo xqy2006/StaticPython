@@ -95,6 +95,7 @@ jobs:
         shell: pwsh
         run: |
           "HISTORY_RESULT_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-history-result-${{ matrix.batch_id }}')" >> $env:GITHUB_ENV
+          "HISTORY_EVIDENCE_UPLOAD_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-history-evidence-${{ matrix.batch_sha256 }}')" >> $env:GITHUB_ENV
           "HISTORY_BATCH_ARTIFACT=library-history-batch-${{ inputs.manifest_key }}-s${{ inputs.shard_index }}-${{ matrix.batch_id }}" >> $env:GITHUB_ENV
 
       - uses: actions/checkout@v4
@@ -174,20 +175,22 @@ jobs:
             --event-name "${{ github.event_name }}" `
             --artifact $env:HISTORY_BATCH_ARTIFACT
 
+      - name: Stage exact immutable batch evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\stage_library_history_evidence.py `
+            --evidence-root $env:HISTORY_RESULT_ROOT `
+            --output-root $env:HISTORY_EVIDENCE_UPLOAD_ROOT
+
       - name: Upload immutable batch evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.HISTORY_BATCH_ARTIFACT }}
-          path: |
-            ${{ env.HISTORY_RESULT_ROOT }}/library-history-batch-evidence.v1.json
-            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/config.json
-            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/dependency-lock.v1.json
-            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/pack-metadata.json
-            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/staticpython-pack-verify-report.json
-            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/staticpython-profile.json
-            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/combination-evidence.v1.json
-          if-no-files-found: warn
+          path: ${{ env.HISTORY_EVIDENCE_UPLOAD_ROOT }}
+          if-no-files-found: error
           retention-days: 90
           overwrite: true
 
