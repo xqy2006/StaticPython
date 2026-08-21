@@ -73,6 +73,35 @@ class JupyterLabPatchTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "anchor not found"):
             jupyterlab._patch_labapp_extension_manager_fallback(source)
 
+    def test_legacy_distutils_version_patch_is_strict(self) -> None:
+        source = (
+            "from distutils.version import LooseVersion\n\n"
+            "def versions_match(built, current):\n"
+            "    return LooseVersion(built) == LooseVersion(current)\n"
+        )
+        patched = jupyterlab._patch_legacy_distutils_version(source)
+
+        self.assertIn("from packaging.version import Version", patched)
+        self.assertNotIn("distutils", patched)
+        self.assertNotIn("LooseVersion", patched)
+        self.assertEqual(patched.count("Version("), 2)
+        compile(patched, "<jupyterlab-legacy-commands>", "exec")
+
+        with self.assertRaisesRegex(RuntimeError, "anchor not found"):
+            jupyterlab._patch_legacy_distutils_version(
+                source.replace(
+                    "from distutils.version import LooseVersion",
+                    "import distutils.version",
+                )
+            )
+
+        integration = jupyterlab.LIBRARY_INTEGRATION
+        self.assertIn("packaging", integration.dependencies)
+        self.assertEqual(
+            integration.post_patch_hooks[0],
+            jupyterlab.patch_legacy_distutils_version,
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

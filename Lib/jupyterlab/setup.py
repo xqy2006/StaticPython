@@ -79,6 +79,39 @@ def _patch_labapp_extension_manager_fallback(text: str) -> str:
     )
 
 
+def _patch_legacy_distutils_version(text: str) -> str:
+    """Keep early JupyterLab commands importable without stdlib distutils."""
+
+    legacy_import = "from distutils.version import LooseVersion\n"
+    if legacy_import not in text:
+        if "LooseVersion(" in text or "distutils.version" in text:
+            raise RuntimeError("JupyterLab legacy version comparison anchor not found")
+        return text
+
+    text = replace_text_once(
+        text,
+        legacy_import,
+        "from packaging.version import Version\n",
+        label="JupyterLab distutils version import",
+    )
+    comparisons = text.count("LooseVersion(")
+    if comparisons == 0:
+        raise RuntimeError("JupyterLab legacy version comparison anchor not found")
+    text = text.replace("LooseVersion(", "Version(")
+    if "LooseVersion" in text or "distutils.version" in text:
+        raise RuntimeError("JupyterLab legacy version comparison was only partially patched")
+    return text
+
+
+def patch_legacy_distutils_version(context) -> None:
+    transform_source_text(
+        context,
+        "Lib/jupyterlab/commands.py",
+        _patch_legacy_distutils_version,
+        allow_missing=True,
+    )
+
+
 def patch_jupyterlab_for_frozen_runtime(context) -> None:
     package_root = source_path(context, "Lib/jupyterlab")
     legacy_static_root = package_root / "build"
@@ -156,7 +189,6 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
     if legacy_layout and "@jupyterlab/apputils-extension:themes" not in schemas:
         schemas["@jupyterlab/apputils-extension:themes"] = {"schema": {}, "version": "N/A"}
     if legacy_layout:
-        package_root_static = package_root / "static"
         for relative, content in {
             "schemas/@jupyterlab/apputils-extension/themes.json": "{}\n",
             "themes/@jupyterlab/theme-light-extension/index.css": "/* StaticPython legacy placeholder */\n",
@@ -387,6 +419,7 @@ class _StaticPythonEntryPoint:
 LIBRARY_INTEGRATION = pypi_library(
     name="jupyterlab",
     release_version="4.0.9",
+    dependencies=["packaging"],
     source_mapping={
         "jupyterlab": "Lib/jupyterlab",
         "?build": "Lib/jupyterlab/build",
@@ -433,5 +466,5 @@ LIBRARY_INTEGRATION = pypi_library(
             "sha256": "eb713dd6d648da8f74b389761faa8c310f186f365d3055ec2c788f1800bcd94f",
         },
     ],
-    post_patch_hooks=[patch_jupyterlab_for_frozen_runtime],
+    post_patch_hooks=[patch_legacy_distutils_version, patch_jupyterlab_for_frozen_runtime],
 )

@@ -52,6 +52,33 @@ def patch_legacy_distutils_version(context) -> None:
     )
 
 
+def _patch_legacy_freezer_banner(text: str) -> str:
+    """Avoid CPython 3.13+ isolated-freezer warnings for Notebook 6.5.x."""
+
+    banner_start = '        print("""\n  _   _          _      _\n'
+    raw_banner_start = '        print(r"""\n  _   _          _      _\n'
+    marker = "Read the migration plan to Notebook 7"
+    if banner_start in text:
+        return replace_text_once(
+            text,
+            banner_start,
+            raw_banner_start,
+            label="Notebook 6.5 raw migration banner",
+        )
+    if marker in text and raw_banner_start not in text:
+        raise RuntimeError("Notebook 6.5 migration banner anchor not found")
+    return text
+
+
+def patch_legacy_freezer_banner(context) -> None:
+    transform_source_text(
+        context,
+        "Lib/notebook/notebookapp.py",
+        _patch_legacy_freezer_banner,
+        allow_missing=True,
+    )
+
+
 def _collect_schema_map(schema_root: Path) -> dict[str, dict]:
     schemas: dict[str, dict] = {}
     if not schema_root.exists():
@@ -186,5 +213,9 @@ LIBRARY_INTEGRATION = pypi_library(
         "Lib/notebook/_staticpython_resources.py",
     ],
     python_packages=["notebook"],
-    post_patch_hooks=[patch_legacy_distutils_version, embed_notebook_resources],
+    post_patch_hooks=[
+        patch_legacy_distutils_version,
+        patch_legacy_freezer_banner,
+        embed_notebook_resources,
+    ],
 )

@@ -45,6 +45,7 @@ class HistoryCompatibilityPackTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.notebook = load_integration("notebook")
+        cls.jupyter_events = load_integration("jupyter_events")
         cls.referencing = load_integration("referencing")
         cls.specifications = load_integration("jsonschema_specifications")
         cls.rpds = load_integration("rpds")
@@ -96,6 +97,59 @@ class HistoryCompatibilityPackTests(unittest.TestCase):
             root = Path(temp_dir)
             self.notebook.patch_legacy_distutils_version(hook_context(root))
             self.assertFalse((root / "Lib" / "notebook" / "utils.py").exists())
+
+    def test_notebook_65_migration_banner_is_safe_for_isolated_freezer(self) -> None:
+        source = (
+            "class NotebookWebApplication:\n"
+            "    def __init__(self):\n"
+            '        print("""\n'
+            "  _   _          _      _\n"
+            " | |_| | '_ \\/ _` / _` |  _/ -_)\n"
+            "  \\___/| .__/\\__,_\\__,_|\\__\\___|\n"
+            "       |_|\n"
+            "\n"
+            "Read the migration plan to Notebook 7.\n"
+            '""")\n'
+        )
+        patched = self.notebook._patch_legacy_freezer_banner(source)
+
+        self.assertIn('print(r"""', patched)
+        self.assertNotIn('print("""', patched)
+        compile(patched, "<notebook.notebookapp>", "exec")
+
+        with self.assertRaisesRegex(RuntimeError, "anchor not found"):
+            self.notebook._patch_legacy_freezer_banner(
+                source.replace("  _   _          _      _", "  NOTEBOOK")
+            )
+
+        self.assertEqual(
+            self.notebook.LIBRARY_INTEGRATION.post_patch_hooks[1],
+            self.notebook.patch_legacy_freezer_banner,
+        )
+
+    def test_jupyter_events_011_avoids_distribution_metadata_lookup(self) -> None:
+        source = (
+            "from importlib.metadata import version\n"
+            "from packaging.version import parse\n\n"
+            "# Check if the version is greater than 3.1.0\n"
+            'version_info = version("python-json-logger")\n'
+            'if parse(version_info) >= parse("3.1.0"):\n'
+            "    from pythonjsonlogger.json import JsonFormatter\n"
+            "else:\n"
+            "    from pythonjsonlogger.jsonlogger import JsonFormatter  # type: ignore[attr-defined]\n"
+        )
+        patched = self.jupyter_events._patch_python_json_logger_import(source)
+
+        self.assertNotIn("importlib.metadata", patched)
+        self.assertNotIn("packaging.version", patched)
+        self.assertNotIn('version("python-json-logger")', patched)
+        self.assertIn("except ImportError:", patched)
+        compile(patched, "<jupyter_events.logger>", "exec")
+
+        with self.assertRaisesRegex(RuntimeError, "anchor not found"):
+            self.jupyter_events._patch_python_json_logger_import(
+                source.replace("if parse(version_info)", "if parse(str(version_info))")
+            )
 
     def test_jsonschema_specification_resources_are_embedded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
