@@ -69,6 +69,9 @@ LIBSODIUM_ARCHIVE_URL_TEMPLATE = (
 LIBSODIUM_CODELOAD_URL_TEMPLATE = (
     "https://codeload.github.com/jedisct1/libsodium/tar.gz/refs/tags/{version}-RELEASE"
 )
+LIBSODIUM_UPSTREAM_URL_TEMPLATE = (
+    "https://download.libsodium.org/libsodium/releases/libsodium-{version}.tar.gz"
+)
 LIBZMQ_ARCHIVE_URL_TEMPLATE = (
     "https://github.com/zeromq/libzmq/releases/download/v{version}/zeromq-{version}.tar.gz"
 )
@@ -263,6 +266,19 @@ def libsodium_version(context) -> str:
     version = _version_from_pyzmq_metadata(context, "PYZMQ_LIBSODIUM_VERSION")
     assert version is not None
     return version
+
+
+def libsodium_archive_urls(version: str) -> list[str]:
+    # PyZMQ may request a rolling ``X.Y.Z-stable`` archive while libsodium's
+    # immutable GitHub release and tag use ``X.Y.Z-RELEASE``. Prefer the
+    # immutable release sources and retain PyZMQ's exact upstream URL as a
+    # final compatibility mirror.
+    release_version = version.removesuffix("-stable")
+    return [
+        LIBSODIUM_ARCHIVE_URL_TEMPLATE.format(version=release_version),
+        LIBSODIUM_CODELOAD_URL_TEMPLATE.format(version=release_version),
+        LIBSODIUM_UPSTREAM_URL_TEMPLATE.format(version=version),
+    ]
 
 
 def libzmq_version(context) -> str:
@@ -618,10 +634,7 @@ def ensure_libsodium_source(context) -> Path:
     archive_path = libsodium_archive_path(context)
     used_source = download_first_available(
         context.log,
-        [
-            LIBSODIUM_ARCHIVE_URL_TEMPLATE.format(version=version),
-            LIBSODIUM_CODELOAD_URL_TEMPLATE.format(version=version),
-        ],
+        libsodium_archive_urls(version),
         archive_path,
     )
     source_dir.parent.mkdir(parents=True, exist_ok=True)

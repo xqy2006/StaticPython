@@ -283,8 +283,26 @@ class PyFltkDownloadTests(unittest.TestCase):
 class PyZmqDownloadTests(unittest.TestCase):
     def test_native_dependencies_have_independent_codeload_mirrors(self) -> None:
         self.assertEqual(
-            PYZMQ_SETUP.LIBSODIUM_CODELOAD_URL_TEMPLATE.format(version="1.0.20"),
-            "https://codeload.github.com/jedisct1/libsodium/tar.gz/refs/tags/1.0.20-RELEASE",
+            PYZMQ_SETUP.libsodium_archive_urls("1.0.20"),
+            [
+                "https://github.com/jedisct1/libsodium/releases/download/"
+                "1.0.20-RELEASE/libsodium-1.0.20.tar.gz",
+                "https://codeload.github.com/jedisct1/libsodium/tar.gz/"
+                "refs/tags/1.0.20-RELEASE",
+                "https://download.libsodium.org/libsodium/releases/"
+                "libsodium-1.0.20.tar.gz",
+            ],
+        )
+        self.assertEqual(
+            PYZMQ_SETUP.libsodium_archive_urls("1.0.22-stable"),
+            [
+                "https://github.com/jedisct1/libsodium/releases/download/"
+                "1.0.22-RELEASE/libsodium-1.0.22.tar.gz",
+                "https://codeload.github.com/jedisct1/libsodium/tar.gz/"
+                "refs/tags/1.0.22-RELEASE",
+                "https://download.libsodium.org/libsodium/releases/"
+                "libsodium-1.0.22-stable.tar.gz",
+            ],
         )
         self.assertEqual(
             PYZMQ_SETUP.LIBZMQ_CODELOAD_URL_TEMPLATE.format(version="4.3.5"),
