@@ -876,6 +876,55 @@ struct _inittab _PyImport_Inittab[] = {
         self.assertIn('version = "3.0.53"', patched)
         self.assertEqual(module._patch_prompt_toolkit_init(patched), patched)
 
+    def test_protobuf_free_threading_mutex_patch_is_versioned_and_strict(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "staticpython_protobuf_setup_test",
+            REPO_ROOT / "Lib" / "protobuf" / "setup.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        mutex_type = (
+            "typedef struct {\n"
+            "#ifdef ENABLE_MUTEX\n"
+            "  pthread_mutex_t mutex;\n"
+            "#endif\n"
+            "} FreeThreadingMutex;\n"
+        )
+        expected_type = (
+            "typedef struct {\n"
+            "#ifdef ENABLE_MUTEX\n"
+            "  pthread_mutex_t mutex;\n"
+            "#else\n"
+            "  char unused;\n"
+            "#endif\n"
+            "} FreeThreadingMutex;\n"
+        )
+        current_source = mutex_type + "\n// Embedded mutexes are initialized per-instance.\n"
+        current_patched = module._patch_protobuf_c_text(current_source)
+        self.assertEqual(
+            current_patched,
+            expected_type + "\n// Embedded mutexes are initialized per-instance.\n",
+        )
+        self.assertEqual(module._patch_protobuf_c_text(current_patched), current_patched)
+
+        legacy_initializer = (
+            "\n#ifdef ENABLE_MUTEX\n"
+            "static FreeThreadingMutex obj_cache_mutex = {PTHREAD_MUTEX_INITIALIZER};\n"
+            "#else\n"
+            "static FreeThreadingMutex obj_cache_mutex = {};\n"
+            "#endif\n"
+        )
+        legacy_patched = module._patch_protobuf_c_text(mutex_type + legacy_initializer)
+        self.assertIn(expected_type, legacy_patched)
+        self.assertIn("static FreeThreadingMutex obj_cache_mutex = {0};", legacy_patched)
+        self.assertNotIn("obj_cache_mutex = {};", legacy_patched)
+        self.assertEqual(module._patch_protobuf_c_text(legacy_patched), legacy_patched)
+
+        drifted = mutex_type.replace("#ifdef ENABLE_MUTEX", "#if defined(ENABLE_MUTEX)")
+        with self.assertRaisesRegex(RuntimeError, "mutex type anchor not found"):
+            module._patch_protobuf_c_text(drifted)
+
     def test_portalocker_400_optional_win32_needs_no_legacy_patch(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "staticpython_portalocker_setup_test",
