@@ -81,11 +81,15 @@ class JupyterLabPatchTests(unittest.TestCase):
         )
         patched = jupyterlab._patch_legacy_distutils_version(source)
 
-        self.assertIn("from packaging.version import Version", patched)
+        self.assertIn("from packaging.version import InvalidVersion, Version", patched)
         self.assertNotIn("distutils", patched)
         self.assertNotIn("LooseVersion", patched)
-        self.assertEqual(patched.count("Version("), 2)
-        compile(patched, "<jupyterlab-legacy-commands>", "exec")
+        self.assertEqual(patched.count("_staticpython_version_key("), 3)
+        namespace: dict[str, object] = {}
+        exec(compile(patched, "<jupyterlab-legacy-commands>", "exec"), namespace)
+        versions_match = namespace["versions_match"]
+        self.assertTrue(versions_match("1.0", "1.0.0"))
+        self.assertFalse(versions_match("", "1.0"))
 
         with self.assertRaisesRegex(RuntimeError, "anchor not found"):
             jupyterlab._patch_legacy_distutils_version(

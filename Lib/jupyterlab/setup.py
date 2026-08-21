@@ -91,13 +91,18 @@ def _patch_legacy_distutils_version(text: str) -> str:
     text = replace_text_once(
         text,
         legacy_import,
-        "from packaging.version import Version\n",
+        "from packaging.version import InvalidVersion, Version\n\n"
+        "def _staticpython_version_key(value):\n"
+        "    try:\n"
+        "        return (0, Version(value))\n"
+        "    except (InvalidVersion, TypeError):\n"
+        "        return (1, str(value))\n\n",
         label="JupyterLab distutils version import",
     )
     comparisons = text.count("LooseVersion(")
     if comparisons == 0:
         raise RuntimeError("JupyterLab legacy version comparison anchor not found")
-    text = text.replace("LooseVersion(", "Version(")
+    text = text.replace("LooseVersion(", "_staticpython_version_key(")
     if "LooseVersion" in text or "distutils.version" in text:
         raise RuntimeError("JupyterLab legacy version comparison was only partially patched")
     return text
