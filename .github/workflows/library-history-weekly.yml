@@ -71,6 +71,7 @@ jobs:
           python .\scripts\test_prepare_library_contract_matrix.py
           python .\scripts\test_library_history_evidence.py
           python .\scripts\test_run_library_history_batch.py
+          python .\scripts\test_stage_library_history_evidence.py
           python .\scripts\test_build_library_contract_config.py
           python .\scripts\test_library_contract_build.py
           python .\scripts\test_verify_pack_with_runtime_sdk.py
