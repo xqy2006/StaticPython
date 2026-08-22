@@ -120,7 +120,7 @@ def normalize(value):
 """
         patched = jupyterlab._patch_legacy_semver_invalid_escapes(source)
         self.assertIn('re.compile(r"^\\d+$")', patched)
-        self.assertEqual(patched.count('re.split(r"\\s+",'), 5)
+        self.assertEqual(patched.count('r"\\s+"'), 5)
         namespace: dict[str, object] = {}
         with warnings.catch_warnings():
             warnings.simplefilter("error", SyntaxWarning)
@@ -128,6 +128,30 @@ def normalize(value):
             exec(compile(patched, "<jupyterlab-semver>", "exec"), namespace)
         self.assertTrue(namespace["NUMERIC"].fullmatch("123"))
         self.assertEqual(namespace["normalize"]("a   b"), "a b")
+
+    def test_legacy_semver_patch_accepts_line_wrapped_fifth_split(self) -> None:
+        source = """import re
+SEMVER_SPEC_VERSION = '2.0.0'
+NUMERIC = re.compile("^\\d+$")
+def normalize(value):
+    value = " ".join(re.split("\\s+", value))
+    value = " ".join(re.split("\\s+", value))
+    value = " ".join(re.split("\\s+", value))
+    value = " ".join(re.split("\\s+", value))
+    return re.split(
+        "\\s+", value
+    )
+"""
+        patched = jupyterlab._patch_legacy_semver_invalid_escapes(source)
+        self.assertIn('re.compile(r"^\\d+$")', patched)
+        self.assertEqual(patched.count('r"\\s+"'), 5)
+        namespace: dict[str, object] = {}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            warnings.simplefilter("error", DeprecationWarning)
+            exec(compile(patched, "<jupyterlab-semver-four-split>", "exec"), namespace)
+        self.assertTrue(namespace["NUMERIC"].fullmatch("123"))
+        self.assertEqual(namespace["normalize"]("a   b"), ["a", "b"])
 
     def test_legacy_semver_patch_rejects_partial_anchor_drift(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "anchors changed"):

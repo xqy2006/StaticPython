@@ -121,23 +121,27 @@ def _patch_legacy_semver_invalid_escapes(text: str) -> str:
     """Keep the legacy vendored semver module warning-free for _freeze_module."""
 
     numeric_anchor = 'NUMERIC = re.compile("^\\d+$")'
-    split_anchor = 're.split("\\s+",'
+    whitespace_anchor = '"\\s+"'
+    numeric_replacement = 'NUMERIC = re.compile(r"^\\d+$")'
+    whitespace_replacement = 'r"\\s+"'
     numeric_count = text.count(numeric_anchor)
-    split_count = text.count(split_anchor)
-    if numeric_count == 0 and split_count == 0:
-        if 'NUMERIC = re.compile(r"^\\d+$")' in text and 're.split(r"\\s+",' in text:
+    whitespace_count = text.count(whitespace_anchor)
+    if numeric_count == 0 and whitespace_count == 0:
+        if (
+            text.count(numeric_replacement) == 1
+            and text.count(whitespace_replacement) == 5
+        ):
             return text
         if "SEMVER_SPEC_VERSION" in text:
             raise RuntimeError("JupyterLab legacy semver invalid-escape anchors not found")
         return text
-    if numeric_count != 1 or split_count != 5:
+    if numeric_count != 1 or whitespace_count != 5:
         raise RuntimeError(
             "JupyterLab legacy semver invalid-escape anchors changed: "
-            f"numeric={numeric_count}, split={split_count}"
+            f"numeric={numeric_count}, whitespace={whitespace_count}"
         )
-    return text.replace(numeric_anchor, 'NUMERIC = re.compile(r"^\\d+$")').replace(
-        split_anchor,
-        're.split(r"\\s+",',
+    return text.replace(numeric_anchor, numeric_replacement).replace(
+        whitespace_anchor, whitespace_replacement
     )
 
 
