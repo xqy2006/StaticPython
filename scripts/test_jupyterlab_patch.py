@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import unittest
+import warnings
 from pathlib import Path
 
 
@@ -105,6 +106,36 @@ class JupyterLabPatchTests(unittest.TestCase):
             integration.post_patch_hooks[0],
             jupyterlab.patch_legacy_distutils_version,
         )
+
+    def test_legacy_semver_patch_preserves_regex_behavior_without_warnings(self) -> None:
+        source = """import re
+SEMVER_SPEC_VERSION = '2.0.0'
+NUMERIC = re.compile("^\\d+$")
+def normalize(value):
+    value = " ".join(re.split("\\s+", value))
+    value = " ".join(re.split("\\s+", value))
+    value = " ".join(re.split("\\s+", value))
+    value = " ".join(re.split("\\s+", value))
+    return " ".join(re.split("\\s+", value))
+"""
+        patched = jupyterlab._patch_legacy_semver_invalid_escapes(source)
+        self.assertIn('re.compile(r"^\\d+$")', patched)
+        self.assertEqual(patched.count('re.split(r"\\s+",'), 5)
+        namespace: dict[str, object] = {}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            warnings.simplefilter("error", DeprecationWarning)
+            exec(compile(patched, "<jupyterlab-semver>", "exec"), namespace)
+        self.assertTrue(namespace["NUMERIC"].fullmatch("123"))
+        self.assertEqual(namespace["normalize"]("a   b"), "a b")
+
+    def test_legacy_semver_patch_rejects_partial_anchor_drift(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "anchors changed"):
+            jupyterlab._patch_legacy_semver_invalid_escapes(
+                "SEMVER_SPEC_VERSION = '2.0.0'\n"
+                'NUMERIC = re.compile("^\\d+$")\n'
+                'value = re.split("\\s+", value)\n'
+            )
 
 
 if __name__ == "__main__":

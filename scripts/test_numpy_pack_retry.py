@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -138,6 +139,64 @@ class NumpyMesonRetryTests(unittest.TestCase):
         self.assertIn("failed project: numpy.random._bounded_integers", str(error.exception))
         self.assertIn("bounded retry stdout", str(error.exception))
         self.assertIn("bounded retry stderr", str(error.exception))
+
+    def test_random_project_requires_initializer_object_and_symbol(self) -> None:
+        project = numpy_setup.NUMPY_RANDOM_PHILOX_PROJECT_NAME
+        symbol = numpy_setup.NUMPY_RANDOM_INITIALIZER_SYMBOLS[project]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            object_dir = Path(temp_dir)
+            context = SimpleNamespace(version_info=(3, 11, 16))
+            required_name = numpy_setup._numpy_project_required_object_name(context, project)
+            assert required_name is not None
+            (object_dir / "src_philox_philox.c.obj").write_bytes(b"support only")
+            with mock.patch.object(
+                numpy_setup,
+                "numpy_project_object_dir",
+                return_value=object_dir,
+            ):
+                self.assertFalse(numpy_setup._numpy_project_objects_complete(context, project))
+                (object_dir / required_name).write_bytes(b"missing initializer")
+                self.assertFalse(numpy_setup._numpy_project_objects_complete(context, project))
+                (object_dir / required_name).write_bytes(symbol.encode("ascii"))
+                self.assertTrue(numpy_setup._numpy_project_objects_complete(context, project))
+
+    def test_random_archive_fails_closed_when_initializer_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            context = SimpleNamespace(
+                source_root=root,
+                platform="x64",
+                version_info=(3, 11, 16),
+                log=self.messages.append,
+            )
+            for project in numpy_setup.NUMPY_RANDOM_PROJECT_NAMES:
+                object_dir = numpy_setup.numpy_project_object_dir(context, project)
+                object_dir.mkdir(parents=True, exist_ok=True)
+                required_name = numpy_setup._numpy_project_required_object_name(context, project)
+                assert required_name is not None
+                (object_dir / required_name).write_bytes(
+                    numpy_setup.NUMPY_RANDOM_INITIALIZER_SYMBOLS[project].encode("ascii")
+                )
+            npyrandom = numpy_setup.numpy_npyrandom_lib(context)
+            npyrandom.parent.mkdir(parents=True, exist_ok=True)
+            npyrandom.write_bytes(b"support")
+            output = (
+                numpy_setup.get_pcbuild_output_dir(context.source_root, context.platform)
+                / f"{numpy_setup.NUMPY_RANDOM_BUILTIN_LIBRARY_NAME}.lib"
+            )
+
+            def fake_run(_log, _command, **_kwargs):
+                output.write_bytes(
+                    b"".join(
+                        symbol.encode("ascii")
+                        for project, symbol in numpy_setup.NUMPY_RANDOM_INITIALIZER_SYMBOLS.items()
+                        if project != numpy_setup.NUMPY_RANDOM_PHILOX_PROJECT_NAME
+                    )
+                )
+
+            with mock.patch.object(numpy_setup, "run", side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, "PyInit__philox"):
+                    numpy_setup._archive_numpy_random_builtins(context)
 
 
 if __name__ == "__main__":

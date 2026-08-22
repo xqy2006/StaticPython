@@ -51,6 +51,11 @@ jobs:
         run: python .\scripts\test_nest_asyncio_patch.py
       - name: Historical dependency compatibility pack tests
         run: python .\scripts\test_history_compatibility_packs.py
+      - name: NumPy and legacy JupyterLab freeze regression tests
+        run: |
+          python .\scripts\test_numpy_pack_retry.py
+          python .\scripts\test_jupyterlab_patch.py
+          python .\scripts\test_jupyterlab_launcher_patch.py
 
   resolve-cpython-matrix:
     runs-on: windows-2022
