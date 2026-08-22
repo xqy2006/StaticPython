@@ -153,6 +153,29 @@ def normalize(value):
         self.assertTrue(namespace["NUMERIC"].fullmatch("123"))
         self.assertEqual(namespace["normalize"]("a   b"), ["a", "b"])
 
+    def test_legacy_semver_patch_preserves_already_raw_jupyterlab_4_layout(self) -> None:
+        source = r"""import re
+SEMVER_SPEC_VERSION = '2.0.0'
+NUMERIC = re.compile(r"^\d+$")
+def normalize(value):
+    value = " ".join(re.split(r"\s+", value))
+    value = " ".join(re.split(r"\s+", value))
+    value = " ".join(re.split(r"\s+", value))
+    value = " ".join(re.split(r"\s+", value))
+    return re.split(
+        r"\s+", value
+    )
+"""
+        patched = jupyterlab._patch_legacy_semver_invalid_escapes(source)
+        self.assertEqual(patched, source)
+        namespace: dict[str, object] = {}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            warnings.simplefilter("error", DeprecationWarning)
+            exec(compile(patched, "<jupyterlab-4-semver>", "exec"), namespace)
+        self.assertTrue(namespace["NUMERIC"].fullmatch("123"))
+        self.assertEqual(namespace["normalize"]("a   b"), ["a", "b"])
+
     def test_legacy_semver_patch_rejects_partial_anchor_drift(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "anchors changed"):
             jupyterlab._patch_legacy_semver_invalid_escapes(

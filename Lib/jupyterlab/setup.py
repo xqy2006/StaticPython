@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 
 from libs import (
     ensure_text_before,
@@ -121,27 +122,28 @@ def _patch_legacy_semver_invalid_escapes(text: str) -> str:
     """Keep the legacy vendored semver module warning-free for _freeze_module."""
 
     numeric_anchor = 'NUMERIC = re.compile("^\\d+$")'
-    whitespace_anchor = '"\\s+"'
     numeric_replacement = 'NUMERIC = re.compile(r"^\\d+$")'
     whitespace_replacement = 'r"\\s+"'
-    numeric_count = text.count(numeric_anchor)
-    whitespace_count = text.count(whitespace_anchor)
-    if numeric_count == 0 and whitespace_count == 0:
-        if (
-            text.count(numeric_replacement) == 1
-            and text.count(whitespace_replacement) == 5
-        ):
-            return text
+    plain_whitespace = re.compile(r'(?<![A-Za-z0-9_])"\\s\+"')
+    raw_whitespace = re.compile(r'(?<![A-Za-z0-9_])r"\\s\+"')
+    numeric_plain_count = text.count(numeric_anchor)
+    numeric_raw_count = text.count(numeric_replacement)
+    whitespace_plain_count = len(plain_whitespace.findall(text))
+    whitespace_raw_count = len(raw_whitespace.findall(text))
+    if numeric_plain_count + numeric_raw_count == 0 and whitespace_plain_count + whitespace_raw_count == 0:
         if "SEMVER_SPEC_VERSION" in text:
             raise RuntimeError("JupyterLab legacy semver invalid-escape anchors not found")
         return text
-    if numeric_count != 1 or whitespace_count != 5:
+    if numeric_plain_count + numeric_raw_count != 1 or whitespace_plain_count + whitespace_raw_count != 5:
         raise RuntimeError(
             "JupyterLab legacy semver invalid-escape anchors changed: "
-            f"numeric={numeric_count}, whitespace={whitespace_count}"
+            f"numeric_plain={numeric_plain_count}, numeric_raw={numeric_raw_count}, "
+            f"whitespace_plain={whitespace_plain_count}, whitespace_raw={whitespace_raw_count}"
         )
-    return text.replace(numeric_anchor, numeric_replacement).replace(
-        whitespace_anchor, whitespace_replacement
+    text = text.replace(numeric_anchor, numeric_replacement)
+    return plain_whitespace.sub(
+        lambda _match: whitespace_replacement,
+        text,
     )
 
 
