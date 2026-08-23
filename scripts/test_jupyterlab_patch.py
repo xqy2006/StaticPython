@@ -107,6 +107,40 @@ class JupyterLabPatchTests(unittest.TestCase):
             jupyterlab.patch_legacy_distutils_version,
         )
 
+    def test_legacy_pipes_quote_patch_uses_supported_stdlib_alias(self) -> None:
+        source = (
+            "import json\n"
+            "import pipes\n"
+            "import os\n\n"
+            "if os.name == 'nt':\n"
+            "    from subprocess import list2cmdline\n"
+            "else:\n"
+            "    def list2cmdline(cmd_list):\n"
+            "        return ' '.join(map(pipes.quote, cmd_list))\n"
+        )
+        patched = jupyterlab._patch_legacy_pipes_quote(source)
+
+        self.assertIn("from shlex import quote\n", patched)
+        self.assertNotIn("pipes", patched)
+        self.assertEqual(jupyterlab._patch_legacy_pipes_quote(patched), patched)
+        namespace = {"__name__": "jupyterlab.commands"}
+        exec(compile(patched, "<jupyterlab-legacy-pipes>", "exec"), namespace)
+        self.assertEqual(namespace["quote"]("a b"), "'a b'")
+        self.assertEqual(
+            jupyterlab.LIBRARY_INTEGRATION.post_patch_hooks[1],
+            jupyterlab.patch_legacy_pipes_quote,
+        )
+
+    def test_legacy_pipes_quote_patch_rejects_partial_anchor_drift(self) -> None:
+        for source in (
+            "import pipes\n",
+            "value = pipes.quote('a b')\n",
+            "import pipes as shell_pipes\nvalue = pipes.quote('a b')\n",
+        ):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(RuntimeError, "anchors changed"):
+                    jupyterlab._patch_legacy_pipes_quote(source)
+
     def test_legacy_semver_patch_preserves_regex_behavior_without_warnings(self) -> None:
         source = """import re
 SEMVER_SPEC_VERSION = '2.0.0'

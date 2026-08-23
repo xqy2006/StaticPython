@@ -118,6 +118,42 @@ def patch_legacy_distutils_version(context) -> None:
     )
 
 
+def _patch_legacy_pipes_quote(text: str) -> str:
+    """Replace the removed ``pipes.quote`` alias with ``shlex.quote``."""
+
+    legacy_import = "import pipes\n"
+    replacement_import = "from shlex import quote\n"
+    legacy_call = "pipes.quote"
+    import_count = text.count(legacy_import)
+    call_count = text.count(legacy_call)
+    if import_count == 0 and call_count == 0:
+        if "import pipes" in text or "pipes.quote" in text:
+            raise RuntimeError("JupyterLab legacy pipes.quote anchors changed")
+        return text
+    if import_count != 1 or call_count != 1 or replacement_import in text:
+        raise RuntimeError(
+            "JupyterLab legacy pipes.quote anchors changed: "
+            f"imports={import_count}, calls={call_count}, "
+            f"replacement_imports={text.count(replacement_import)}"
+        )
+    text = replace_text_once(
+        text,
+        legacy_import,
+        replacement_import,
+        label="JupyterLab legacy pipes import",
+    )
+    return text.replace(legacy_call, "quote", 1)
+
+
+def patch_legacy_pipes_quote(context) -> None:
+    transform_source_text(
+        context,
+        "Lib/jupyterlab/commands.py",
+        _patch_legacy_pipes_quote,
+        allow_missing=True,
+    )
+
+
 def _patch_legacy_semver_invalid_escapes(text: str) -> str:
     """Keep the legacy vendored semver module warning-free for _freeze_module."""
 
@@ -512,6 +548,7 @@ LIBRARY_INTEGRATION = pypi_library(
     ],
     post_patch_hooks=[
         patch_legacy_distutils_version,
+        patch_legacy_pipes_quote,
         patch_legacy_semver_invalid_escapes,
         patch_jupyterlab_for_frozen_runtime,
     ],
