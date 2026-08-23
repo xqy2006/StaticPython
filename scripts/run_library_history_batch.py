@@ -144,9 +144,6 @@ def execute_combination(record: dict, context: dict) -> tuple[dict, list[Path]]:
     build_root = Path(context["build_root"])
     source_cache = Path(context["source_cache"])
     build_workers = int(context["build_workers"])
-    version_slug = _safe_slug(f"{record['version']}-{record['source_sha256'][:12]}")
-    combination_root = result_root / "combinations" / version_slug
-    combination_root.mkdir(parents=True, exist_ok=True)
     expected_source_cache = (REPO_ROOT / "downloads").resolve()
     if source_cache.resolve() != expected_source_cache:
         raise RuntimeError(
@@ -165,8 +162,38 @@ def execute_combination(record: dict, context: dict) -> tuple[dict, list[Path]]:
             f"history contract library casing mismatch: {record['library']!r} != "
             f"{canonical_library!r}"
         )
+    dependency_lock = contract_config.resolve_contract_dependency_lock(
+        generated_config,
+        record["python_version"],
+    )
+    root_lock_records = [
+        item
+        for item in dependency_lock["integrations"]
+        if item.get("name") == record["library"]
+    ]
+    if len(root_lock_records) != 1:
+        raise RuntimeError("historical dependency lock must contain the root library exactly once")
+    root_lock = root_lock_records[0]
+    root_source = root_lock.get("source")
+    if (
+        root_lock.get("version") != record["version"]
+        or not isinstance(root_source, dict)
+        or root_source.get("filename") != record["source_filename"]
+        or root_source.get("sha256") != record["source_sha256"].casefold()
+    ):
+        raise RuntimeError(
+            "historical dependency lock root source does not match the immutable contract record"
+        )
+    solver_fingerprint = dependency_lock["solver_fingerprint"]
+    version_slug = _safe_slug(
+        f"{record['version']}-{record['source_sha256'][:12]}-{solver_fingerprint[:12]}"
+    )
+    combination_root = result_root / "combinations" / version_slug
+    combination_root.mkdir(parents=True, exist_ok=True)
     config_path = combination_root / "config.json"
     _write_json(config_path, generated_config)
+    dependency_lock_path = combination_root / "dependency-lock.v1.json"
+    _write_json(dependency_lock_path, dependency_lock)
 
     contract_build.stage_source_archive(
         source_cache,
@@ -233,10 +260,37 @@ def execute_combination(record: dict, context: dict) -> tuple[dict, list[Path]]:
         python_version=record["python_version"],
     )
     pack_metadata, _pack_members = contract_build._pack_metadata(pack_path)
+    if pack_metadata.get("runtime_abi") != dependency_lock.get("runtime_abi"):
+        raise RuntimeError("historical dependency lock runtime ABI does not match the root pack")
+    locked_toolchain = dependency_lock.get("toolchain")
+    pack_toolchain = pack_metadata.get("toolchain")
+    if not isinstance(locked_toolchain, dict) or not isinstance(pack_toolchain, dict):
+        raise RuntimeError("historical dependency lock or root pack has no toolchain metadata")
+    if locked_toolchain.get("platform") != f"windows-{pack_metadata.get('platform')}":
+        raise RuntimeError(
+            "historical dependency lock platform does not match the root pack"
+        )
+    toolchain_mismatches = [
+        key
+        for key, expected in locked_toolchain.items()
+        if key != "platform"
+        and expected is not None
+        and pack_toolchain.get(key) != expected
+    ]
+    if toolchain_mismatches:
+        raise RuntimeError(
+            "historical dependency lock toolchain does not match the root pack: "
+            + ", ".join(toolchain_mismatches)
+        )
     pack_metadata_path = combination_root / "pack-metadata.json"
     _write_json(pack_metadata_path, pack_metadata)
     copied_verifier = combination_root / "staticpython-pack-verify-report.json"
     shutil.copy2(verifier_path, copied_verifier)
+    profile_metadata_source = source_root / "PCbuild" / "staticpython-profile.json"
+    if not profile_metadata_source.is_file():
+        raise RuntimeError("historical build did not persist resolved profile metadata")
+    profile_metadata_path = combination_root / "staticpython-profile.json"
+    shutil.copy2(profile_metadata_source, profile_metadata_path)
     normalized_report = {
         "schema_version": 1,
         "kind": history_evidence.COMBINATION_EVIDENCE_KIND,
@@ -246,6 +300,12 @@ def execute_combination(record: dict, context: dict) -> tuple[dict, list[Path]]:
         "python_version": record["python_version"],
         "source_filename": record["source_filename"],
         "source_sha256": history_evidence.file_sha256(source_archive),
+        "dependency_solver": dependency_lock["solver"],
+        "dependency_solver_fingerprint": solver_fingerprint,
+        "dependency_toolchain_fingerprint": dependency_lock[
+            "toolchain_fingerprint"
+        ],
+        "dependency_lock_sha256": history_evidence.file_sha256(dependency_lock_path),
         **verification,
         "status": "passed",
     }
@@ -260,12 +320,25 @@ def execute_combination(record: dict, context: dict) -> tuple[dict, list[Path]]:
         "python_version": record["python_version"],
         "source_sha256": record["source_sha256"],
         "pack_sha256": verification["pack_sha256"],
+        "runtime_abi": verification["runtime_abi"],
         "runtime_sdk_sha256": runtime_sdk_sha,
         "verifier_report_sha256": history_evidence.file_sha256(copied_verifier),
         "combination_evidence_sha256": normalized_report["evidence_sha256"],
+        "dependency_solver_fingerprint": solver_fingerprint,
+        "dependency_toolchain_fingerprint": dependency_lock[
+            "toolchain_fingerprint"
+        ],
+        "dependency_lock_sha256": normalized_report["dependency_lock_sha256"],
         "status": "passed",
     }
-    return result, [config_path, pack_metadata_path, copied_verifier, normalized_path]
+    return result, [
+        config_path,
+        dependency_lock_path,
+        pack_metadata_path,
+        copied_verifier,
+        profile_metadata_path,
+        normalized_path,
+    ]
 
 
 def run_history_batch(

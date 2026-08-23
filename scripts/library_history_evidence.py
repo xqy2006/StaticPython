@@ -498,6 +498,9 @@ def validate_batch_evidence(
                 "runtime_sdk_sha256",
                 "verifier_report_sha256",
                 "combination_evidence_sha256",
+                "dependency_lock_sha256",
+                "dependency_solver_fingerprint",
+                "dependency_toolchain_fingerprint",
             ):
                 value = result.get(field)
                 if not isinstance(value, str) or not SHA256_PATTERN.fullmatch(value):
@@ -506,6 +509,11 @@ def validate_batch_evidence(
                     )
             if result["runtime_sdk_sha256"].lower() != runtime_sdk_sha.lower():
                 raise RuntimeError(f"passed batch result runtime SDK mismatch: {key!r}")
+            runtime_abi = result.get("runtime_abi")
+            if not isinstance(runtime_abi, str) or not re.fullmatch(
+                r"staticpython-pack-v1-cp3(?:11|12|13|14|15)", runtime_abi
+            ):
+                raise RuntimeError(f"passed batch result has no valid runtime ABI: {key!r}")
         else:
             failure = result.get("failure")
             if (
@@ -545,6 +553,105 @@ def validate_batch_evidence(
     if len(verifier_records) != len(passed_results):
         raise RuntimeError("batch evidence verifier report coverage mismatch")
 
+    dependency_locks: dict[str, dict] = {}
+    profile_metadata_count = 0
+    for relative, (path, sha256) in validated_files.items():
+        if Path(relative).name == "dependency-lock.v1.json":
+            lock = load_object(path, "historical dependency lock")
+            if (
+                lock.get("schema_version") != SCHEMA_VERSION
+                or lock.get("kind") != "staticpython-history-dependency-lock"
+            ):
+                raise RuntimeError(
+                    f"historical dependency lock has an unsupported schema or kind: {relative}"
+                )
+            fingerprint = _recorded_hash(
+                lock,
+                "solver_fingerprint",
+                "historical dependency lock",
+            )
+            unsigned = {
+                key: value for key, value in lock.items() if key != "solver_fingerprint"
+            }
+            if canonical_sha256(unsigned) != fingerprint:
+                raise RuntimeError(
+                    f"historical dependency lock fingerprint mismatch: {relative}"
+                )
+            toolchain = lock.get("toolchain")
+            toolchain_fingerprint = lock.get("toolchain_fingerprint")
+            if (
+                not isinstance(toolchain, dict)
+                or not isinstance(toolchain_fingerprint, str)
+                or not SHA256_PATTERN.fullmatch(toolchain_fingerprint)
+                or canonical_sha256(toolchain) != toolchain_fingerprint.lower()
+            ):
+                raise RuntimeError(
+                    f"historical dependency lock toolchain fingerprint mismatch: {relative}"
+                )
+            integrations = lock.get("integrations")
+            if not isinstance(integrations, list) or not integrations:
+                raise RuntimeError(
+                    f"historical dependency lock has no integrations: {relative}"
+                )
+            for integration in integrations:
+                if not isinstance(integration, dict):
+                    raise RuntimeError(
+                        f"historical dependency lock integration is invalid: {relative}"
+                    )
+                if integration.get("source_provider") != "pypi":
+                    continue
+                license_expression = integration.get("license_expression")
+                if (
+                    not isinstance(license_expression, str)
+                    or not license_expression.strip()
+                ):
+                    raise RuntimeError(
+                        "historical dependency lock has no immutable license "
+                        f"expression: {relative}"
+                    )
+            dependency_locks[sha256] = lock
+        elif Path(relative).name == "staticpython-profile.json":
+            profile = load_object(path, "historical resolved profile")
+            if not isinstance(profile.get("third_party_library_versions"), dict):
+                raise RuntimeError(
+                    f"historical resolved profile has no integration versions: {relative}"
+                )
+            profile_metadata_count += 1
+    if len(dependency_locks) != len(passed_results):
+        raise RuntimeError("batch dependency lock coverage mismatch")
+    if profile_metadata_count != len(passed_results):
+        raise RuntimeError("batch resolved profile coverage mismatch")
+    for key, result in passed_results.items():
+        lock = dependency_locks.get(result["dependency_lock_sha256"].lower())
+        if lock is None:
+            raise RuntimeError(
+                f"passed batch result dependency lock is not hash-linked: {key!r}"
+            )
+        if (
+            lock.get("target_python_version") != result["python_version"]
+            or lock.get("runtime_abi") != result["runtime_abi"]
+            or lock.get("solver_fingerprint")
+            != result["dependency_solver_fingerprint"].lower()
+            or lock.get("toolchain_fingerprint")
+            != result["dependency_toolchain_fingerprint"].lower()
+        ):
+            raise RuntimeError(f"passed batch result dependency lock mismatch: {key!r}")
+        if [str(name).casefold() for name in lock.get("roots", [])] != [key[0]]:
+            raise RuntimeError(
+                f"passed batch result dependency lock root selection mismatch: {key!r}"
+            )
+        roots = [
+            record
+            for record in lock.get("integrations", [])
+            if isinstance(record, dict)
+            and str(record.get("name", "")).casefold() == key[0]
+            and record.get("version") == key[1]
+        ]
+        if len(roots) != 1:
+            raise RuntimeError(
+                f"passed batch result dependency lock root mismatch: {key!r}"
+            )
+
     combination_records: dict[tuple[str, object, object, str], dict] = {}
     pack_records: set[tuple[str, object, object]] = set()
     for relative, (path, _sha256) in validated_files.items():
@@ -576,7 +683,15 @@ def validate_batch_evidence(
             expected_combination = {
                 "status": "passed",
                 "runtime_sdk_sha256": runtime_sdk_sha.lower(),
+                "runtime_abi": result["runtime_abi"],
                 "pack_sha256": result["pack_sha256"].lower(),
+                "dependency_lock_sha256": result["dependency_lock_sha256"].lower(),
+                "dependency_solver_fingerprint": result[
+                    "dependency_solver_fingerprint"
+                ].lower(),
+                "dependency_toolchain_fingerprint": result[
+                    "dependency_toolchain_fingerprint"
+                ].lower(),
                 "evidence_sha256": result["combination_evidence_sha256"].lower(),
             }
             actual_combination = {
@@ -584,7 +699,17 @@ def validate_batch_evidence(
                 "runtime_sdk_sha256": str(
                     combination.get("runtime_sdk_sha256", "")
                 ).lower(),
+                "runtime_abi": combination.get("runtime_abi"),
                 "pack_sha256": str(combination.get("pack_sha256", "")).lower(),
+                "dependency_lock_sha256": str(
+                    combination.get("dependency_lock_sha256", "")
+                ).lower(),
+                "dependency_solver_fingerprint": str(
+                    combination.get("dependency_solver_fingerprint", "")
+                ).lower(),
+                "dependency_toolchain_fingerprint": str(
+                    combination.get("dependency_toolchain_fingerprint", "")
+                ).lower(),
                 "evidence_sha256": combination_sha,
             }
             if actual_combination != expected_combination:

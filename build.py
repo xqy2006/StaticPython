@@ -32,6 +32,7 @@ from libs import (
     collect_suppressed_system_libraries,
     collect_staged_static_libraries,
     collect_static_library_projects,
+    dependency_resolution_lock,
     load_integration_definitions,
     load_integrations,
     run_pre_build_hooks,
@@ -255,6 +256,8 @@ def integration_versions(integrations: list) -> dict[str, dict]:
             "source_resolver": integration.source_resolver,
             "project_name": integration.project_name,
             "release_version": integration.release_version,
+            "source_archive_sha256": integration.source_archive_sha256,
+            "dependency_resolution": integration.dependency_resolution,
             "top_level_import_names": integration.top_level_import_names or integration.python_packages,
             "dependencies": integration.dependencies,
             "dependency_constraints": integration.dependency_constraints,
@@ -2086,6 +2089,7 @@ def export_library_pack(
             "source_provider": integration.source_provider,
             "source_resolver": integration.source_resolver,
             "source_archive_sha256": integration.source_archive_sha256,
+            "dependency_resolution": integration.dependency_resolution,
             "source_tree_sha256": source_tree_hash,
             "source_files": source_file_records,
             "staticpython_commit": git_commit_or_none(REPO_ROOT),
@@ -5588,6 +5592,25 @@ def main() -> int:
     target_version = Version(version_full)
     core_version_overrides = profile.get("core_library_version_overrides")
     third_party_version_overrides = profile.get("third_party_library_version_overrides")
+    third_party_dependency_resolution = profile.get("third_party_dependency_resolution")
+    if third_party_dependency_resolution is not None and not isinstance(
+        third_party_dependency_resolution, dict
+    ):
+        raise RuntimeError("third_party_dependency_resolution must be an object")
+    third_party_dependency_resolution_mode = (
+        third_party_dependency_resolution.get("mode")
+        if isinstance(third_party_dependency_resolution, dict)
+        else None
+    )
+    configured_dependency_lock = (
+        third_party_dependency_resolution.get("lock")
+        if isinstance(third_party_dependency_resolution, dict)
+        else None
+    )
+    if configured_dependency_lock is not None and not isinstance(
+        configured_dependency_lock, dict
+    ):
+        raise RuntimeError("third_party_dependency_resolution.lock must be an object")
     core_library_catalog = profile_library_catalog(config, profile, "core_library_catalog")
     third_party_library_catalog = profile_library_catalog(config, profile, "third_party_library_catalog")
     core_integrations = load_integrations(
@@ -5603,7 +5626,20 @@ def main() -> int:
         target_version=target_version,
         version_overrides=third_party_version_overrides,
         library_catalog=third_party_library_catalog,
+        dependency_resolution_mode=third_party_dependency_resolution_mode,
+        dependency_resolution_lock_payload=configured_dependency_lock,
     )
+    if configured_dependency_lock is not None:
+        observed_dependency_lock = dependency_resolution_lock(
+            third_party_integrations,
+            target_version=target_version,
+            solver=third_party_dependency_resolution_mode,
+            roots=profile.get("third_party_libraries", []),
+        )
+        if observed_dependency_lock != configured_dependency_lock:
+            raise RuntimeError(
+                "historical dependency lock does not match the exact resolved dependency closure"
+            )
     if runtime_sdk_mode:
         # A runtime SDK is deliberately independent from the optional package
         # catalog.  Loading every integration here resolves PyPI releases even

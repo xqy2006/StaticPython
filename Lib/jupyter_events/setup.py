@@ -12,6 +12,56 @@ from libs import (
 )
 
 
+def _patch_python_json_logger_import(text: str) -> str:
+    """Select the import layout without filesystem distribution metadata."""
+
+    legacy = (
+        '# Check if the version is greater than 3.1.0\n'
+        'version_info = version("python-json-logger")\n'
+        'if parse(version_info) >= parse("3.1.0"):\n'
+        '    from pythonjsonlogger.json import JsonFormatter\n'
+        'else:\n'
+        '    from pythonjsonlogger.jsonlogger import JsonFormatter  # type: ignore[attr-defined]\n'
+    )
+    replacement = (
+        "# python-json-logger 3.1+ moved JsonFormatter to pythonjsonlogger.json.\n"
+        "try:\n"
+        "    from pythonjsonlogger.json import JsonFormatter\n"
+        "except ImportError:\n"
+        "    from pythonjsonlogger.jsonlogger import JsonFormatter  # type: ignore[attr-defined]\n"
+    )
+    if legacy in text:
+        text = replace_text_once(
+            text,
+            legacy,
+            replacement,
+            label="jupyter_events python-json-logger import layout",
+        )
+        stale_imports = (
+            "from importlib.metadata import version\n",
+            "from packaging.version import parse\n",
+        )
+        for stale_import in stale_imports:
+            if text.count(stale_import) != 1:
+                raise RuntimeError(
+                    "jupyter_events python-json-logger version import anchor not found"
+                )
+            text = text.replace(stale_import, "", 1)
+        return text
+    if 'version("python-json-logger")' in text:
+        raise RuntimeError("jupyter_events python-json-logger version anchor not found")
+    return text
+
+
+def patch_python_json_logger_import(context) -> None:
+    transform_source_text(
+        context,
+        "Lib/jupyter_events/logger.py",
+        _patch_python_json_logger_import,
+        allow_missing=True,
+    )
+
+
 def embed_jupyter_events_schemas(context) -> None:
     package_root = source_path(context, "Lib/jupyter_events")
     schemas_root = package_root / "schemas"
@@ -185,5 +235,5 @@ LIBRARY_INTEGRATION = pypi_library(
         "jupyter_events": "Lib/jupyter_events",
     },
     python_packages=["jupyter_events"],
-    post_patch_hooks=[embed_jupyter_events_schemas],
+    post_patch_hooks=[patch_python_json_logger_import, embed_jupyter_events_schemas],
 )

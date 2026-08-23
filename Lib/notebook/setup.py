@@ -4,7 +4,79 @@ import base64
 import json
 from pathlib import Path
 
-from libs import pypi_library, source_path, write_source_text
+from libs import (
+    pypi_library,
+    replace_function_block_once,
+    replace_text_once,
+    source_path,
+    transform_source_text,
+    write_source_text,
+)
+
+
+def patch_legacy_distutils_version(context) -> None:
+    """Keep Notebook 5/6 importable after distutils was removed in Python 3.12."""
+
+    def patch_utils(text: str) -> str:
+        legacy_import = "from distutils.version import LooseVersion\n"
+        if legacy_import not in text:
+            if "LooseVersion(" in text or "distutils.version" in text:
+                raise RuntimeError(
+                    "Notebook legacy version comparison anchor not found"
+                )
+            return text
+        text = replace_text_once(
+            text,
+            legacy_import,
+            "from packaging.version import InvalidVersion, Version\n",
+            label="Notebook distutils version import",
+        )
+        return replace_function_block_once(
+            text,
+            "check_version",
+            "def check_version(v, check):\n"
+            '    """Check version string ``v >= check`` without a filesystem dependency."""\n'
+            "    try:\n"
+            "        return Version(v) >= Version(check)\n"
+            "    except (InvalidVersion, TypeError):\n"
+            "        return True\n\n\n",
+            label="Notebook legacy version comparison",
+            next_name="_check_pid_win32",
+        )
+
+    transform_source_text(
+        context,
+        "Lib/notebook/utils.py",
+        patch_utils,
+        allow_missing=True,
+    )
+
+
+def _patch_legacy_freezer_banner(text: str) -> str:
+    """Avoid CPython 3.13+ isolated-freezer warnings for Notebook 6.5.x."""
+
+    banner_start = '        print("""\n  _   _          _      _\n'
+    raw_banner_start = '        print(r"""\n  _   _          _      _\n'
+    marker = "Read the migration plan to Notebook 7"
+    if banner_start in text:
+        return replace_text_once(
+            text,
+            banner_start,
+            raw_banner_start,
+            label="Notebook 6.5 raw migration banner",
+        )
+    if marker in text and raw_banner_start not in text:
+        raise RuntimeError("Notebook 6.5 migration banner anchor not found")
+    return text
+
+
+def patch_legacy_freezer_banner(context) -> None:
+    transform_source_text(
+        context,
+        "Lib/notebook/notebookapp.py",
+        _patch_legacy_freezer_banner,
+        allow_missing=True,
+    )
 
 
 def _collect_schema_map(schema_root: Path) -> dict[str, dict]:
@@ -129,6 +201,7 @@ def embed_notebook_resources(context) -> None:
 LIBRARY_INTEGRATION = pypi_library(
     name="notebook",
     release_version="7.0.8",
+    dependencies=["packaging"],
     source_mapping={
         "notebook": "Lib/notebook",
     },
@@ -140,5 +213,9 @@ LIBRARY_INTEGRATION = pypi_library(
         "Lib/notebook/_staticpython_resources.py",
     ],
     python_packages=["notebook"],
-    post_patch_hooks=[embed_notebook_resources],
+    post_patch_hooks=[
+        patch_legacy_distutils_version,
+        patch_legacy_freezer_banner,
+        embed_notebook_resources,
+    ],
 )

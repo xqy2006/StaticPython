@@ -142,6 +142,56 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
                         "verification": {"status": "passed"},
                     },
                 )
+                dependency_lock = {
+                    "schema_version": 1,
+                    "kind": "staticpython-history-dependency-lock",
+                    "solver": "staticpython-history-backtracking-v1",
+                    "roots": [record["library"]],
+                    "target_python_version": record["python_version"],
+                    "runtime_abi": "staticpython-pack-v1-cp"
+                    + "".join(record["python_version"].split(".")[:2]),
+                    "toolchain": {
+                        "platform": "windows-x64",
+                        "platform_toolset": "v143",
+                        "runtime_library": "MultiThreaded",
+                    },
+                    "integrations": [
+                        {
+                            "name": record["library"],
+                            "version": record["version"],
+                            "source_provider": "pypi",
+                            "license_expression": "MIT",
+                            "dependencies": [],
+                            "dependency_constraints": {},
+                            "source": {
+                                "filename": "demo.tar.gz",
+                                "url": "https://files.example/demo.tar.gz",
+                                "sha256": record["source_sha256"],
+                            },
+                        }
+                    ],
+                }
+                dependency_lock["toolchain_fingerprint"] = (
+                    evidence_module.canonical_sha256(dependency_lock["toolchain"])
+                )
+                dependency_lock["solver_fingerprint"] = (
+                    evidence_module.canonical_sha256(dependency_lock)
+                )
+                dependency_lock_path = write_json(
+                    combination_root / "dependency-lock.v1.json",
+                    dependency_lock,
+                )
+                profile_metadata_path = write_json(
+                    combination_root / "staticpython-profile.json",
+                    {
+                        "third_party_library_versions": {
+                            record["library"]: {"release_version": record["version"]}
+                        }
+                    },
+                )
+                dependency_lock_sha256 = evidence_module.file_sha256(
+                    dependency_lock_path
+                )
                 combination = {
                     "schema_version": 1,
                     "kind": evidence_module.COMBINATION_EVIDENCE_KIND,
@@ -150,7 +200,15 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
                     "python_version": record["python_version"],
                     "source_sha256": record["source_sha256"],
                     "runtime_sdk_sha256": "e" * 64,
+                    "runtime_abi": dependency_lock["runtime_abi"],
                     "pack_sha256": "a" * 64,
+                    "dependency_lock_sha256": dependency_lock_sha256,
+                    "dependency_solver_fingerprint": dependency_lock[
+                        "solver_fingerprint"
+                    ],
+                    "dependency_toolchain_fingerprint": dependency_lock[
+                        "toolchain_fingerprint"
+                    ],
                     "status": "passed",
                 }
                 combination["evidence_sha256"] = evidence_module.canonical_sha256(
@@ -169,11 +227,21 @@ class LibraryHistoryEvidenceTests(unittest.TestCase):
                         "combination_evidence_sha256": combination[
                             "evidence_sha256"
                         ],
+                        "dependency_lock_sha256": dependency_lock_sha256,
+                        "dependency_solver_fingerprint": dependency_lock[
+                            "solver_fingerprint"
+                        ],
+                        "dependency_toolchain_fingerprint": dependency_lock[
+                            "toolchain_fingerprint"
+                        ],
+                        "runtime_abi": dependency_lock["runtime_abi"],
                     }
                 )
                 for path in (
                     verifier_path,
                     pack_metadata_path,
+                    dependency_lock_path,
+                    profile_metadata_path,
                     combination_path,
                 ):
                     files.append(

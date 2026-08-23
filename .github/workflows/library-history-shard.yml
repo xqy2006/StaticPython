@@ -95,6 +95,7 @@ jobs:
         shell: pwsh
         run: |
           "HISTORY_RESULT_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-history-result-${{ matrix.batch_id }}')" >> $env:GITHUB_ENV
+          "HISTORY_EVIDENCE_UPLOAD_ROOT=$(Join-Path $env:RUNNER_TEMP 'library-history-evidence-${{ matrix.batch_sha256 }}')" >> $env:GITHUB_ENV
           "HISTORY_BATCH_ARTIFACT=library-history-batch-${{ inputs.manifest_key }}-s${{ inputs.shard_index }}-${{ matrix.batch_id }}" >> $env:GITHUB_ENV
 
       - uses: actions/checkout@v4
@@ -109,6 +110,17 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install packaging
           choco install strawberryperl -y --no-progress
+
+      - name: Install pinned Rust toolchain for historical PyO3 dependencies
+        shell: pwsh
+        env:
+          RUST_TOOLCHAIN: "1.88.0"
+          RUST_TARGET: "x86_64-pc-windows-msvc"
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --target $env:RUST_TARGET
+          rustup run $env:RUST_TOOLCHAIN rustc -Vv
+          rustup run $env:RUST_TOOLCHAIN cargo -V
 
       - uses: microsoft/setup-msbuild@v2
         with:
@@ -138,7 +150,12 @@ jobs:
           if ($runtimeSdk.Count -ne 1) {
             throw "Expected exactly one runtime SDK ZIP, found $($runtimeSdk.Count)"
           }
-          $buildRoot = Join-Path $env:RUNNER_TEMP "library-history-build-${{ matrix.batch_id }}"
+          # Native dependency trees such as pyzmq -> libsodium are deep enough
+          # to exceed MAX_PATH when the descriptive batch ID is repeated below
+          # RUNNER_TEMP.  The immutable batch digest keeps this workspace unique
+          # while leaving descriptive IDs intact in evidence and artifact names.
+          $batchKey = "${{ matrix.batch_sha256 }}".Substring(0, 12)
+          $buildRoot = Join-Path $env:RUNNER_TEMP "h-$batchKey"
           $sourceCache = Join-Path $env:GITHUB_WORKSPACE "downloads"
           python .\scripts\run_library_history_batch.py `
             --contract .tmp\history-plan\library-version-contract.json `
@@ -158,19 +175,24 @@ jobs:
             --event-name "${{ github.event_name }}" `
             --artifact $env:HISTORY_BATCH_ARTIFACT
 
+      - name: Stage exact immutable batch evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .\scripts\stage_library_history_evidence.py `
+            --evidence-root $env:HISTORY_RESULT_ROOT `
+            --output-root $env:HISTORY_EVIDENCE_UPLOAD_ROOT
+
       - name: Upload immutable batch evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.HISTORY_BATCH_ARTIFACT }}
-          path: |
-            ${{ env.HISTORY_RESULT_ROOT }}/library-history-batch-evidence.v1.json
-            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/config.json
-            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/pack-metadata.json
-            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/staticpython-pack-verify-report.json
-            ${{ env.HISTORY_RESULT_ROOT }}/combinations/**/combination-evidence.v1.json
-          if-no-files-found: warn
+          path: ${{ env.HISTORY_EVIDENCE_UPLOAD_ROOT }}
+          if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
   finalize-shard:
     needs: [plan-shard, build-batches]
@@ -232,6 +254,7 @@ jobs:
           path: .tmp/shard-evidence/library-history-shard-evidence.v1.json
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
       - name: Enforce shard evidence gate
         if: always()

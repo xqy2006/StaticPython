@@ -323,6 +323,13 @@
         "source_provider": "pypi"
       },
       {
+        "name": "entrypoints",
+        "source_mapping": {
+          "entrypoints.py": "Lib/entrypoints.py"
+        },
+        "source_provider": "pypi"
+      },
+      {
         "name": "et_xmlfile",
         "overlay_entries": [
           "Lib/et_xmlfile"
@@ -526,6 +533,17 @@
         "project_name": "importlib-metadata",
         "overlay_entries": [
           "Lib/importlib_metadata"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "ipython_genutils",
+        "project_name": "ipython-genutils",
+        "overlay_entries": [
+          "Lib/ipython_genutils"
+        ],
+        "source_ignore_patterns": [
+          "tests"
         ],
         "source_provider": "pypi"
       },
@@ -795,6 +813,17 @@
         "project_name": "jupyterlab-pygments",
         "overlay_entries": [
           "Lib/jupyterlab_pygments"
+        ],
+        "source_provider": "pypi"
+      },
+      {
+        "name": "jupyterlab_launcher",
+        "project_name": "jupyterlab-launcher",
+        "overlay_entries": [
+          "Lib/jupyterlab_launcher"
+        ],
+        "source_ignore_patterns": [
+          "tests"
         ],
         "source_provider": "pypi"
       },
@@ -1867,7 +1896,14 @@
       "core_libraries": "all",
       "historical_library_contract_libraries": [
         "attr",
-        "cattr"
+        "cattr",
+        "entrypoints",
+        "ipython_genutils",
+        "jsonschema_specifications",
+        "jupyterlab_launcher",
+        "nbclassic",
+        "referencing",
+        "rpds"
       ],
       "third_party_libraries": [
         "aiohappyeyeballs",

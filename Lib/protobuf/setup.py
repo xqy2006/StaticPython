@@ -211,44 +211,62 @@ def patch_protobuf_namespace(context) -> None:
         )
 
 
-def patch_protobuf_sources(context) -> None:
-    def patch_protobuf_c(text: str) -> str:
-        old = (
-            "typedef struct {\n"
-            "#ifdef ENABLE_MUTEX\n"
-            "  pthread_mutex_t mutex;\n"
-            "#endif\n"
-            "} FreeThreadingMutex;\n"
-            "\n"
-            "#ifdef ENABLE_MUTEX\n"
-            "static FreeThreadingMutex obj_cache_mutex = {PTHREAD_MUTEX_INITIALIZER};\n"
-            "#else\n"
-            "static FreeThreadingMutex obj_cache_mutex = {};\n"
-            "#endif\n"
-        )
-        new = (
-            "typedef struct {\n"
-            "#ifdef ENABLE_MUTEX\n"
-            "  pthread_mutex_t mutex;\n"
-            "#else\n"
-            "  char unused;\n"
-            "#endif\n"
-            "} FreeThreadingMutex;\n"
-            "\n"
-            "#ifdef ENABLE_MUTEX\n"
-            "static FreeThreadingMutex obj_cache_mutex = {PTHREAD_MUTEX_INITIALIZER};\n"
-            "#else\n"
-            "static FreeThreadingMutex obj_cache_mutex = {0};\n"
-            "#endif\n"
-        )
-        if new in text:
-            return text
-        if old not in text:
-            if "FreeThreadingMutex" in text and "static FreeThreadingMutex obj_cache_mutex" in text:
-                raise RuntimeError("protobuf free-threading mutex anchor not found")
-            return text
-        return text.replace(old, new, 1)
+def _patch_protobuf_c_text(text: str) -> str:
+    old_mutex_type = (
+        "typedef struct {\n"
+        "#ifdef ENABLE_MUTEX\n"
+        "  pthread_mutex_t mutex;\n"
+        "#endif\n"
+        "} FreeThreadingMutex;\n"
+    )
+    new_mutex_type = (
+        "typedef struct {\n"
+        "#ifdef ENABLE_MUTEX\n"
+        "  pthread_mutex_t mutex;\n"
+        "#else\n"
+        "  char unused;\n"
+        "#endif\n"
+        "} FreeThreadingMutex;\n"
+    )
+    old_cache_initializer = (
+        "#ifdef ENABLE_MUTEX\n"
+        "static FreeThreadingMutex obj_cache_mutex = {PTHREAD_MUTEX_INITIALIZER};\n"
+        "#else\n"
+        "static FreeThreadingMutex obj_cache_mutex = {};\n"
+        "#endif\n"
+    )
+    new_cache_initializer = (
+        "#ifdef ENABLE_MUTEX\n"
+        "static FreeThreadingMutex obj_cache_mutex = {PTHREAD_MUTEX_INITIALIZER};\n"
+        "#else\n"
+        "static FreeThreadingMutex obj_cache_mutex = {0};\n"
+        "#endif\n"
+    )
 
+    old_type_count = text.count(old_mutex_type)
+    if old_type_count:
+        if old_type_count != 1:
+            raise RuntimeError("protobuf free-threading mutex type anchor matched more than once")
+        text = text.replace(old_mutex_type, new_mutex_type, 1)
+    elif new_mutex_type not in text:
+        if "FreeThreadingMutex" in text:
+            raise RuntimeError("protobuf free-threading mutex type anchor not found")
+        return text
+
+    old_initializer_count = text.count(old_cache_initializer)
+    if old_initializer_count:
+        if old_initializer_count != 1:
+            raise RuntimeError("protobuf free-threading mutex initializer anchor matched more than once")
+        text = text.replace(old_cache_initializer, new_cache_initializer, 1)
+    elif (
+        "static FreeThreadingMutex obj_cache_mutex" in text
+        and new_cache_initializer not in text
+    ):
+        raise RuntimeError("protobuf free-threading mutex initializer anchor not found")
+    return text
+
+
+def patch_protobuf_sources(context) -> None:
     def patch_message_c(text: str) -> str:
         updated = text.replace(
             "__attribute__((flatten)) static PyObject* PyUpb_Message_GetAttr(",
@@ -261,7 +279,7 @@ def patch_protobuf_sources(context) -> None:
     transform_source_text(
         context,
         "protobuf_builtin/python/protobuf.c",
-        patch_protobuf_c,
+        _patch_protobuf_c_text,
         allow_missing=True,
     )
     transform_source_text(

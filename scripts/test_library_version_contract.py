@@ -164,6 +164,34 @@ class LibraryVersionContractTests(unittest.TestCase):
         self.assertEqual(target["status"], "unbuildable")
         self.assertIn("verifiable SHA-256", target["reason"])
 
+    def test_explicit_universal_wheel_resolver_is_preserved_in_contract(self) -> None:
+        integration = libs.LibraryIntegration(
+            name="demo",
+            source_provider="pypi",
+            source_resolver="pypi-universal-wheel",
+        )
+        payload = {
+            "releases": {
+                "1.0": [
+                    file_info("demo-1.0.tar.gz", sha256="a" * 64),
+                    file_info(
+                        "demo-1.0-py3-none-any.whl",
+                        packagetype="bdist_wheel",
+                        sha256="b" * 64,
+                    ),
+                ]
+            }
+        }
+        result = contract.pypi_library_contract(
+            integration,
+            payload,
+            [libs.Version("3.13.14")],
+        )
+        self.assertEqual(result["source_resolver"], "pypi-universal-wheel")
+        source = result["versions"]["1.0"]["targets"]["3.13.14"]["source"]
+        self.assertEqual(source["filename"], "demo-1.0-py3-none-any.whl")
+        self.assertEqual(source["sha256"], "b" * 64)
+
     def test_non_pypi_source_is_recorded_but_not_scheduled_as_candidate(self) -> None:
         integration = libs.LibraryIntegration(
             name="demo",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 
 from libs import (
     ensure_text_before,
@@ -76,6 +77,118 @@ def _patch_labapp_extension_manager_fallback(text: str) -> str:
         matches[0],
         new,
         label="jupyterlab.labapp extension manager fallback",
+    )
+
+
+def _patch_legacy_distutils_version(text: str) -> str:
+    """Keep early JupyterLab commands importable without stdlib distutils."""
+
+    legacy_import = "from distutils.version import LooseVersion\n"
+    if legacy_import not in text:
+        if "LooseVersion(" in text or "distutils.version" in text:
+            raise RuntimeError("JupyterLab legacy version comparison anchor not found")
+        return text
+
+    text = replace_text_once(
+        text,
+        legacy_import,
+        "from packaging.version import InvalidVersion, Version\n\n"
+        "def _staticpython_version_key(value):\n"
+        "    try:\n"
+        "        return (0, Version(value))\n"
+        "    except (InvalidVersion, TypeError):\n"
+        "        return (1, str(value))\n\n",
+        label="JupyterLab distutils version import",
+    )
+    comparisons = text.count("LooseVersion(")
+    if comparisons == 0:
+        raise RuntimeError("JupyterLab legacy version comparison anchor not found")
+    text = text.replace("LooseVersion(", "_staticpython_version_key(")
+    if "LooseVersion" in text or "distutils.version" in text:
+        raise RuntimeError("JupyterLab legacy version comparison was only partially patched")
+    return text
+
+
+def patch_legacy_distutils_version(context) -> None:
+    transform_source_text(
+        context,
+        "Lib/jupyterlab/commands.py",
+        _patch_legacy_distutils_version,
+        allow_missing=True,
+    )
+
+
+def _patch_legacy_pipes_quote(text: str) -> str:
+    """Replace the removed ``pipes.quote`` alias with ``shlex.quote``."""
+
+    legacy_import = "import pipes\n"
+    replacement_import = "from shlex import quote\n"
+    legacy_call = "pipes.quote"
+    import_count = text.count(legacy_import)
+    call_count = text.count(legacy_call)
+    if import_count == 0 and call_count == 0:
+        if "import pipes" in text or "pipes.quote" in text:
+            raise RuntimeError("JupyterLab legacy pipes.quote anchors changed")
+        return text
+    if import_count != 1 or call_count != 1 or replacement_import in text:
+        raise RuntimeError(
+            "JupyterLab legacy pipes.quote anchors changed: "
+            f"imports={import_count}, calls={call_count}, "
+            f"replacement_imports={text.count(replacement_import)}"
+        )
+    text = replace_text_once(
+        text,
+        legacy_import,
+        replacement_import,
+        label="JupyterLab legacy pipes import",
+    )
+    return text.replace(legacy_call, "quote", 1)
+
+
+def patch_legacy_pipes_quote(context) -> None:
+    transform_source_text(
+        context,
+        "Lib/jupyterlab/commands.py",
+        _patch_legacy_pipes_quote,
+        allow_missing=True,
+    )
+
+
+def _patch_legacy_semver_invalid_escapes(text: str) -> str:
+    """Keep the legacy vendored semver module warning-free for _freeze_module."""
+
+    numeric_anchor = 'NUMERIC = re.compile("^\\d+$")'
+    numeric_replacement = 'NUMERIC = re.compile(r"^\\d+$")'
+    whitespace_replacement = 'r"\\s+"'
+    plain_whitespace = re.compile(r'(?<![A-Za-z0-9_])"\\s\+"')
+    raw_whitespace = re.compile(r'(?<![A-Za-z0-9_])r"\\s\+"')
+    numeric_plain_count = text.count(numeric_anchor)
+    numeric_raw_count = text.count(numeric_replacement)
+    whitespace_plain_count = len(plain_whitespace.findall(text))
+    whitespace_raw_count = len(raw_whitespace.findall(text))
+    if numeric_plain_count + numeric_raw_count == 0 and whitespace_plain_count + whitespace_raw_count == 0:
+        if "SEMVER_SPEC_VERSION" in text:
+            raise RuntimeError("JupyterLab legacy semver invalid-escape anchors not found")
+        return text
+    if numeric_plain_count + numeric_raw_count != 1 or whitespace_plain_count + whitespace_raw_count != 5:
+        raise RuntimeError(
+            "JupyterLab legacy semver invalid-escape anchors changed: "
+            f"numeric_plain={numeric_plain_count}, numeric_raw={numeric_raw_count}, "
+            f"whitespace_plain={whitespace_plain_count}, whitespace_raw={whitespace_raw_count}"
+        )
+    text = text.replace(numeric_anchor, numeric_replacement)
+    return plain_whitespace.sub(
+        lambda _match: whitespace_replacement,
+        text,
+    )
+
+
+def patch_legacy_semver_invalid_escapes(context) -> None:
+    transform_source_text(
+        context,
+        "Lib/jupyterlab/semver.py",
+        _patch_legacy_semver_invalid_escapes,
+        allow_missing=True,
     )
 
 
@@ -156,7 +269,6 @@ def patch_jupyterlab_for_frozen_runtime(context) -> None:
     if legacy_layout and "@jupyterlab/apputils-extension:themes" not in schemas:
         schemas["@jupyterlab/apputils-extension:themes"] = {"schema": {}, "version": "N/A"}
     if legacy_layout:
-        package_root_static = package_root / "static"
         for relative, content in {
             "schemas/@jupyterlab/apputils-extension/themes.json": "{}\n",
             "themes/@jupyterlab/theme-light-extension/index.css": "/* StaticPython legacy placeholder */\n",
@@ -387,6 +499,7 @@ class _StaticPythonEntryPoint:
 LIBRARY_INTEGRATION = pypi_library(
     name="jupyterlab",
     release_version="4.0.9",
+    dependencies=["packaging"],
     source_mapping={
         "jupyterlab": "Lib/jupyterlab",
         "?build": "Lib/jupyterlab/build",
@@ -411,5 +524,32 @@ LIBRARY_INTEGRATION = pypi_library(
         "Lib/jupyterlab/_staticpython_resources.py",
     ],
     python_packages=["jupyterlab"],
-    post_patch_hooks=[patch_jupyterlab_for_frozen_runtime],
+    license_expression="BSD-3-Clause",
+    # The earliest PyPI sdists omit the repository LICENSE file.  Preserve the
+    # two upstream notices used by those releases from immutable Git commits;
+    # source distributions that include their own license remain preferred.
+    license_sources=[
+        {
+            "filename": "LICENSE-2015.txt",
+            "url": (
+                "https://raw.githubusercontent.com/jupyterlab/jupyterlab/"
+                "ef40f33f074ce921cc1405b4658f62f8876802b0/LICENSE"
+            ),
+            "sha256": "e73aa83e9684316187c171eeefbb03ae52a5d6c5469a5c3c222c8487a3a43df4",
+        },
+        {
+            "filename": "LICENSE-2015-2016.txt",
+            "url": (
+                "https://raw.githubusercontent.com/jupyterlab/jupyterlab/"
+                "5e4e335b87307012491adee2c150aaeebceba85c/LICENSE"
+            ),
+            "sha256": "eb713dd6d648da8f74b389761faa8c310f186f365d3055ec2c788f1800bcd94f",
+        },
+    ],
+    post_patch_hooks=[
+        patch_legacy_distutils_version,
+        patch_legacy_pipes_quote,
+        patch_legacy_semver_invalid_escapes,
+        patch_jupyterlab_for_frozen_runtime,
+    ],
 )

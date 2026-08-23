@@ -49,6 +49,7 @@ jobs:
       manifest_sha256: ${{ steps.plan.outputs.manifest_sha256 }}
       manifest_key: ${{ steps.plan.outputs.manifest_key }}
       plan_artifact: ${{ steps.plan.outputs.plan_artifact }}
+      artifact_suffix: ${{ steps.plan.outputs.artifact_suffix }}
       has_batches: ${{ steps.plan.outputs.has_batches }}
       shard_matrix: ${{ steps.plan.outputs.shard_matrix }}
       runtime_matrix: ${{ steps.plan.outputs.runtime_matrix }}
@@ -70,9 +71,13 @@ jobs:
           python .\scripts\test_prepare_library_contract_matrix.py
           python .\scripts\test_library_history_evidence.py
           python .\scripts\test_run_library_history_batch.py
+          python .\scripts\test_stage_library_history_evidence.py
           python .\scripts\test_build_library_contract_config.py
           python .\scripts\test_library_contract_build.py
           python .\scripts\test_verify_pack_with_runtime_sdk.py
+          python .\scripts\test_history_compatibility_packs.py
+          python .\scripts\test_jupyterlab_patch.py
+          python .\scripts\test_jupyterlab_launcher_patch.py
 
       - name: Download previous last-known-good version contract
         shell: pwsh
@@ -358,6 +363,7 @@ jobs:
           "manifest_sha256=$($manifest.manifest_sha256)" >> $env:GITHUB_OUTPUT
           "manifest_key=$manifestKey" >> $env:GITHUB_OUTPUT
           "plan_artifact=$planArtifact" >> $env:GITHUB_OUTPUT
+          "artifact_suffix=$artifactSuffix" >> $env:GITHUB_OUTPUT
           "has_batches=$(([bool]($manifest.batch_count -gt 0)).ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "shard_matrix=$(ConvertTo-Json $shardMatrix -Depth 5 -Compress)" >> $env:GITHUB_OUTPUT
           "runtime_matrix=$(ConvertTo-Json $runtimeMatrix -Depth 5 -Compress)" >> $env:GITHUB_OUTPUT
@@ -445,6 +451,7 @@ jobs:
           path: .tmp/runtime-dist/*.zip
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
   history-shards:
     needs: [plan, runtime-sdks]
@@ -459,7 +466,10 @@ jobs:
       manifest_key: ${{ needs.plan.outputs.manifest_key }}
       contract_sha256: ${{ needs.plan.outputs.contract_sha256 }}
       manifest_sha256: ${{ needs.plan.outputs.manifest_sha256 }}
-      artifact_suffix: a${{ github.run_attempt }}
+      # A failed-only rerun reuses the successful plan job and its runtime
+      # matrix from the original attempt. Keep shard downloads bound to that
+      # exact plan suffix instead of the workflow's newer run_attempt.
+      artifact_suffix: ${{ needs.plan.outputs.artifact_suffix }}
       shard_index: ${{ matrix.shard_index }}
 
   promote-support:
@@ -545,6 +555,7 @@ jobs:
           path: .tmp/history-support-catalog/**
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
       - name: Enforce history support gate
         if: always()

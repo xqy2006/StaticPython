@@ -55,6 +55,17 @@ NUMPY_RANDOM_PROJECT_NAMES = [
     NUMPY_RANDOM_GENERATOR_PROJECT_NAME,
     NUMPY_RANDOM_MTRAND_PROJECT_NAME,
 ]
+NUMPY_RANDOM_INITIALIZER_SYMBOLS = {
+    NUMPY_RANDOM_BOUNDED_INTEGERS_PROJECT_NAME: "PyInit__bounded_integers",
+    NUMPY_RANDOM_COMMON_PROJECT_NAME: "PyInit__common",
+    NUMPY_RANDOM_MT19937_PROJECT_NAME: "PyInit__mt19937",
+    NUMPY_RANDOM_PHILOX_PROJECT_NAME: "PyInit__philox",
+    NUMPY_RANDOM_PCG64_PROJECT_NAME: "PyInit__pcg64",
+    NUMPY_RANDOM_SFC64_PROJECT_NAME: "PyInit__sfc64",
+    NUMPY_RANDOM_BIT_GENERATOR_PROJECT_NAME: "PyInit_bit_generator",
+    NUMPY_RANDOM_GENERATOR_PROJECT_NAME: "PyInit__generator",
+    NUMPY_RANDOM_MTRAND_PROJECT_NAME: "PyInit_mtrand",
+}
 NUMPY_EXTRA_BUILTIN_PROJECT_NAMES = [
     NUMPY_POCKETFFT_PROJECT_NAME,
     *NUMPY_RANDOM_PROJECT_NAMES,
@@ -763,8 +774,9 @@ def _missing_numpy_outputs(context) -> list[str]:
         missing.append(f"{numpy_linalg_object_dir(context).name}/*.obj")
     for project_name in NUMPY_EXTRA_BUILTIN_PROJECT_NAMES:
         object_dir = numpy_project_object_dir(context, project_name)
-        if not any(object_dir.glob("*.obj")):
-            missing.append(f"{object_dir.name}/*.obj")
+        if not _numpy_project_objects_complete(context, project_name):
+            required = _numpy_project_required_object_name(context, project_name)
+            missing.append(f"{object_dir.name}/{required or '*.obj'}")
     return missing
 
 
@@ -789,6 +801,28 @@ def _numpy_ninja_targets(context) -> list[str]:
     ]
 
 
+def _numpy_project_required_object_name(_context, project_name: str) -> str | None:
+    if project_name not in NUMPY_RANDOM_INITIALIZER_SYMBOLS:
+        return None
+    module_path = project_name.replace(".", "_")
+    return f"meson-generated_{module_path}.pyx.c.obj"
+
+
+def _numpy_project_objects_complete(context, project_name: str) -> bool:
+    object_dir = numpy_project_object_dir(context, project_name)
+    objects = list(object_dir.glob("*.obj"))
+    if not objects:
+        return False
+    required_name = _numpy_project_required_object_name(context, project_name)
+    if required_name is None:
+        return True
+    required = object_dir / required_name
+    if not required.is_file():
+        return False
+    expected_symbol = NUMPY_RANDOM_INITIALIZER_SYMBOLS[project_name].encode("ascii")
+    return expected_symbol in required.read_bytes()
+
+
 def _missing_numpy_projects(context) -> list[str]:
     return [
         project_name
@@ -797,7 +831,7 @@ def _missing_numpy_projects(context) -> list[str]:
             NUMPY_LINALG_PROJECT_NAME,
             *NUMPY_EXTRA_BUILTIN_PROJECT_NAMES,
         )
-        if not any(numpy_project_object_dir(context, project_name).glob("*.obj"))
+        if not _numpy_project_objects_complete(context, project_name)
     ]
 
 
@@ -865,10 +899,10 @@ def _compile_numpy_core(context) -> None:
                 targets=[numpy_project_target_name(context, project_name)],
                 jobs=1,
             )
-            project_missing = [
-                f"{numpy_project_object_dir(context, project_name).name}/*.obj"
-            ]
-            if any(numpy_project_object_dir(context, project_name).glob("*.obj")):
+            object_dir = numpy_project_object_dir(context, project_name)
+            required = _numpy_project_required_object_name(context, project_name)
+            project_missing = [f"{object_dir.name}/{required or '*.obj'}"]
+            if _numpy_project_objects_complete(context, project_name):
                 project_missing = []
             if project_missing:
                 retry_failures.append(
@@ -992,6 +1026,17 @@ def _archive_numpy_random_builtins(context) -> None:
         cwd=context.source_root,
         timeout=60 * 10,
     )
+    archive_bytes = output_lib.read_bytes()
+    missing_symbols = sorted(
+        symbol
+        for symbol in NUMPY_RANDOM_INITIALIZER_SYMBOLS.values()
+        if symbol.encode("ascii") not in archive_bytes
+    )
+    if missing_symbols:
+        raise RuntimeError(
+            "NumPy random builtin archive is missing initializer symbols: "
+            + ", ".join(missing_symbols)
+        )
     context.log(f"prepared {output_lib.relative_to(context.source_root)}")
 
 

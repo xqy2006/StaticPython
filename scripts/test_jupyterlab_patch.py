@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import unittest
+import warnings
 from pathlib import Path
 
 
@@ -34,6 +35,24 @@ def labapp_source(*, call_not_implemented: bool) -> str:
 
 
 class JupyterLabPatchTests(unittest.TestCase):
+    def test_early_sdist_license_fallbacks_are_immutable(self) -> None:
+        integration = jupyterlab.LIBRARY_INTEGRATION
+
+        self.assertEqual(integration.license_expression, "BSD-3-Clause")
+        self.assertEqual(
+            [record["filename"] for record in integration.license_sources],
+            ["LICENSE-2015.txt", "LICENSE-2015-2016.txt"],
+        )
+        self.assertEqual(
+            [record["sha256"] for record in integration.license_sources],
+            [
+                "e73aa83e9684316187c171eeefbb03ae52a5d6c5469a5c3c222c8487a3a43df4",
+                "eb713dd6d648da8f74b389761faa8c310f186f365d3055ec2c788f1800bcd94f",
+            ],
+        )
+        for record in integration.license_sources:
+            self.assertRegex(record["url"], r"/[0-9a-f]{40}/LICENSE$")
+
     def test_extension_manager_fallback_supports_old_and_new_raise_forms(self) -> None:
         for call_not_implemented in (True, False):
             with self.subTest(call_not_implemented=call_not_implemented):
@@ -54,6 +73,150 @@ class JupyterLabPatchTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "anchor not found"):
             jupyterlab._patch_labapp_extension_manager_fallback(source)
+
+    def test_legacy_distutils_version_patch_is_strict(self) -> None:
+        source = (
+            "from distutils.version import LooseVersion\n\n"
+            "def versions_match(built, current):\n"
+            "    return LooseVersion(built) == LooseVersion(current)\n"
+        )
+        patched = jupyterlab._patch_legacy_distutils_version(source)
+
+        self.assertIn("from packaging.version import InvalidVersion, Version", patched)
+        self.assertNotIn("distutils", patched)
+        self.assertNotIn("LooseVersion", patched)
+        self.assertEqual(patched.count("_staticpython_version_key("), 3)
+        namespace: dict[str, object] = {}
+        exec(compile(patched, "<jupyterlab-legacy-commands>", "exec"), namespace)
+        versions_match = namespace["versions_match"]
+        self.assertTrue(versions_match("1.0", "1.0.0"))
+        self.assertFalse(versions_match("", "1.0"))
+
+        with self.assertRaisesRegex(RuntimeError, "anchor not found"):
+            jupyterlab._patch_legacy_distutils_version(
+                source.replace(
+                    "from distutils.version import LooseVersion",
+                    "import distutils.version",
+                )
+            )
+
+        integration = jupyterlab.LIBRARY_INTEGRATION
+        self.assertIn("packaging", integration.dependencies)
+        self.assertEqual(
+            integration.post_patch_hooks[0],
+            jupyterlab.patch_legacy_distutils_version,
+        )
+
+    def test_legacy_pipes_quote_patch_uses_supported_stdlib_alias(self) -> None:
+        source = (
+            "import json\n"
+            "import pipes\n"
+            "import os\n\n"
+            "if os.name == 'nt':\n"
+            "    from subprocess import list2cmdline\n"
+            "else:\n"
+            "    def list2cmdline(cmd_list):\n"
+            "        return ' '.join(map(pipes.quote, cmd_list))\n"
+        )
+        patched = jupyterlab._patch_legacy_pipes_quote(source)
+
+        self.assertIn("from shlex import quote\n", patched)
+        self.assertNotIn("pipes", patched)
+        self.assertEqual(jupyterlab._patch_legacy_pipes_quote(patched), patched)
+        namespace = {"__name__": "jupyterlab.commands"}
+        exec(compile(patched, "<jupyterlab-legacy-pipes>", "exec"), namespace)
+        self.assertEqual(namespace["quote"]("a b"), "'a b'")
+        self.assertEqual(
+            jupyterlab.LIBRARY_INTEGRATION.post_patch_hooks[1],
+            jupyterlab.patch_legacy_pipes_quote,
+        )
+
+    def test_legacy_pipes_quote_patch_rejects_partial_anchor_drift(self) -> None:
+        for source in (
+            "import pipes\n",
+            "value = pipes.quote('a b')\n",
+            "import pipes as shell_pipes\nvalue = pipes.quote('a b')\n",
+        ):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(RuntimeError, "anchors changed"):
+                    jupyterlab._patch_legacy_pipes_quote(source)
+
+    def test_legacy_semver_patch_preserves_regex_behavior_without_warnings(self) -> None:
+        source = """import re
+SEMVER_SPEC_VERSION = '2.0.0'
+NUMERIC = re.compile("^\\d+$")
+def normalize(value):
+    value = " ".join(re.split("\\s+", value))
+    value = " ".join(re.split("\\s+", value))
+    value = " ".join(re.split("\\s+", value))
+    value = " ".join(re.split("\\s+", value))
+    return " ".join(re.split("\\s+", value))
+"""
+        patched = jupyterlab._patch_legacy_semver_invalid_escapes(source)
+        self.assertIn('re.compile(r"^\\d+$")', patched)
+        self.assertEqual(patched.count('r"\\s+"'), 5)
+        namespace: dict[str, object] = {}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            warnings.simplefilter("error", DeprecationWarning)
+            exec(compile(patched, "<jupyterlab-semver>", "exec"), namespace)
+        self.assertTrue(namespace["NUMERIC"].fullmatch("123"))
+        self.assertEqual(namespace["normalize"]("a   b"), "a b")
+
+    def test_legacy_semver_patch_accepts_line_wrapped_fifth_split(self) -> None:
+        source = """import re
+SEMVER_SPEC_VERSION = '2.0.0'
+NUMERIC = re.compile("^\\d+$")
+def normalize(value):
+    value = " ".join(re.split("\\s+", value))
+    value = " ".join(re.split("\\s+", value))
+    value = " ".join(re.split("\\s+", value))
+    value = " ".join(re.split("\\s+", value))
+    return re.split(
+        "\\s+", value
+    )
+"""
+        patched = jupyterlab._patch_legacy_semver_invalid_escapes(source)
+        self.assertIn('re.compile(r"^\\d+$")', patched)
+        self.assertEqual(patched.count('r"\\s+"'), 5)
+        namespace: dict[str, object] = {}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            warnings.simplefilter("error", DeprecationWarning)
+            exec(compile(patched, "<jupyterlab-semver-four-split>", "exec"), namespace)
+        self.assertTrue(namespace["NUMERIC"].fullmatch("123"))
+        self.assertEqual(namespace["normalize"]("a   b"), ["a", "b"])
+
+    def test_legacy_semver_patch_preserves_already_raw_jupyterlab_4_layout(self) -> None:
+        source = r"""import re
+SEMVER_SPEC_VERSION = '2.0.0'
+NUMERIC = re.compile(r"^\d+$")
+def normalize(value):
+    value = " ".join(re.split(r"\s+", value))
+    value = " ".join(re.split(r"\s+", value))
+    value = " ".join(re.split(r"\s+", value))
+    value = " ".join(re.split(r"\s+", value))
+    return re.split(
+        r"\s+", value
+    )
+"""
+        patched = jupyterlab._patch_legacy_semver_invalid_escapes(source)
+        self.assertEqual(patched, source)
+        namespace: dict[str, object] = {}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            warnings.simplefilter("error", DeprecationWarning)
+            exec(compile(patched, "<jupyterlab-4-semver>", "exec"), namespace)
+        self.assertTrue(namespace["NUMERIC"].fullmatch("123"))
+        self.assertEqual(namespace["normalize"]("a   b"), ["a", "b"])
+
+    def test_legacy_semver_patch_rejects_partial_anchor_drift(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "anchors changed"):
+            jupyterlab._patch_legacy_semver_invalid_escapes(
+                "SEMVER_SPEC_VERSION = '2.0.0'\n"
+                'NUMERIC = re.compile("^\\d+$")\n'
+                'value = re.split("\\s+", value)\n'
+            )
 
 
 if __name__ == "__main__":

@@ -132,6 +132,8 @@ def resolve_resource_from_roots(roots, path: str) -> str | None:
             probes.append(("jupyter_server", f"event_schemas/{normalized_path}"))
         if root_text.endswith("/notebook/static"):
             probes.append(("notebook", f"static/{normalized_path}"))
+        if root_text.endswith("/nbclassic/static"):
+            probes.append(("nbclassic", f"static/{normalized_path}"))
         if root_text.endswith("/jupyterlab/static") or root_text.endswith("/share/jupyter/lab/static"):
             probes.append(("jupyterlab", f"static/{normalized_path}"))
         if root_text.endswith("/jupyterlab/themes") or root_text.endswith("/share/jupyter/lab/themes"):

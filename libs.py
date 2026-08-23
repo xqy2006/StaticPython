@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import ast
 from dataclasses import dataclass, field
+from email.parser import Parser
 import fnmatch
 import hashlib
 import http.client
@@ -36,7 +37,7 @@ def _ensure_repo_packaging_on_path() -> None:
 
 _ensure_repo_packaging_on_path()
 
-from packaging.markers import default_environment
+from packaging.markers import InvalidMarker, Marker, default_environment
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
@@ -67,6 +68,8 @@ SOURCE_ROOT_CANDIDATES = (
 )
 REPO_ROOT = Path(__file__).resolve().parent
 DOWNLOAD_CACHE_ROOT = REPO_ROOT / "downloads"
+HISTORICAL_DEPENDENCY_SOLVER = "staticpython-history-backtracking-v1"
+DEPENDENCY_RESOLUTION_LOCK_SCHEMA_VERSION = 1
 SIMPLE_LIBRARY_PROJECT_ALIASES = {
     "annotated_doc": "annotated-doc",
     "attr": "attrs",
@@ -132,6 +135,7 @@ class LibraryIntegration:
     pre_patch_hooks: list[Hook] = field(default_factory=list)
     post_patch_hooks: list[Hook] = field(default_factory=list)
     pre_build_hooks: list[Hook] = field(default_factory=list)
+    dependency_resolution: dict[str, object] = field(default_factory=dict)
 
 
 def _unique(items: list[str]) -> list[str]:
@@ -672,7 +676,11 @@ def _supports_target_python(requires_python: str | None, target_version: Version
         specifier = SpecifierSet(requires_python)
     except InvalidSpecifier:
         return True
-    return target_version in specifier
+    # Requires-Python describes the interpreter being built. A CPython release
+    # candidate such as 3.15.0rc1 still satisfies an ordinary lower bound like
+    # >=3.9; SpecifierSet's default candidate-version prerelease filtering is
+    # not appropriate for this interpreter compatibility check.
+    return specifier.contains(target_version, prereleases=True)
 
 
 def _sorted_release_versions(releases: dict[str, list[dict]]) -> list[str]:
@@ -775,13 +783,26 @@ def _wheel_filename_rank(filename: str, target_version: Version) -> tuple[int, i
     return (best_kind, best_interpreter, best_abi, best_platform, filename.lower())
 
 
-def _pypi_file_sort_key(file_info: dict, target_version: Version) -> tuple:
+PYPI_SOURCE_RESOLVERS = frozenset({"pypi-sdist", "pypi-universal-wheel"})
+
+
+def _pypi_file_sort_key(
+    file_info: dict,
+    target_version: Version,
+    *,
+    source_resolver: str = "pypi-sdist",
+) -> tuple:
+    if source_resolver not in PYPI_SOURCE_RESOLVERS:
+        raise RuntimeError(f"unsupported PyPI source resolver: {source_resolver!r}")
     filename = str(file_info.get("filename") or "")
     packagetype = file_info.get("packagetype")
+    sdist_rank, wheel_rank = (
+        (1, 0) if source_resolver == "pypi-universal-wheel" else (0, 1)
+    )
     if packagetype == "sdist":
-        return (0, *_sdist_filename_rank(filename))
+        return (sdist_rank, *_sdist_filename_rank(filename))
     if packagetype == "bdist_wheel":
-        return (1, *_wheel_filename_rank(filename, target_version))
+        return (wheel_rank, *_wheel_filename_rank(filename, target_version))
     return (2, filename.lower())
 
 
@@ -799,6 +820,7 @@ def _compatible_pypi_files(
     *,
     project_requires_python: str | None,
     target_version: Version,
+    source_resolver: str = "pypi-sdist",
 ) -> list[dict]:
     compatible: list[dict] = []
     for file_info in files:
@@ -822,17 +844,29 @@ def _compatible_pypi_files(
     # Native wheels are never valid static-build inputs.  A native-only
     # release must provide an explicit, verifiable upstream source mapping.
     compatible = [*source_distributions, *pure_universal_wheels]
-    return sorted(compatible, key=lambda file_info: _pypi_file_sort_key(file_info, target_version))
+    return sorted(
+        compatible,
+        key=lambda file_info: _pypi_file_sort_key(
+            file_info,
+            target_version,
+            source_resolver=source_resolver,
+        ),
+    )
 
 
 def _iter_pypi_distribution_candidates(
     project_name: str,
     target_version: Version,
     release_version: str | None = None,
+    *,
+    source_resolver: str = "pypi-sdist",
 ) -> list[tuple[str, dict]]:
-    payload = _http_get_json(PYPI_API_URL_TEMPLATE.format(project=project_name))
+    # Persist the full release catalog as well as per-version metadata. History
+    # batches resolve more than one root version in the same job, so repeatedly
+    # downloading identical project indexes is both slow and unnecessarily
+    # sensitive to transient PyPI throttling.
+    payload = _load_pypi_release_payload(project_name, None)
     releases = payload.get("releases", {})
-    project_requires_python = payload.get("info", {}).get("requires_python")
 
     candidate_versions = [release_version] if release_version else _sorted_release_versions(releases)
     candidates: list[tuple[str, dict]] = []
@@ -841,14 +875,39 @@ def _iter_pypi_distribution_candidates(
             continue
         compatible = _compatible_pypi_files(
             releases.get(raw_version, []),
-            project_requires_python=project_requires_python,
+            # Historical files without Requires-Python metadata are part of
+            # every target contract. The project-level value describes the
+            # current release and must never be inherited by older artifacts.
+            project_requires_python=None,
             target_version=target_version,
+            source_resolver=source_resolver,
         )
         for file_info in compatible:
             candidates.append((raw_version, file_info))
         if release_version and compatible:
             break
     return candidates
+
+
+def _iter_pypi_candidates_for_integration(
+    integration: LibraryIntegration,
+    target_version: Version,
+    release_version: str | None = None,
+) -> list[tuple[str, dict]]:
+    project_name = integration.project_name or integration.name
+    source_resolver = integration.source_resolver or "pypi-sdist"
+    if source_resolver == "pypi-sdist":
+        return _iter_pypi_distribution_candidates(
+            project_name,
+            target_version,
+            release_version,
+        )
+    return _iter_pypi_distribution_candidates(
+        project_name,
+        target_version,
+        release_version,
+        source_resolver=source_resolver,
+    )
 
 
 def _select_pypi_file(
@@ -920,6 +979,8 @@ def _find_cached_pypi_archives(
     normalized_project_name: str,
     release_version: str,
     target_version: Version,
+    *,
+    source_resolver: str = "pypi-sdist",
 ) -> list[Path]:
     release_root = download_cache_root / "pypi" / normalized_project_name / release_version
     if not release_root.exists():
@@ -941,6 +1002,7 @@ def _find_cached_pypi_archives(
                 "packagetype": "bdist_wheel" if path.name.lower().endswith(".whl") else "sdist",
             },
             target_version,
+            source_resolver=source_resolver,
         ),
     )
 
@@ -950,6 +1012,8 @@ def _candidate_pypi_archives(
     project_name: str,
     target_version: Version,
     release_version: str | None,
+    *,
+    source_resolver: str = "pypi-sdist",
 ) -> list[tuple[str, Path, str | None, bool]]:
     normalized = _normalized_project_name(project_name)
     if release_version is not None:
@@ -958,15 +1022,24 @@ def _candidate_pypi_archives(
             normalized,
             release_version,
             target_version,
+            source_resolver=source_resolver,
         )
         if cached_archive_paths:
             return [(release_version, path, None, True) for path in cached_archive_paths]
 
-    discovered_candidates = _iter_pypi_distribution_candidates(
-        project_name,
-        target_version,
-        release_version,
-    )
+    if source_resolver == "pypi-sdist":
+        discovered_candidates = _iter_pypi_distribution_candidates(
+            project_name,
+            target_version,
+            release_version,
+        )
+    else:
+        discovered_candidates = _iter_pypi_distribution_candidates(
+            project_name,
+            target_version,
+            release_version,
+            source_resolver=source_resolver,
+        )
     if release_version is None and discovered_candidates:
         newest_version = discovered_candidates[0][0]
         discovered_candidates = [
@@ -1502,25 +1575,45 @@ def _materialize_distribution_licenses(
     _materialize_license_candidates(
         context,
         integration,
-        _distribution_license_candidates(extracted_root),
+        _distribution_license_candidates(
+            extracted_root,
+            ignore_patterns=integration.source_ignore_patterns,
+        ),
     )
 
 
-def _distribution_license_candidates(root: Path, *, maximum_depth: int = 3) -> list[Path]:
+def _distribution_license_candidates(
+    root: Path,
+    *,
+    maximum_depth: int = 3,
+    ignore_patterns: list[str] | None = None,
+) -> list[Path]:
     prefixes = ("license", "copying", "notice", "copyright", "authors")
     candidates: list[Path] = []
     if not root.is_dir():
         return candidates
-    for path in root.rglob("*"):
-        if not path.is_file() or not path.name.casefold().startswith(prefixes):
-            continue
-        try:
-            relative = path.relative_to(root)
-        except ValueError:
-            continue
-        if len(relative.parts) > maximum_depth or path.stat().st_size > 2 * 1024 * 1024:
-            continue
-        candidates.append(path)
+    ignored = list(ignore_patterns or [])
+    scan_root = Path(_long_path(root))
+
+    def walk(directory: Path, directory_depth: int) -> None:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    if any(fnmatch.fnmatch(entry.name, pattern) for pattern in ignored):
+                        continue
+                    if directory_depth + 1 < maximum_depth:
+                        walk(Path(entry.path), directory_depth + 1)
+                    continue
+                if (
+                    not entry.is_file(follow_symlinks=False)
+                    or not entry.name.casefold().startswith(prefixes)
+                    or directory_depth + 1 > maximum_depth
+                    or entry.stat(follow_symlinks=False).st_size > 2 * 1024 * 1024
+                ):
+                    continue
+                candidates.append(Path(entry.path))
+
+    walk(scan_root, 0)
     return candidates
 
 
@@ -1662,7 +1755,13 @@ def _finalize_integration_license_metadata(
         for relative in integration.materialized_paths:
             path = context.source_root / relative
             root = path if path.is_dir() else path.parent
-            candidates.extend(_distribution_license_candidates(root, maximum_depth=4))
+            candidates.extend(
+                _distribution_license_candidates(
+                    root,
+                    maximum_depth=4,
+                    ignore_patterns=integration.source_ignore_patterns,
+                )
+            )
 
         if integration.source_provider == "pypi" and integration.release_version:
             project_name = integration.project_name or integration.name
@@ -1676,7 +1775,11 @@ def _finalize_integration_license_metadata(
             # version-scoped cache root is stable across all of them and keeps the
             # scan bounded to the exact distribution selected for this pack.
             candidates.extend(
-                _distribution_license_candidates(cached_distribution_root, maximum_depth=6)
+                _distribution_license_candidates(
+                    cached_distribution_root,
+                    maximum_depth=6,
+                    ignore_patterns=integration.source_ignore_patterns,
+                )
             )
 
         _materialize_license_candidates(context, integration, candidates)
@@ -1734,12 +1837,47 @@ def _build_pypi_source_hook(
     def prepare_source(context: LibraryHookContext) -> None:
         release_version = integration.release_version
         target_version = Version(".".join(str(part) for part in context.version_info))
-        candidate_archives = _candidate_pypi_archives(
-            context.download_cache_root,
-            project_name,
-            target_version,
-            release_version,
-        )
+        locked_source = integration.dependency_resolution.get("source")
+        if isinstance(locked_source, dict) and release_version is not None:
+            filename = locked_source.get("filename")
+            url = locked_source.get("url")
+            if (
+                not isinstance(filename, str)
+                or not filename
+                or Path(filename).name != filename
+                or not isinstance(url, str)
+                or not url
+            ):
+                raise RuntimeError(
+                    f"invalid locked PyPI source for {integration.name} {release_version}"
+                )
+            archive_path = (
+                context.download_cache_root
+                / "pypi"
+                / normalized
+                / release_version
+                / filename
+            )
+            candidate_archives = [
+                (release_version, archive_path, url, archive_path.exists())
+            ]
+        else:
+            source_resolver = integration.source_resolver or "pypi-sdist"
+            if source_resolver == "pypi-sdist":
+                candidate_archives = _candidate_pypi_archives(
+                    context.download_cache_root,
+                    project_name,
+                    target_version,
+                    release_version,
+                )
+            else:
+                candidate_archives = _candidate_pypi_archives(
+                    context.download_cache_root,
+                    project_name,
+                    target_version,
+                    release_version,
+                    source_resolver=source_resolver,
+                )
 
         if not candidate_archives:
             raise RuntimeError(
@@ -1913,6 +2051,11 @@ def pypi_library(
     post_patch_hooks: list[Hook] | None = None,
     pre_build_hooks: list[Hook] | None = None,
 ) -> LibraryIntegration:
+    resolved_source_resolver = source_resolver or "pypi-sdist"
+    if resolved_source_resolver not in PYPI_SOURCE_RESOLVERS:
+        raise RuntimeError(
+            f"unsupported PyPI source resolver: {resolved_source_resolver!r}"
+        )
     resolved_mapping = dict(source_mapping or {})
     if source_entries:
         for entry in source_entries:
@@ -1956,7 +2099,7 @@ def pypi_library(
         dependency_constraints=dict(dependency_constraints or {}),
         conflicts=list(conflicts or []),
         patch_rules=list(patch_rules or []),
-        source_resolver=source_resolver or "pypi-sdist",
+        source_resolver=resolved_source_resolver,
         resource_rules=list(resource_rules or []),
         toolchain_metadata=dict(toolchain_metadata or {}),
         license_expression=license_expression,
@@ -2359,11 +2502,254 @@ def _pypi_dependency_requirements(
     if effective_release_version is None:
         return []
     integration.release_version = effective_release_version
-    payload = _load_pypi_release_payload(project_name, effective_release_version)
-    info = payload.get("info", {})
-    raw_requirements = info.get("requires_dist") or []
-    if not raw_requirements:
+    return _pypi_dependency_requirements_for_release(
+        integration,
+        target_version,
+        effective_release_version,
+    )
+
+
+_PYPI_ARCHIVE_REQUIREMENTS_CACHE: dict[
+    tuple[str, str, str, str],
+    tuple[str, ...],
+] = {}
+
+
+def _legacy_requires_txt_requirements(
+    text: str,
+    target_version: Version,
+) -> list[str]:
+    """Return base requirements from legacy setuptools requires.txt metadata."""
+
+    environment = _marker_environment(target_version)
+    include_section = True
+    requirements: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            extra, separator, marker_text = section.partition(":")
+            if extra.strip():
+                include_section = False
+                continue
+            if not separator or not marker_text.strip():
+                include_section = True
+                continue
+            try:
+                include_section = Marker(marker_text.strip()).evaluate(environment)
+            except InvalidMarker as exc:
+                raise RuntimeError(
+                    f"invalid marker in legacy requires.txt section {line!r}"
+                ) from exc
+            continue
+        if include_section:
+            requirements.append(line)
+    return list(dict.fromkeys(requirements))
+
+
+def _archive_requirement_metadata(
+    archive_path: Path,
+) -> list[tuple[str, str]]:
+    """Read only bounded dependency metadata members from an immutable archive."""
+
+    maximum_size = 2 * 1024 * 1024
+
+    def wanted(name: str) -> bool:
+        normalized = name.replace("\\", "/").casefold()
+        return normalized.endswith(
+            (".dist-info/metadata", ".egg-info/requires.txt", "/pkg-info")
+        )
+
+    records: list[tuple[str, str]] = []
+    if archive_path.name.casefold().endswith((".zip", ".whl")):
+        with ZipFile(archive_path) as archive:
+            for member in archive.infolist():
+                if member.is_dir() or not wanted(member.filename):
+                    continue
+                if member.file_size > maximum_size:
+                    raise RuntimeError(
+                        f"dependency metadata member is too large: {member.filename!r}"
+                    )
+                records.append(
+                    (
+                        member.filename.replace("\\", "/"),
+                        archive.read(member).decode("utf-8", "replace"),
+                    )
+                )
+    else:
+        with tarfile.open(archive_path, "r:*") as archive:
+            for member in archive.getmembers():
+                if not member.isfile() or not wanted(member.name):
+                    continue
+                if member.size > maximum_size:
+                    raise RuntimeError(
+                        f"dependency metadata member is too large: {member.name!r}"
+                    )
+                stream = archive.extractfile(member)
+                if stream is None:
+                    continue
+                records.append(
+                    (
+                        member.name.replace("\\", "/"),
+                        stream.read().decode("utf-8", "replace"),
+                    )
+                )
+    return records
+
+
+def _requirements_from_distribution_archive(
+    archive_path: Path,
+    project_name: str,
+    target_version: Version,
+) -> list[str]:
+    records = _archive_requirement_metadata(archive_path)
+    normalized_project = _normalized_project_name(project_name)
+
+    def legacy_owner_matches(owner: str) -> bool:
+        """Match ``name[-version].egg-info`` without accepting name prefixes."""
+
+        if _normalized_project_name(owner) == normalized_project:
+            return True
+        project_parts = normalized_project.split("-")
+        project_pattern = r"[-_.]+".join(re.escape(part) for part in project_parts)
+        match = re.fullmatch(
+            rf"{project_pattern}[-_.]+(?P<version>.+)",
+            owner,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            return False
+        try:
+            Version(match.group("version"))
+        except InvalidVersion:
+            return False
+        return True
+
+    def owner_matches(record: tuple[str, str]) -> bool:
+        path = PurePosixPath(record[0])
+        if path.name.casefold() in {"metadata", "pkg-info"}:
+            declared_name = Parser().parsestr(record[1]).get("Name")
+            if declared_name:
+                return _normalized_project_name(declared_name) == normalized_project
+        parent = path.parent.name.casefold()
+        owner = parent.removesuffix(".egg-info").removesuffix(".dist-info")
+        return legacy_owner_matches(owner)
+
+    # Some legacy sdists vendor complete Python distributions, including their
+    # PKG-INFO.  Once metadata belonging to the requested project is present,
+    # never fall through to an unrelated vendored project's Requires-Dist.
+    # The root project may legitimately keep its dependencies only in
+    # requires.txt even when its PKG-INFO is also present.
+    owned_records = [record for record in records if owner_matches(record)]
+    if not owned_records:
+        raise RuntimeError(
+            f"distribution archive contains no dependency metadata owned by {project_name!r}"
+        )
+    ordered = sorted(
+        owned_records,
+        key=lambda record: (
+            len(PurePosixPath(record[0]).parts),
+            PurePosixPath(record[0]).as_posix().casefold(),
+        ),
+    )
+    for name, text in ordered:
+        if not name.casefold().endswith((".dist-info/metadata", "/pkg-info")):
+            continue
+        requirements = Parser().parsestr(text).get_all("Requires-Dist", [])
+        if requirements:
+            return list(dict.fromkeys(value.strip() for value in requirements if value.strip()))
+    for name, text in ordered:
+        if name.casefold().endswith(".egg-info/requires.txt"):
+            return _legacy_requires_txt_requirements(text, target_version)
+    return []
+
+
+def _pypi_archive_dependency_requirements(
+    integration: LibraryIntegration,
+    target_version: Version,
+    release_version: str,
+) -> list[str]:
+    """Recover dependencies omitted from legacy PyPI JSON using locked source metadata."""
+
+    project_name = integration.project_name or integration.name
+    candidates = _iter_pypi_candidates_for_integration(
+        integration,
+        target_version,
+        release_version,
+    )
+    matching = [
+        file_info
+        for candidate_version, file_info in candidates
+        if candidate_version == release_version and file_info.get("url")
+    ]
+    if not matching:
         return []
+    source = _pypi_candidate_source_record(matching[0])
+    cache_key = (
+        _normalized_project_name(project_name),
+        release_version,
+        str(target_version),
+        str(source["sha256"]),
+    )
+    cached = _PYPI_ARCHIVE_REQUIREMENTS_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
+
+    archive_path = (
+        DOWNLOAD_CACHE_ROOT
+        / "pypi"
+        / _normalized_project_name(project_name)
+        / release_version
+        / str(source["filename"])
+    )
+    if not archive_path.exists():
+        _download_file(str(source["url"]), archive_path)
+    digest = hashlib.sha256()
+    with archive_path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    observed_sha256 = digest.hexdigest()
+    if observed_sha256 != source["sha256"]:
+        raise RuntimeError(
+            f"PyPI dependency metadata source hash mismatch for {project_name} "
+            f"{release_version}: expected {source['sha256']}, observed {observed_sha256}"
+        )
+    requirements = _requirements_from_distribution_archive(
+        archive_path,
+        project_name,
+        target_version,
+    )
+    _PYPI_ARCHIVE_REQUIREMENTS_CACHE[cache_key] = tuple(requirements)
+    return requirements
+
+
+def _pypi_dependency_requirements_for_release(
+    integration: LibraryIntegration,
+    target_version: Version,
+    release_version: str,
+) -> list[tuple[str, str]]:
+    """Read marker-filtered dependency metadata for one immutable release."""
+
+    project_name = integration.project_name or integration.name
+    payload = _load_pypi_release_payload(project_name, release_version)
+    info = payload.get("info", {})
+    raw_requirements = info.get("requires_dist")
+    # PyPI uses null when legacy distributions never published dependency
+    # metadata. An explicit empty array is authoritative and must not trigger
+    # an archive download (or reinterpret a package that genuinely has no
+    # dependencies).
+    if raw_requirements is None:
+        raw_requirements = _pypi_archive_dependency_requirements(
+            integration,
+            target_version,
+            release_version,
+        )
+    if not isinstance(raw_requirements, list):
+        raise RuntimeError(
+            f"invalid Requires-Dist metadata for {project_name} {release_version}"
+        )
 
     environment = _marker_environment(target_version)
     resolved: list[tuple[str, str]] = []
@@ -2505,8 +2891,11 @@ def _select_compatible_pypi_release_version(
     target_version: Version,
     constraint: SpecifierSet,
 ) -> str:
-    project_name = integration.project_name or integration.name
-    for raw_version, _file_info in _iter_pypi_distribution_candidates(project_name, target_version, None):
+    for raw_version, _file_info in _iter_pypi_candidates_for_integration(
+        integration,
+        target_version,
+        None,
+    ):
         try:
             candidate = Version(raw_version)
         except InvalidVersion:
@@ -2519,7 +2908,775 @@ def _select_compatible_pypi_release_version(
     )
 
 
-def _resolve_selected_integrations(
+class _HistoricalResolutionConflict(RuntimeError):
+    def __init__(self, message: str, involved: set[str]) -> None:
+        super().__init__(message)
+        self.involved = frozenset(involved)
+
+
+@dataclass(frozen=True)
+class _HistoricalSearchFailure:
+    message: str
+    involved: frozenset[str]
+
+
+def _declared_dependency_requirements(
+    dependencies: list[str],
+    dependency_constraints: dict[str, str],
+) -> list[tuple[str, str]]:
+    constraints_by_name: dict[str, list[str]] = {}
+    display_names: dict[str, str] = {}
+    for dependency_name, raw_specifier in dependency_constraints.items():
+        normalized = _normalized_project_name(dependency_name)
+        display_names.setdefault(normalized, dependency_name)
+        if raw_specifier:
+            values = constraints_by_name.setdefault(normalized, [])
+            if raw_specifier not in values:
+                values.append(raw_specifier)
+    requirements = [
+        (
+            dependency_name,
+            ",".join(constraints_by_name.get(_normalized_project_name(dependency_name), [])),
+        )
+        for dependency_name in dependencies
+    ]
+    dependency_keys = {_normalized_project_name(name) for name in dependencies}
+    for normalized, dependency_name in display_names.items():
+        if normalized not in dependency_keys:
+            requirements.append(
+                (dependency_name, ",".join(constraints_by_name.get(normalized, [])))
+            )
+    return list(dict.fromkeys(requirements))
+
+
+def _combined_historical_constraint(
+    integration: LibraryIntegration,
+    requirements: list[tuple[str, str]],
+) -> tuple[SpecifierSet, str]:
+    specifiers = [raw_specifier for _owner, raw_specifier in requirements if raw_specifier]
+    if integration.minimum_release_version:
+        specifiers.append(f">={integration.minimum_release_version}")
+    constraint_text = ",".join(specifiers)
+    try:
+        return SpecifierSet(constraint_text), constraint_text
+    except InvalidSpecifier as exc:
+        raise RuntimeError(
+            f"invalid combined dependency constraint for {integration.name!r}: {constraint_text!r}"
+        ) from exc
+
+
+def _pypi_candidate_source_record(file_info: dict) -> dict[str, object]:
+    digests = file_info.get("digests")
+    sha256 = digests.get("sha256") if isinstance(digests, dict) else None
+    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256):
+        raise RuntimeError(
+            f"PyPI distribution {file_info.get('filename')!r} has no immutable SHA-256"
+        )
+    url = file_info.get("url")
+    filename = file_info.get("filename")
+    if not isinstance(url, str) or not url or not isinstance(filename, str) or not filename:
+        raise RuntimeError("PyPI distribution metadata is missing its filename or URL")
+    return {
+        "filename": filename,
+        "url": url,
+        "sha256": sha256.lower(),
+        "size": int(file_info.get("size") or 0),
+        "packagetype": file_info.get("packagetype"),
+        "requires_python": file_info.get("requires_python"),
+    }
+
+
+def _pypi_sdist_license_source_record(
+    integration: LibraryIntegration,
+    target_version: Version,
+    release_version: str,
+) -> dict[str, object]:
+    project_name = integration.project_name or integration.name
+    for candidate_version, file_info in _iter_pypi_distribution_candidates(
+        project_name,
+        target_version,
+        release_version,
+        source_resolver="pypi-sdist",
+    ):
+        if (
+            candidate_version == release_version
+            and file_info.get("packagetype") == "sdist"
+            and file_info.get("url")
+        ):
+            return _pypi_candidate_source_record(file_info)
+    raise RuntimeError(
+        f"pure-wheel source for {integration.name} {release_version} has no "
+        "immutable sdist license companion"
+    )
+
+
+def _locked_dependency_records(
+    lock: dict | None,
+    *,
+    target_version: Version,
+    solver: str,
+    selected_names: list[str],
+) -> dict[str, dict]:
+    if lock is None:
+        return {}
+    major = target_version.release[0]
+    minor = target_version.release[1]
+    if (
+        lock.get("schema_version") != DEPENDENCY_RESOLUTION_LOCK_SCHEMA_VERSION
+        or lock.get("kind") != "staticpython-history-dependency-lock"
+        or lock.get("solver") != solver
+        or lock.get("target_python_version") != str(target_version)
+        or lock.get("runtime_abi") != f"staticpython-pack-v1-cp{major}{minor}"
+    ):
+        raise RuntimeError("invalid historical dependency lock header")
+    roots = lock.get("roots")
+    if (
+        not isinstance(roots, list)
+        or [str(name).casefold() for name in roots] != selected_names
+    ):
+        raise RuntimeError("historical dependency lock root selection mismatch")
+    toolchain = lock.get("toolchain")
+    toolchain_fingerprint = lock.get("toolchain_fingerprint")
+    if not isinstance(toolchain, dict) or not isinstance(toolchain_fingerprint, str):
+        raise RuntimeError("historical dependency lock has no toolchain fingerprint")
+    observed_toolchain_fingerprint = hashlib.sha256(
+        json.dumps(
+            toolchain,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if toolchain_fingerprint != observed_toolchain_fingerprint:
+        raise RuntimeError("historical dependency lock toolchain fingerprint mismatch")
+    fingerprint = lock.get("solver_fingerprint")
+    unsigned = {key: value for key, value in lock.items() if key != "solver_fingerprint"}
+    expected_fingerprint = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if fingerprint != expected_fingerprint:
+        raise RuntimeError("historical dependency lock solver fingerprint mismatch")
+    raw_records = lock.get("integrations")
+    if not isinstance(raw_records, list) or not raw_records:
+        raise RuntimeError("historical dependency lock contains no integrations")
+    records: dict[str, dict] = {}
+    for record in raw_records:
+        if not isinstance(record, dict):
+            raise RuntimeError("historical dependency lock integration must be an object")
+        name = record.get("name")
+        version = record.get("version")
+        if not isinstance(name, str) or not name or not isinstance(version, str) or not version:
+            raise RuntimeError("historical dependency lock integration has no name or version")
+        key = name.casefold()
+        if key in records:
+            raise RuntimeError(f"historical dependency lock repeats integration {name!r}")
+        source = record.get("source")
+        if record.get("source_provider") == "pypi":
+            license_expression = record.get("license_expression")
+            if not isinstance(license_expression, str) or not license_expression.strip():
+                raise RuntimeError(
+                    f"historical dependency lock has no license expression for {name} {version}"
+                )
+            if not isinstance(source, dict):
+                raise RuntimeError(
+                    f"historical dependency lock has no PyPI source for {name} {version}"
+                )
+            filename = source.get("filename")
+            url = source.get("url")
+            sha256 = source.get("sha256")
+            if (
+                not isinstance(filename, str)
+                or not filename
+                or Path(filename).name != filename
+                or not isinstance(url, str)
+                or not url
+                or not isinstance(sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", sha256) is None
+            ):
+                raise RuntimeError(
+                    f"historical dependency lock has an invalid PyPI source for {name} {version}"
+                )
+            source_resolver = record.get("source_resolver")
+            license_source = record.get("license_source")
+            if source_resolver == "pypi-universal-wheel":
+                if source.get("packagetype") == "bdist_wheel":
+                    if not isinstance(license_source, dict):
+                        raise RuntimeError(
+                            f"historical dependency lock has no sdist license source "
+                            f"for pure-wheel input {name} {version}"
+                        )
+                    license_filename = license_source.get("filename")
+                    license_url = license_source.get("url")
+                    license_sha256 = license_source.get("sha256")
+                    if (
+                        not isinstance(license_filename, str)
+                        or not license_filename
+                        or Path(license_filename).name != license_filename
+                        or not isinstance(license_url, str)
+                        or not license_url
+                        or not isinstance(license_sha256, str)
+                        or re.fullmatch(r"[0-9a-f]{64}", license_sha256) is None
+                        or license_source.get("packagetype") != "sdist"
+                    ):
+                        raise RuntimeError(
+                            f"historical dependency lock has an invalid sdist license "
+                            f"source for {name} {version}"
+                        )
+        records[key] = record
+    return records
+
+
+def _historical_pypi_candidates(
+    integration: LibraryIntegration,
+    target_version: Version,
+    preferred_version: str | None,
+) -> list[tuple[str, dict]]:
+    by_version: dict[str, dict] = {}
+    for raw_version, file_info in _iter_pypi_candidates_for_integration(
+        integration,
+        target_version,
+        None,
+    ):
+        if raw_version in by_version or not file_info.get("url"):
+            continue
+        # Reject a candidate before search if it cannot be represented by an
+        # immutable source lock. PyPI currently publishes this digest for all
+        # files, but failing closed keeps historical evidence reproducible.
+        _pypi_candidate_source_record(file_info)
+        by_version[raw_version] = file_info
+
+    ordered = list(by_version)
+    if preferred_version in by_version:
+        try:
+            preferred = Version(preferred_version)
+            older = [raw for raw in ordered if Version(raw) < preferred]
+            newer = [raw for raw in reversed(ordered) if Version(raw) > preferred]
+            ordered = [preferred_version, *older, *newer]
+        except InvalidVersion:
+            ordered = [preferred_version, *[raw for raw in ordered if raw != preferred_version]]
+    return [(raw_version, by_version[raw_version]) for raw_version in ordered]
+
+
+def _historical_dependency_state(
+    *,
+    by_name: dict[str, LibraryIntegration],
+    alias_to_name: dict[str, str],
+    selected_names: list[str],
+    target_version: Version,
+    assignments: dict[str, str | None],
+    declared_dependencies: dict[str, list[str]],
+    declared_constraints: dict[str, dict[str, str]],
+    locked_dependency_records: dict[str, dict],
+) -> tuple[
+    set[str],
+    dict[str, list[str]],
+    dict[str, dict[str, str]],
+    dict[str, list[tuple[str, str]]],
+]:
+    reachable: set[str] = set()
+    dependency_graph: dict[str, list[str]] = {}
+    constraints_by_owner: dict[str, dict[str, str]] = {}
+    constraints_by_dependency: dict[str, list[tuple[str, str]]] = {}
+    stack = list(reversed(list(dict.fromkeys(selected_names))))
+    while stack:
+        name = stack.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        integration = by_name[name]
+        requirements = _declared_dependency_requirements(
+            declared_dependencies[name],
+            declared_constraints[name],
+        )
+        assigned_version = assignments.get(name)
+        locked_record = locked_dependency_records.get(name)
+        if locked_record is not None:
+            locked_dependencies = locked_record.get("dependencies")
+            locked_constraints = locked_record.get("dependency_constraints")
+            if not isinstance(locked_dependencies, list) or not isinstance(
+                locked_constraints, dict
+            ):
+                raise RuntimeError(
+                    f"historical dependency lock has invalid requirements for {integration.name}"
+                )
+            requirements.extend(
+                _declared_dependency_requirements(
+                    locked_dependencies,
+                    locked_constraints,
+                )
+            )
+        elif (
+            name in assignments
+            and assigned_version is not None
+            and integration.auto_resolve_dependencies
+            and integration.source_provider == "pypi"
+        ):
+            requirements.extend(
+                _pypi_dependency_requirements_for_release(
+                    integration,
+                    target_version,
+                    assigned_version,
+                )
+            )
+
+        dependencies: list[str] = []
+        owner_constraints: dict[str, list[str]] = {}
+        for dependency_name, raw_specifier in list(dict.fromkeys(requirements)):
+            dependency_key = _resolve_dependency_name(dependency_name, alias_to_name)
+            if dependency_key is None or dependency_key not in by_name:
+                continue
+            dependencies.append(dependency_key)
+            dependency_owners = constraints_by_dependency.setdefault(
+                dependency_key, []
+            )
+            dependency_requirement = (integration.name, raw_specifier)
+            if dependency_requirement not in dependency_owners:
+                dependency_owners.append(dependency_requirement)
+            if raw_specifier:
+                display_name = by_name[dependency_key].name
+                values = owner_constraints.setdefault(display_name, [])
+                if raw_specifier not in values:
+                    values.append(raw_specifier)
+            if dependency_key not in reachable:
+                stack.append(dependency_key)
+        dependency_graph[name] = list(dict.fromkeys(dependencies))
+        constraints_by_owner[name] = {
+            dependency_name: ",".join(specifiers)
+            for dependency_name, specifiers in owner_constraints.items()
+        }
+
+    for dependency_key in sorted(reachable):
+        if dependency_key not in assignments:
+            continue
+        assigned_version = assignments[dependency_key]
+        requirements = constraints_by_dependency.get(dependency_key, [])
+        constraint, constraint_text = _combined_historical_constraint(
+            by_name[dependency_key],
+            requirements,
+        )
+        if assigned_version is None:
+            if constraint_text:
+                owners = ", ".join(owner for owner, _raw in requirements)
+                raise _HistoricalResolutionConflict(
+                    f"cannot validate versionless dependency {by_name[dependency_key].name!r} "
+                    f"required by {owners}",
+                    {
+                        dependency_key,
+                        *(owner.casefold() for owner, _raw in requirements),
+                    },
+                )
+            continue
+        if not constraint_text and by_name[dependency_key].source_provider != "pypi":
+            # GitHub integrations may intentionally lock a branch name or
+            # commit instead of a PEP 440 release. Without a version
+            # constraint there is nothing to compare numerically.
+            continue
+        try:
+            parsed_version = Version(assigned_version)
+        except InvalidVersion as exc:
+            raise RuntimeError(
+                f"invalid release version for {by_name[dependency_key].name!r}: {assigned_version!r}"
+            ) from exc
+        if parsed_version not in constraint:
+            owners = ", ".join(owner for owner, _raw in requirements) or "the selected roots"
+            raise _HistoricalResolutionConflict(
+                f"{owners} require {by_name[dependency_key].name}{constraint}, "
+                f"but {assigned_version} is selected",
+                {
+                    dependency_key,
+                    *(owner.casefold() for owner, _raw in requirements),
+                },
+            )
+    return reachable, dependency_graph, constraints_by_owner, constraints_by_dependency
+
+
+def _resolve_selected_integrations_historically(
+    integrations: list[LibraryIntegration],
+    selected_names: list[str],
+    *,
+    target_version: Version,
+    pinned_version_names: set[str],
+    locked_dependency_records: dict[str, dict],
+) -> list[LibraryIntegration]:
+    """Solve one historical root with deterministic conflict-directed backtracking.
+
+    Current integration versions are preferences, not pins. Explicit profile
+    overrides remain immutable. Search failures carry the assignments that
+    caused them so the solver can jump past unrelated packages instead of
+    enumerating their complete cross-product. A supplied immutable lock is a
+    replay input and removes all PyPI metadata lookups from the build phase.
+    """
+
+    by_name = {integration.name.casefold(): integration for integration in integrations}
+    alias_to_name = _build_dependency_aliases(integrations)
+    catalog_order = {name: index for index, name in enumerate(by_name)}
+    declared_dependencies = {
+        name: list(integration.dependencies) for name, integration in by_name.items()
+    }
+    declared_constraints = {
+        name: dict(integration.dependency_constraints) for name, integration in by_name.items()
+    }
+    preferred_versions = {
+        name: integration.release_version for name, integration in by_name.items()
+    }
+    explicit_pins = set(pinned_version_names)
+    assignments: dict[str, str | None] = {}
+    for name in selected_names:
+        version = preferred_versions[name]
+        if version is not None:
+            assignments[name] = version
+            explicit_pins.add(name)
+    for name in sorted(explicit_pins, key=lambda item: catalog_order.get(item, len(by_name))):
+        if name in by_name:
+            assignments[name] = preferred_versions[name]
+    for name, integration in by_name.items():
+        if integration.source_provider != "pypi" and integration.release_version is not None:
+            assignments[name] = integration.release_version
+
+    candidate_cache: dict[str, list[tuple[str, dict]]] = {}
+    failed_states: dict[
+        tuple[tuple[str, str | None], ...],
+        _HistoricalSearchFailure,
+    ] = {}
+
+    def solve(
+        current: dict[str, str | None],
+    ) -> tuple[
+        dict[str, str | None],
+        set[str],
+        dict[str, list[str]],
+        dict[str, dict[str, str]],
+    ] | _HistoricalSearchFailure:
+        state_key = tuple(sorted(current.items()))
+        if state_key in failed_states:
+            return failed_states[state_key]
+        try:
+            reachable, graph, constraints_by_owner, constraints_by_dependency = (
+                _historical_dependency_state(
+                    by_name=by_name,
+                    alias_to_name=alias_to_name,
+                    selected_names=selected_names,
+                    target_version=target_version,
+                    assignments=current,
+                    declared_dependencies=declared_dependencies,
+                    declared_constraints=declared_constraints,
+                    locked_dependency_records=locked_dependency_records,
+                )
+            )
+        except _HistoricalResolutionConflict as exc:
+            failure = _HistoricalSearchFailure(str(exc), exc.involved)
+            failed_states[state_key] = failure
+            return failure
+
+        unresolved = sorted(
+            reachable - set(current),
+            key=lambda name: (
+                -len(constraints_by_dependency.get(name, [])),
+                catalog_order[name],
+            ),
+        )
+        if not unresolved:
+            return current, reachable, graph, constraints_by_owner
+
+        dependency_key = unresolved[0]
+        dependency = by_name[dependency_key]
+        requirements = constraints_by_dependency.get(dependency_key, [])
+        constraint, _constraint_text = _combined_historical_constraint(
+            dependency,
+            requirements,
+        )
+        candidates: list[tuple[str | None, dict | None]] = []
+        if dependency.source_provider == "pypi":
+            if dependency_key not in candidate_cache:
+                candidate_cache[dependency_key] = _historical_pypi_candidates(
+                    dependency,
+                    target_version,
+                    preferred_versions[dependency_key],
+                )
+            for raw_version, file_info in candidate_cache[dependency_key]:
+                try:
+                    if Version(raw_version) in constraint:
+                        candidates.append((raw_version, file_info))
+                except InvalidVersion:
+                    continue
+        else:
+            candidates.append((preferred_versions[dependency_key], None))
+
+        if not candidates:
+            owners = ", ".join(owner for owner, _raw in requirements) or "the selected roots"
+            failure = _HistoricalSearchFailure(
+                (
+                    f"no buildable stable source release of {dependency.name!r} satisfies "
+                    f"{constraint} for target Python {target_version}; required by {owners}"
+                ),
+                frozenset(
+                    {
+                        dependency_key,
+                        *(owner.casefold() for owner, _raw in requirements),
+                    }
+                ),
+            )
+            failed_states[state_key] = failure
+            return failure
+
+        candidate_failures: list[_HistoricalSearchFailure] = []
+        for raw_version, _file_info in candidates:
+            result = solve({**current, dependency_key: raw_version})
+            if not isinstance(result, _HistoricalSearchFailure):
+                return result
+            candidate_failures.append(result)
+            if dependency_key not in result.involved:
+                failed_states[state_key] = result
+                return result
+        involved = frozenset(
+            {
+                dependency_key,
+                *(owner.casefold() for owner, _raw in requirements),
+            }.union(
+                *(failure.involved for failure in candidate_failures)
+            )
+        )
+        failure = _HistoricalSearchFailure(
+            candidate_failures[-1].message,
+            involved,
+        )
+        failed_states[state_key] = failure
+        return failure
+
+    solved = solve(assignments)
+    if isinstance(solved, _HistoricalSearchFailure):
+        roots = ", ".join(by_name[name].name for name in selected_names)
+        raise RuntimeError(
+            f"historical dependency resolution failed for {roots} on Python {target_version}: "
+            f"{solved.message}"
+        )
+    final_assignments, reachable, dependency_graph, constraints_by_owner = solved
+
+    for name in reachable:
+        integration = by_name[name]
+        integration.release_version = final_assignments[name]
+        integration.dependencies = [
+            by_name[dependency_key].name
+            for dependency_key in dependency_graph.get(name, [])
+        ]
+        integration.dependency_constraints = constraints_by_owner.get(name, {})
+        source: dict[str, object] | None = None
+        license_source: dict[str, object] | None = None
+        if integration.source_provider == "pypi":
+            raw_version = integration.release_version
+            assert raw_version is not None
+            locked_record = locked_dependency_records.get(name)
+            if locked_record is not None:
+                if locked_record.get("version") != raw_version:
+                    raise RuntimeError(
+                        f"historical dependency lock selects {integration.name} "
+                        f"{locked_record.get('version')}, resolved {raw_version}"
+                    )
+                source = dict(locked_record["source"])
+                locked_resolver = locked_record.get("source_resolver")
+                if (
+                    locked_resolver is not None
+                    and locked_resolver != integration.source_resolver
+                ):
+                    raise RuntimeError(
+                        f"historical dependency lock source resolver changed for "
+                        f"{integration.name}: {locked_resolver!r} != "
+                        f"{integration.source_resolver!r}"
+                    )
+                locked_license_expression = locked_record.get("license_expression")
+                if (
+                    integration.license_expression is not None
+                    and integration.license_expression != locked_license_expression
+                ):
+                    raise RuntimeError(
+                        f"historical dependency lock license expression changed for "
+                        f"{integration.name}: {locked_license_expression!r} != "
+                        f"{integration.license_expression!r}"
+                    )
+                integration.license_expression = locked_license_expression
+                if locked_record.get("license_source") is not None:
+                    license_source = dict(locked_record["license_source"])
+            else:
+                candidates = candidate_cache.get(name)
+                if candidates is None:
+                    candidates = []
+                    for candidate_version, file_info in _iter_pypi_candidates_for_integration(
+                        integration,
+                        target_version,
+                        raw_version,
+                    ):
+                        if candidate_version == raw_version and file_info.get("url"):
+                            _pypi_candidate_source_record(file_info)
+                            candidates.append((candidate_version, file_info))
+                            break
+                    candidate_cache[name] = candidates
+                matching = [
+                    file_info for version, file_info in candidates if version == raw_version
+                ]
+                if not matching:
+                    raise RuntimeError(
+                        f"resolved PyPI release {integration.name} {raw_version} "
+                        "has no immutable source artifact"
+                    )
+                source = _pypi_candidate_source_record(matching[0])
+                if (
+                    integration.source_resolver == "pypi-universal-wheel"
+                    and source.get("packagetype") == "bdist_wheel"
+                ):
+                    license_source = _pypi_sdist_license_source_record(
+                        integration,
+                        target_version,
+                        raw_version,
+                    )
+            assert source is not None
+            expected_sha = integration.source_archive_sha256_by_version.get(raw_version)
+            if expected_sha and source["sha256"] != expected_sha.casefold():
+                raise RuntimeError(
+                    f"resolved PyPI source SHA-256 changed for {integration.name} {raw_version}: "
+                    f"expected {expected_sha}, got {source['sha256']}"
+                )
+            integration.source_archive_sha256_by_version[raw_version] = str(source["sha256"])
+        integration.dependency_resolution = {
+            "solver": HISTORICAL_DEPENDENCY_SOLVER,
+            "target_python_version": str(target_version),
+            "explicitly_pinned": name in explicit_pins,
+            "source": source,
+        }
+        if license_source is not None:
+            integration.dependency_resolution["license_source"] = license_source
+
+    for name in sorted(reachable, key=catalog_order.__getitem__):
+        integration = by_name[name]
+        for conflict in integration.conflicts:
+            conflict_key = _resolve_dependency_name(conflict, alias_to_name)
+            if conflict_key in reachable:
+                raise RuntimeError(
+                    f"library conflict: {integration.name!r} cannot be selected with "
+                    f"{by_name[conflict_key].name!r}"
+                )
+
+    return _order_integrations_by_dependency(selected_names, by_name, dependency_graph)
+
+
+def _resolve_dependency_lock_license_expression(
+    integration: LibraryIntegration,
+) -> str | None:
+    expression = integration.license_expression
+    if expression is not None:
+        if not isinstance(expression, str) or not expression.strip():
+            raise RuntimeError(
+                f"integration {integration.name!r} has an invalid license expression"
+            )
+        return expression
+    if integration.source_provider != "pypi":
+        return None
+    if integration.release_version is None:
+        raise RuntimeError(
+            f"cannot lock the license for versionless integration {integration.name!r}"
+        )
+    project_name = integration.project_name or integration.name
+    payload = _load_pypi_release_payload(project_name, integration.release_version)
+    expression = _infer_license_expression(payload.get("info", {}))
+    if expression is None:
+        raise RuntimeError(
+            f"could not resolve an immutable license expression for "
+            f"{integration.name} {integration.release_version}"
+        )
+    integration.license_expression = expression
+    return expression
+
+
+def dependency_resolution_lock(
+    integrations: list[LibraryIntegration],
+    *,
+    target_version: Version,
+    solver: str,
+    roots: list[str],
+) -> dict:
+    if not roots or any(not isinstance(name, str) or not name for name in roots):
+        raise RuntimeError("dependency resolution lock requires explicit root names")
+    available_names = {integration.name.casefold() for integration in integrations}
+    missing_roots = [name for name in roots if name.casefold() not in available_names]
+    if missing_roots:
+        raise RuntimeError(
+            "dependency resolution lock roots are missing from the closure: "
+            + ", ".join(missing_roots)
+        )
+    records: list[dict] = []
+    for integration in sorted(integrations, key=lambda item: item.name.casefold()):
+        if integration.release_version is None:
+            raise RuntimeError(
+                f"dependency resolution lock cannot record versionless integration {integration.name!r}"
+            )
+        resolution = integration.dependency_resolution
+        if resolution.get("solver") != solver:
+            raise RuntimeError(
+                f"integration {integration.name!r} has no {solver!r} resolution evidence"
+            )
+        record = {
+            "name": integration.name,
+            "project_name": integration.project_name,
+            "source_provider": integration.source_provider,
+            "version": integration.release_version,
+            "license_expression": _resolve_dependency_lock_license_expression(
+                integration
+            ),
+            "dependencies": integration.dependencies,
+            "dependency_constraints": integration.dependency_constraints,
+            "source": resolution.get("source"),
+        }
+        if integration.source_resolver == "pypi-universal-wheel":
+            record["source_resolver"] = integration.source_resolver
+        if resolution.get("license_source") is not None:
+            record["license_source"] = resolution["license_source"]
+        records.append(record)
+    major = target_version.release[0]
+    minor = target_version.release[1]
+    toolchain = {
+        "platform": "windows-x64",
+        "platform_toolset": "v143",
+        "runtime_library": "MultiThreaded",
+        "visual_studio_version": os.environ.get("VisualStudioVersion"),
+        "vscmd_version": os.environ.get("VSCMD_VER"),
+        "vc_tools_version": os.environ.get("VCToolsVersion"),
+        "windows_sdk_version": os.environ.get("WindowsSDKVersion"),
+    }
+    toolchain_fingerprint = hashlib.sha256(
+        json.dumps(
+            toolchain,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    payload = {
+        "schema_version": DEPENDENCY_RESOLUTION_LOCK_SCHEMA_VERSION,
+        "kind": "staticpython-history-dependency-lock",
+        "solver": solver,
+        "roots": roots,
+        "target_python_version": str(target_version),
+        "runtime_abi": f"staticpython-pack-v1-cp{major}{minor}",
+        "toolchain": toolchain,
+        "toolchain_fingerprint": toolchain_fingerprint,
+        "integrations": records,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {**payload, "solver_fingerprint": fingerprint}
+
+
+def _resolve_selected_integrations_greedy(
     integrations: list[LibraryIntegration],
     selected_libraries: str | list[str] | tuple[str, ...] | set[str],
     *,
@@ -2687,6 +3844,53 @@ def _resolve_selected_integrations(
     return ordered
 
 
+def _resolve_selected_integrations(
+    integrations: list[LibraryIntegration],
+    selected_libraries: str | list[str] | tuple[str, ...] | set[str],
+    *,
+    target_version: Version | None,
+    dependency_resolution_mode: str | None = None,
+    pinned_version_names: set[str] | None = None,
+    dependency_resolution_lock_payload: dict | None = None,
+) -> list[LibraryIntegration]:
+    if dependency_resolution_mode is None:
+        return _resolve_selected_integrations_greedy(
+            integrations,
+            selected_libraries,
+            target_version=target_version,
+        )
+    if dependency_resolution_mode != HISTORICAL_DEPENDENCY_SOLVER:
+        raise RuntimeError(
+            f"unsupported dependency resolution mode: {dependency_resolution_mode!r}"
+        )
+    if target_version is None:
+        raise RuntimeError("historical dependency resolution requires a target Python version")
+
+    by_name = {integration.name.casefold(): integration for integration in integrations}
+    if selected_libraries == "all":
+        selected_names = list(by_name)
+    else:
+        if not isinstance(selected_libraries, (list, tuple, set)):
+            raise RuntimeError('library selection must be "all" or a list of integration names')
+        selected_names = [str(name).casefold() for name in selected_libraries]
+    missing = sorted(set(selected_names) - set(by_name))
+    if missing:
+        raise RuntimeError("unknown libraries in config: " + ", ".join(missing))
+    locked_records = _locked_dependency_records(
+        dependency_resolution_lock_payload,
+        target_version=target_version,
+        solver=dependency_resolution_mode,
+        selected_names=selected_names,
+    )
+    return _resolve_selected_integrations_historically(
+        integrations,
+        selected_names,
+        target_version=target_version,
+        pinned_version_names=set(pinned_version_names or ()),
+        locked_dependency_records=locked_records,
+    )
+
+
 def select_integrations(
     integrations: list[LibraryIntegration],
     selected_libraries: str | list[str] | tuple[str, ...] | set[str],
@@ -2759,16 +3963,28 @@ def load_integrations(
     target_version: Version | None = None,
     version_overrides: dict[str, str] | None = None,
     library_catalog: object | None = None,
+    dependency_resolution_mode: str | None = None,
+    dependency_resolution_lock_payload: dict | None = None,
 ) -> list[LibraryIntegration]:
     integrations = load_integration_definitions(
         library_root,
         version_overrides=version_overrides,
         library_catalog=library_catalog,
     )
+    pinned_version_names: set[str] = set()
+    if version_overrides:
+        alias_to_name = _build_dependency_aliases(integrations)
+        for raw_name in version_overrides:
+            resolved = _resolve_dependency_name(raw_name, alias_to_name)
+            if resolved is not None:
+                pinned_version_names.add(resolved)
     return _resolve_selected_integrations(
         integrations,
         "all" if selected_libraries is None else selected_libraries,
         target_version=target_version,
+        dependency_resolution_mode=dependency_resolution_mode,
+        pinned_version_names=pinned_version_names,
+        dependency_resolution_lock_payload=dependency_resolution_lock_payload,
     )
 
 
